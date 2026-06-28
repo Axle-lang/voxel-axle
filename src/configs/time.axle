@@ -7,14 +7,17 @@
 // interpolates night → dusk → day.
 
 const dayLengthTicks : i32 = 14400;  // a full day in fixed ticks (~4 min @ 60 Hz)
-const dayStart : f64 = 0.30;         // start mid-morning
+const dayStart : f64 = 0.42;         // start mid-morning
 const nightLevel : f64 = 0.13;       // daylight floor at night (moonlight)
 const sunTilt : f64 = 0.35;          // sun's north/south lean (so it's not dead overhead)
 
 // ── Directional sun shadows ─────────────────────────────────
 const sunShadowReach : f64 = 30.0;   // how far (blocks) a shadow ray probes toward the sun
-const sunChunksPerTick : i32 = 8;    // chunks whose sun-shadow map is refreshed per frame
+const sunChunksPerTick : i32 = 6;    // chunks whose sun-shadow map is refreshed per frame
                                      // (round-robin → whole view refreshes in ~span²/this frames)
+const sunShadowSamples : i32 = 6;    // rays per cell over the sun disc (1 = hard, more = softer penumbra)
+const sunDiscAngle : f64 = 0.085;    // angular radius of the sun disc the rays spread over (rad);
+                                     // larger = softer, wider shadow edges (exaggerated vs the real sun)
 
 // Sky colours interpolated across the day.
 const daySkyR : i32 = 150;

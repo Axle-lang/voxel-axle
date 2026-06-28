@@ -56,6 +56,12 @@ class Renderer {
     cbz : i64,
     cbu : i64,
     cbv : i64,
+    car : i64,   // per-vertex light colour (Gouraud): input (ca*) buffers …
+    cag : i64,
+    cab : i64,
+    cbr : i64,   // … and clipped output (cb*) buffers, carried through clipNear
+    cbg : i64,
+    cbb : i64,
     obx : i64,
     oby : i64,
     obz : i64,
@@ -118,6 +124,12 @@ class Renderer {
         this.cbz = allocBytes(8 * 8);
         this.cbu = allocBytes(8 * 8);
         this.cbv = allocBytes(8 * 8);
+        this.car = allocBytes(8 * 8);
+        this.cag = allocBytes(8 * 8);
+        this.cab = allocBytes(8 * 8);
+        this.cbr = allocBytes(8 * 8);
+        this.cbg = allocBytes(8 * 8);
+        this.cbb = allocBytes(8 * 8);
         // Oriented-box world corners (8 per mob part).
         this.obx = allocBytes(8 * 8);
         this.oby = allocBytes(8 * 8);
@@ -287,6 +299,9 @@ class Renderer {
         setF64(this.cbz, o, getF64(this.caz, j) + (getF64(this.caz, i) - getF64(this.caz, j)) * t);
         setF64(this.cbu, o, getF64(this.cau, j) + (getF64(this.cau, i) - getF64(this.cau, j)) * t);
         setF64(this.cbv, o, getF64(this.cav, j) + (getF64(this.cav, i) - getF64(this.cav, j)) * t);
+        setF64(this.cbr, o, getF64(this.car, j) + (getF64(this.car, i) - getF64(this.car, j)) * t);
+        setF64(this.cbg, o, getF64(this.cag, j) + (getF64(this.cag, i) - getF64(this.cag, j)) * t);
+        setF64(this.cbb, o, getF64(this.cab, j) + (getF64(this.cab, i) - getF64(this.cab, j)) * t);
     }
 
     /**
@@ -300,6 +315,9 @@ class Renderer {
         setF64(this.cbz, o, getF64(this.caz, i));
         setF64(this.cbu, o, getF64(this.cau, i));
         setF64(this.cbv, o, getF64(this.cav, i));
+        setF64(this.cbr, o, getF64(this.car, i));
+        setF64(this.cbg, o, getF64(this.cag, i));
+        setF64(this.cbb, o, getF64(this.cab, i));
     }
 
     /**
@@ -496,9 +514,58 @@ class Renderer {
             flowV = ((lpz - lnz) as f64) * tscroll;
         }
 
-        // Load the 4 corners into camera space + their tile UVs. A water face's
-        // top corners are dropped to a Minecraft-style sloped surface: each
-        // corner takes the average height of the water columns meeting at it, so
+        // Face-direction (Lambert) shading + the directional sun shadow, shared
+        // by all 4 corners (computed once before the per-corner light below).
+        let bright : f64 = this.shadeN(nx, ny, nz);
+        if (isWaterFace && facing <= 0.0) {
+            bright = bright * 0.62;   // underside / far face of water, dimmer
+        }
+        // Directional sun shadow: if the air cell this face looks into is in the
+        // sun's cast shadow, drop toward ambient (keeping config::shadowKeep of
+        // the direct term). sunlitGet defaults to 1 for non-sky cells, so caves /
+        // roofed faces are untouched without a separate sky-light gate.
+        let sbx : i32 = x;
+        let sby : i32 = y;
+        let sbz : i32 = z;
+        if (nx > 0.5) {
+            sbx = x + 1;
+        } else if (nx < 0.0 - 0.5) {
+            sbx = x - 1;
+        }
+        if (ny > 0.5) {
+            sby = y + 1;
+        } else if (ny < 0.0 - 0.5) {
+            sby = y - 1;
+        }
+        if (nz > 0.5) {
+            sbz = z + 1;
+        } else if (nz < 0.0 - 0.5) {
+            sbz = z - 1;
+        }
+        // Soft shadow: visibility 0..255 → keep shadowKeep of the direct term in
+        // full shadow, all of it in full sun, smooth penumbra between.
+        let vis : f64 = (man.sunlitGet(sbx, sby, sbz) as f64) * 0.00392157;
+        let keepF : f64 = config::shadowKeep + (1.0 - config::shadowKeep) * vis;
+        bright = config::ambient + keepF * (bright - config::ambient);
+
+        // Warm sun / cool shade: how directly this face is in the sun (0 = full
+        // shade, 1 = full sun), scaled by daylight so night stays neutral. The
+        // sky-lit part of each corner is tinted between cool-blue shade and
+        // warm-gold sun; torch-lit parts keep their own warmth (skyShare gates).
+        let directness : f64 = 0.0;
+        if (bright > config::ambient) {
+            directness = (bright - config::ambient) / (1.0 - config::ambient);
+        }
+        let wsun : f64 = directness * this.daylight;
+        let tintR : f64 = config::shadeTintR + (config::sunTintR - config::shadeTintR) * wsun;
+        let tintG : f64 = config::shadeTintG + (config::sunTintG - config::shadeTintG) * wsun;
+        let tintB : f64 = config::shadeTintB + (config::sunTintB - config::shadeTintB) * wsun;
+
+        // Load the 4 corners into camera space + their tile UVs, and bake each
+        // corner's light colour (smooth light + AO) into the car/cag/cab inputs
+        // so clipNear interpolates colour like it does UV. A water face's top
+        // corners are dropped to a Minecraft-style sloped surface: each corner
+        // takes the average height of the water columns meeting at it, so
         // adjacent levels join in a continuous ramp with no vertical "façade"
         // gaps between layers.
         let di : i32 = dir as i32;
@@ -516,6 +583,32 @@ class Renderer {
             this.toCam(p, (x + oxv) as f64, cornerY, (z + ozv) as f64, k);
             setF64(this.cau, k, (this.uvu[q + k] as f64) + flowU);
             setF64(this.cav, k, (this.uvv[q + k] as f64) + flowV);
+            // Per-corner smooth light: sky/block nibbles averaged at bake time,
+            // through the exponential curve (sky dimmed by daylight), times the
+            // face shading and the AO factor; block light tints warm.
+            let lb : i32 = readU8(man.flight, (idx * 4 + k) as i64);
+            let skyLk : i32 = (lb >> 4) & 0xF;
+            let blkLk : i32 = lb & 0xF;
+            let aok : i32 = readU8(man.fao, (idx * 4 + k) as i64);
+            let aoFac : f64 = 1.0 - config::aoStrength * ((3 - aok) as f64) * 0.3333333;
+            let skyFk : f64 = getF64(this.lcurve, skyLk) * this.daylight;
+            let blkFk : f64 = getF64(this.lcurve, blkLk);
+            let cfk : f64 = skyFk;
+            if (blkFk > cfk) {
+                cfk = blkFk;
+            }
+            let lfac : f64 = config::lightMin + (1.0 - config::lightMin) * cfk;
+            let cbase : f64 = bright * lfac * aoFac;
+            let wf : f64 = (blkLk as f64) * 0.0667 * config::torchWarm;
+            // Warm/cool tint applies in proportion to how much SKY light (vs
+            // torch) drives this corner, so caves lit by torches stay warm.
+            let skyShare : f64 = skyFk / (skyFk + blkFk + 0.0001);
+            let tR : f64 = 1.0 + (tintR - 1.0) * skyShare;
+            let tG : f64 = 1.0 + (tintG - 1.0) * skyShare;
+            let tB : f64 = 1.0 + (tintB - 1.0) * skyShare;
+            setF64(this.car, k, cbase * (1.0 + wf) * tR);
+            setF64(this.cag, k, cbase * tG);
+            setF64(this.cab, k, cbase * (1.0 - wf) * tB);
             k = k + 1;
         }
 
@@ -523,10 +616,6 @@ class Renderer {
         let n : i32 = this.clipNear(4);
         if (n < 3) {
             return;
-        }
-        let bright : f64 = this.shadeN(nx, ny, nz);
-        if (isWaterFace && facing <= 0.0) {
-            bright = bright * 0.62;   // underside / far face of water, dimmer
         }
         let tile : i32 = packed % 256;
         // Pick the mip level from the face distance (texels per screen
@@ -573,56 +662,8 @@ class Renderer {
         if (sharp > 16.0) {
             sharp = 16.0;
         }
-        // Baked light: sky (high nibble) + block (low nibble). Open sky keeps
-        // surfaces bright; roofed-over / underground voxels go dark unless a
-        // torch lights them. shadeN gives the face-direction shading; block
-        // light tints warm.
-        let lbyte : i32 = readU8(man.flight, idx as i64);
-        let skyL : i32 = (lbyte >> 4) & 0xF;
-        let blkL : i32 = lbyte & 0xF;
-        // Directional sun shadow: a sky-lit face whose air cell is in the sun's
-        // cast shadow loses its direct-sun term and falls back to flat ambient.
-        // Only sky-lit faces (skyL > 0) — caves/roofed faces get no sun anyway.
-        if (skyL > 0) {
-            let sbx : i32 = x;
-            let sby : i32 = y;
-            let sbz : i32 = z;
-            if (nx > 0.5) {
-                sbx = x + 1;
-            } else if (nx < 0.0 - 0.5) {
-                sbx = x - 1;
-            }
-            if (ny > 0.5) {
-                sby = y + 1;
-            } else if (ny < 0.0 - 0.5) {
-                sby = y - 1;
-            }
-            if (nz > 0.5) {
-                sbz = z + 1;
-            } else if (nz < 0.0 - 0.5) {
-                sbz = z - 1;
-            }
-            if (man.sunlitGet(sbx, sby, sbz) == 0) {
-                // In shadow: drop toward ambient but keep config::shadowKeep of
-                // the direct-sun term, so cast shadows aren't flat ambient.
-                bright = config::ambient + config::shadowKeep * (bright - config::ambient);
-            }
-        }
-        // Exponential brightness curve (lcurve). Sky light is dimmed by the
-        // daylight factor (so night darkens with no re-mesh); torch/block light
-        // is not. Take the brighter of the two.
-        let skyF : f64 = getF64(this.lcurve, skyL) * this.daylight;
-        let blkF : f64 = getF64(this.lcurve, blkL);
-        let cf : f64 = skyF;
-        if (blkF > cf) {
-            cf = blkF;
-        }
-        let lfac : f64 = config::lightMin + (1.0 - config::lightMin) * cf;
-        let base : f64 = bright * lfac;
-        let wf : f64 = (blkL as f64) * 0.0667 * config::torchWarm;
-        let trr : f64 = base * (1.0 + wf);
-        let tgg : f64 = base;
-        let tbb : f64 = base * (1.0 - wf);
+        // Per-corner light colour was baked into car/cag/cab and carried through
+        // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
         let v : i32 = 0;
         while (v < n) {
             let rz2 : f64 = getF64(this.cbz, v);
@@ -632,14 +673,19 @@ class Renderer {
             v = v + 1;
         }
 
-        // Fan-triangulate the clipped polygon from vertex 0.
+        // Fan-triangulate the clipped polygon from vertex 0, passing each
+        // vertex's interpolated light colour (Gouraud smooth lighting).
         let t : i32 = 1;
         while (t < n - 1) {
             rasterTriTex(pixels, zbuf, w, h,
                 getF64(this.csx, 0), getF64(this.csy, 0), getF64(this.ciz, 0), getF64(this.cbu, 0), getF64(this.cbv, 0),
                 getF64(this.csx, t), getF64(this.csy, t), getF64(this.ciz, t), getF64(this.cbu, t), getF64(this.cbv, t),
                 getF64(this.csx, t + 1), getF64(this.csy, t + 1), getF64(this.ciz, t + 1), getF64(this.cbu, t + 1), getF64(this.cbv, t + 1),
-                this.mips, tile, lvlBase, lvlSz, lvlBase2, lvlSz2, mipFrac, sharp, trr, tgg, tbb, isWaterFace, this.skyColR, this.skyColG, this.skyColB);
+                this.mips, tile, lvlBase, lvlSz, lvlBase2, lvlSz2, mipFrac, sharp,
+                getF64(this.cbr, 0), getF64(this.cbg, 0), getF64(this.cbb, 0),
+                getF64(this.cbr, t), getF64(this.cbg, t), getF64(this.cbb, t),
+                getF64(this.cbr, t + 1), getF64(this.cbg, t + 1), getF64(this.cbb, t + 1),
+                isWaterFace, this.skyColR, this.skyColG, this.skyColB);
             t = t + 1;
         }
     }
@@ -820,6 +866,117 @@ class Renderer {
     }
 
     /**
+     * Paint an atmospheric sky over the whole framebuffer: a per-pixel gradient
+     * from a deeper zenith to a paler/warmer horizon, plus a warm glow around the
+     * sun (a broad cos⁶ halo and a tight bright core). Runs right after the flat
+     * clear (so the world's z-buffered faces overdraw it; only true sky pixels
+     * survive). The view ray for each pixel is reconstructed by inverting the
+     * camera transform, so the gradient and halo track where you look.
+     * @param p       player (camera orientation)
+     * @param pixels  framebuffer
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     */
+    fn drawSkyGradient(p : Player, pixels : i64, w : i32, h : i32) : void {
+        // Base sky colour (already day/dusk/night interpolated).
+        let baseR : f64 = this.skyColR as f64;
+        let baseG : f64 = this.skyColG as f64;
+        let baseB : f64 = this.skyColB as f64;
+        // Zenith (deep) and horizon (pale warm) endpoints derived from it.
+        let zenR : f64 = baseR * config::skyZenithR;
+        let zenG : f64 = baseG * config::skyZenithG;
+        let zenB : f64 = baseB * config::skyZenithB;
+        let lift : f64 = config::skyHorizonLift;
+        let horR : f64 = baseR + (250.0 - baseR) * lift;
+        let horG : f64 = baseG + (245.0 - baseG) * lift;
+        let horB : f64 = baseB + (235.0 - baseB) * lift;
+        let cosy : f64 = p.cosy;
+        let siny : f64 = p.siny;
+        let cosp : f64 = p.cosp;
+        let sinp : f64 = p.sinp;
+        let sX : f64 = this.sunX;
+        let sY : f64 = this.sunY;
+        let sZ : f64 = this.sunZ;
+        // Halo only when the sun is up; fades as it sets.
+        let haloFade : f64 = (sY + 0.1) * 3.0;
+        if (haloFade < 0.0) {
+            haloFade = 0.0;
+        }
+        if (haloFade > 1.0) {
+            haloFade = 1.0;
+        }
+        let py : i32 = 0;
+        while (py < h) {
+            let ndcy : f64 = (config::halfH - ((py as f64) + 0.5)) / config::focal;
+            // Camera ray (rx, ndcy, 1) → world dir, inverting toCam's rotation.
+            let rz0c : f64 = cosp - ndcy * sinp;   // depends only on row
+            let dyw : f64 = ndcy * cosp + sinp;
+            let row : i32 = py * w;
+            let px : i32 = 0;
+            while (px < w) {
+                let ndcx : f64 = (((px as f64) + 0.5) - this.hw) / config::focal;
+                let dxw : f64 = ndcx * cosy - rz0c * siny;
+                let dzw : f64 = ndcx * siny + rz0c * cosy;
+                let len : f64 = Math::sqrt(dxw * dxw + dyw * dyw + dzw * dzw);
+                if (len < 0.0001) {
+                    len = 0.0001;
+                }
+                let inv : f64 = 1.0 / len;
+                let elev : f64 = dyw * inv;        // -1 (down) .. 1 (up)
+                let t : f64 = elev;
+                if (t < 0.0) {
+                    t = 0.0;
+                }
+                if (t > 1.0) {
+                    t = 1.0;
+                }
+                // Sharper near the horizon: sqrt pushes the gradient up.
+                let ts : f64 = Math::sqrt(t);
+                let r : f64 = horR + (zenR - horR) * ts;
+                let g : f64 = horG + (zenG - horG) * ts;
+                let b : f64 = horB + (zenB - horB) * ts;
+                // Warm sun glow: cos(view, sun).
+                let sd : f64 = (dxw * sX + dyw * sY + dzw * sZ) * inv;
+                if (sd > 0.0 && haloFade > 0.0) {
+                    let s2 : f64 = sd * sd;
+                    let halo : f64 = s2 * s2 * s2 * config::skyHaloStrength * haloFade;
+                    if (sd > config::skyCoreThresh) {
+                        let cc : f64 = (sd - config::skyCoreThresh) / (1.0 - config::skyCoreThresh);
+                        halo = halo + cc * cc * haloFade;
+                    }
+                    r = r + (config::skyHaloR as f64) * halo;
+                    g = g + (config::skyHaloG as f64) * halo;
+                    b = b + (config::skyHaloB as f64) * halo;
+                }
+                let ri : i32 = Math::floorToInt(r) as i32;
+                let gi : i32 = Math::floorToInt(g) as i32;
+                let bi : i32 = Math::floorToInt(b) as i32;
+                if (ri > 255) {
+                    ri = 255;
+                }
+                if (gi > 255) {
+                    gi = 255;
+                }
+                if (bi > 255) {
+                    bi = 255;
+                }
+                if (ri < 0) {
+                    ri = 0;
+                }
+                if (gi < 0) {
+                    gi = 0;
+                }
+                if (bi < 0) {
+                    bi = 0;
+                }
+                putPixel(pixels, row + px, (ri & 0xFF) * 65536 + (gi & 0xFF) * 256 + (bi & 0xFF));
+                px = px + 1;
+            }
+            py = py + 1;
+        }
+    }
+
+    /**
      * Draw the sun (in the sun direction) and the moon (opposite) onto the
      * cleared sky, behind the world. A body is drawn while it is on/above the
      * horizon (terrain naturally occludes the part that dips below). Sizes are a
@@ -849,8 +1006,10 @@ class Renderer {
             bg = rgb(config::waterDeepR, config::waterDeepG, config::waterDeepB);
         }
         clearFrame(pixels, zbuf, w, h, bg);
-        // Sun + moon ride on the sky, behind everything (only above water).
+        // Atmospheric sky gradient + warm sun halo over the cleared frame, then
+        // the sun/moon discs ride on top — all behind the world (above water).
         if (!underwater) {
+            this.drawSkyGradient(p, pixels, w, h);
             this.drawCelestial(p, pixels, w, h);
         }
         let slots : i32 = config::span * config::span;
@@ -1101,10 +1260,10 @@ class Renderer {
 
             rasterTriTex(pixels, zbuf, w, h,
                 sx0, sy0, iz0, 0.0, 1.0, sx1, sy1, iz1, 1.0, 1.0, sx2, sy2, iz2, 1.0, 0.0,
-                this.mips, tile, 0, config::tilePx, 0, config::tilePx, 0.0, 4.0, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
+                this.mips, tile, 0, config::tilePx, 0, config::tilePx, 0.0, 4.0, tr, tg, tb, tr, tg, tb, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
             rasterTriTex(pixels, zbuf, w, h,
                 sx0, sy0, iz0, 0.0, 1.0, sx2, sy2, iz2, 1.0, 0.0, sx3, sy3, iz3, 0.0, 0.0,
-                this.mips, tile, 0, config::tilePx, 0, config::tilePx, 0.0, 4.0, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
+                this.mips, tile, 0, config::tilePx, 0, config::tilePx, 0.0, 4.0, tr, tg, tb, tr, tg, tb, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
         } else {
             let col : i32 = scaleRgb(tintIf(hurt, color), bright);
             rasterTri(pixels, zbuf, w, h, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);

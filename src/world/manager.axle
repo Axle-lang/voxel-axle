@@ -41,12 +41,20 @@ class ChunkManager {
     tcount : i32[],  // torch count per slot
     light : i64,     // per-voxel block light 0..15 (byte array, voxIdx layout)
     skylight : i64,  // per-voxel sky light 0..15 (open-to-sky exposure)
-    flight : i64,    // per-face baked light: byte packs (sky << 4) | block
-    sunlit : i64,    // per-voxel sun visibility: 1 = the sun reaches this air
-                     // cell, 0 = it's in cast shadow. Refreshed by raycasting
-                     // toward the sun (stepSunShadows); read at render to darken
-                     // shadowed sky-lit faces. Direction-dependent, so it sweeps
-                     // as the sun moves.
+    flight : i64,    // per-face SMOOTH light: 4 bytes/face, one per corner, each
+                     // packing (sky << 4) | block — averaged over the air cells
+                     // touching that corner (Minecraft-style smooth lighting)
+    fao : i64,       // per-face ambient occlusion: 4 bytes/face, one 0..3 per
+                     // corner (3 = open, 0 = deep inner corner). Multiplies the
+                     // corner's ambient at render to darken concave seams.
+    lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz).
+                     // MUST mirror Renderer.fillTable so baked corner k aligns
+                     // with the renderer's corner k.
+    sunlit : i64,    // per-voxel SOFT sun visibility 0..255: 255 = full sun,
+                     // 0 = full cast shadow, between = penumbra. Refreshed by
+                     // casting a small fan of rays over the sun's disc
+                     // (stepSunShadows → sunRaySoft); read at render to soften
+                     // shadowed sky-lit faces. Sweeps as the sun moves.
     sunCursor : i32, // round-robin slot index for the throttled shadow refresh
     ldirty : i32[],  // per-slot "light changed → re-mesh" flag
     lqx : i32[],     // block-light flood stack (add)
@@ -90,7 +98,10 @@ class ChunkManager {
         this.skylight = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunlit = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunCursor = 0;
-        this.flight = allocBytes(faceCap as i64);
+        this.flight = allocBytes((faceCap as i64) * 4);
+        this.fao = allocBytes((faceCap as i64) * 4);
+        this.lcoff = malloc<i32>(72);
+        this.fillLightTable();
         this.ldirty = malloc<i32>(slots);
         let lcap : i32 = config::lightQueueCap;
         this.lqx = malloc<i32>(lcap);
@@ -801,29 +812,169 @@ class ChunkManager {
         // dir = ftile / 256, tile = ftile % 256.
         let di : i32 = dir as i32;
         this.ftile[i] = di * 256 + tile;
-        // Bake the block light of the air cell this face looks into, so the
-        // renderer can shade the face by it (smooth-light comes later).
-        let ox : i32 = 0;
-        let oy : i32 = 0;
-        let oz : i32 = 0;
-        if (di == 0) {
-            ox = 1;
-        } else if (di == 1) {
-            ox = 0 - 1;
-        } else if (di == 2) {
-            oy = 1;
-        } else if (di == 3) {
-            oy = 0 - 1;
-        } else if (di == 4) {
-            oz = 1;
-        } else {
-            oz = 0 - 1;
-        }
-        let nbx : i32 = wx + ox;
-        let nby : i32 = wy + oy;
-        let nbz : i32 = wz + oz;
-        writeU8(this.flight, i as i64, this.skGetW(nbx, nby, nbz) * 16 + this.blGetW(nbx, nby, nbz));
+        // Bake Minecraft-style smooth light + ambient occlusion: each of the 4
+        // corners averages the light of the air cells touching it and gets an AO
+        // level from its opaque neighbours, so faces shade gradient-smooth and
+        // concave seams darken (see bakeFaceCorners).
+        this.bakeFaceCorners(i, wx, wy, wz, di);
         this.fcount[slot] = fc + 1;
+    }
+
+    /**
+     * Mirror of Renderer.fillTable's corner block offsets (the UVs are not
+     * needed here). Stored as (dir*4+k)*3 → (ox, oy, oz). Kept identical to the
+     * renderer so baked corner k lines up with the corner k it shades.
+     */
+    fn setLCorner(dir : i32, k : i32, ox : i32, oy : i32, oz : i32) : void {
+        let b : i32 = (dir * 4 + k) * 3;
+        this.lcoff[b] = ox;
+        this.lcoff[b + 1] = oy;
+        this.lcoff[b + 2] = oz;
+    }
+
+    /** Fill the face corner offset table (must match Renderer.fillTable). */
+    fn fillLightTable() : void {
+        this.setLCorner(0, 0, 1, 0, 0);
+        this.setLCorner(0, 1, 1, 0, 1);
+        this.setLCorner(0, 2, 1, 1, 1);
+        this.setLCorner(0, 3, 1, 1, 0);
+        this.setLCorner(1, 0, 0, 0, 0);
+        this.setLCorner(1, 1, 0, 1, 0);
+        this.setLCorner(1, 2, 0, 1, 1);
+        this.setLCorner(1, 3, 0, 0, 1);
+        this.setLCorner(2, 0, 0, 1, 0);
+        this.setLCorner(2, 1, 1, 1, 0);
+        this.setLCorner(2, 2, 1, 1, 1);
+        this.setLCorner(2, 3, 0, 1, 1);
+        this.setLCorner(3, 0, 0, 0, 0);
+        this.setLCorner(3, 1, 0, 0, 1);
+        this.setLCorner(3, 2, 1, 0, 1);
+        this.setLCorner(3, 3, 1, 0, 0);
+        this.setLCorner(4, 0, 0, 0, 1);
+        this.setLCorner(4, 1, 1, 0, 1);
+        this.setLCorner(4, 2, 1, 1, 1);
+        this.setLCorner(4, 3, 0, 1, 1);
+        this.setLCorner(5, 0, 0, 0, 0);
+        this.setLCorner(5, 1, 0, 1, 0);
+        this.setLCorner(5, 2, 1, 1, 0);
+        this.setLCorner(5, 3, 1, 0, 0);
+    }
+
+    /**
+     * Smooth-light + AO bake for one face's 4 corners into flight / fao.
+     * For each corner: take the air cell the face looks into (nb) plus the two
+     * edge-neighbour cells and the diagonal cell that meet at that corner, all
+     * in the nb layer. Light = average over the NON-opaque cells among them (so a
+     * lit face by a wall doesn't crater to black); AO = the classic vertex term
+     * 3-(side1+side2+corner), 0 when both sides are blocked.
+     * @param i   the global face index (slot*maxFacesPerChunk + fc)
+     * @param wx  face block world x
+     * @param wy  face block world y
+     * @param wz  face block world z
+     * @param di  the face direction (0..5)
+     */
+    fn bakeFaceCorners(i : i32, wx : i32, wy : i32, wz : i32, di : i32) : void {
+        // Normal offset to the air cell this face looks into.
+        let nox : i32 = 0;
+        let noy : i32 = 0;
+        let noz : i32 = 0;
+        if (di == 0) {
+            nox = 1;
+        } else if (di == 1) {
+            nox = 0 - 1;
+        } else if (di == 2) {
+            noy = 1;
+        } else if (di == 3) {
+            noy = 0 - 1;
+        } else if (di == 4) {
+            noz = 1;
+        } else {
+            noz = 0 - 1;
+        }
+        let nbx : i32 = wx + nox;
+        let nby : i32 = wy + noy;
+        let nbz : i32 = wz + noz;
+        // Normal axis: 0 = X (dir 0/1), 1 = Y (2/3), 2 = Z (4/5).
+        let naxis : i32 = di / 2;
+        let k : i32 = 0;
+        while (k < 4) {
+            let b : i32 = (di * 4 + k) * 3;
+            // Tangent signs from the corner block offset (0 → -1, 1 → +1).
+            let sx : i32 = this.lcoff[b] * 2 - 1;
+            let sy : i32 = this.lcoff[b + 1] * 2 - 1;
+            let sz : i32 = this.lcoff[b + 2] * 2 - 1;
+            // The two in-plane neighbour offsets t1, t2 (skip the normal axis).
+            let t1x : i32 = 0;
+            let t1y : i32 = 0;
+            let t1z : i32 = 0;
+            let t2x : i32 = 0;
+            let t2y : i32 = 0;
+            let t2z : i32 = 0;
+            if (naxis == 0) {
+                t1y = sy;
+                t2z = sz;
+            } else if (naxis == 1) {
+                t1x = sx;
+                t2z = sz;
+            } else {
+                t1x = sx;
+                t2y = sy;
+            }
+            // The 4 cells meeting at this corner, all in the nb layer.
+            let c1x : i32 = nbx + t1x;
+            let c1y : i32 = nby + t1y;
+            let c1z : i32 = nbz + t1z;
+            let c2x : i32 = nbx + t2x;
+            let c2y : i32 = nby + t2y;
+            let c2z : i32 = nbz + t2z;
+            let c3x : i32 = nbx + t1x + t2x;
+            let c3y : i32 = nby + t1y + t2y;
+            let c3z : i32 = nbz + t1z + t2z;
+            // Smooth light: average sky / block over the non-opaque cells.
+            let skSum : i32 = this.skGetW(nbx, nby, nbz);
+            let blSum : i32 = this.blGetW(nbx, nby, nbz);
+            let cnt : i32 = 1;
+            let o1 : bool = isOpaque(this.worldGet(c1x, c1y, c1z));
+            let o2 : bool = isOpaque(this.worldGet(c2x, c2y, c2z));
+            let o3 : bool = isOpaque(this.worldGet(c3x, c3y, c3z));
+            if (!o1) {
+                skSum = skSum + this.skGetW(c1x, c1y, c1z);
+                blSum = blSum + this.blGetW(c1x, c1y, c1z);
+                cnt = cnt + 1;
+            }
+            if (!o2) {
+                skSum = skSum + this.skGetW(c2x, c2y, c2z);
+                blSum = blSum + this.blGetW(c2x, c2y, c2z);
+                cnt = cnt + 1;
+            }
+            if (!o3) {
+                skSum = skSum + this.skGetW(c3x, c3y, c3z);
+                blSum = blSum + this.blGetW(c3x, c3y, c3z);
+                cnt = cnt + 1;
+            }
+            let skAvg : i32 = (skSum + cnt / 2) / cnt;
+            let blAvg : i32 = (blSum + cnt / 2) / cnt;
+            writeU8(this.flight, (i * 4 + k) as i64, skAvg * 16 + blAvg);
+            // Ambient occlusion (0..3): both sides blocked → fully dark corner.
+            let s1 : i32 = 0;
+            if (o1) {
+                s1 = 1;
+            }
+            let s2 : i32 = 0;
+            if (o2) {
+                s2 = 1;
+            }
+            let sc : i32 = 0;
+            if (o3) {
+                sc = 1;
+            }
+            let ao : i32 = 3 - (s1 + s2 + sc);
+            if (s1 == 1 && s2 == 1) {
+                ao = 0;
+            }
+            writeU8(this.fao, (i * 4 + k) as i64, ao);
+            k = k + 1;
+        }
     }
 
     /**
@@ -1391,7 +1542,7 @@ class ChunkManager {
         while (i < n) {
             writeU8(this.light, base + (i as i64), 0);
             writeU8(this.skylight, base + (i as i64), 0);
-            writeU8(this.sunlit, base + (i as i64), 1);  // lit until the shadow pass refines it
+            writeU8(this.sunlit, base + (i as i64), 255);  // fully lit until the soft-shadow pass refines it (0..255)
             i = i + 1;
         }
     }
@@ -1405,18 +1556,18 @@ class ChunkManager {
      * @param wx  world x
      * @param wy  world y
      * @param wz  world z
-     * @return 1 sunlit, 0 shadowed
+     * @return soft sun visibility 0 (shadow) .. 255 (full sun)
      */
     fn sunlitGet(wx : i32, wy : i32, wz : i32) : i32 {
         if (wy < 0 || wy >= config::worldHeight) {
-            return 1;
+            return 255;
         }
         let s : i32 = config::chunkSize;
         let cx : i32 = this.floorDiv(wx, s);
         let cz : i32 = this.floorDiv(wz, s);
         let slot : i32 = this.slotFor(cx, cz);
         if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-            return 1;
+            return 255;
         }
         return readU8(this.sunlit, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
@@ -1459,6 +1610,78 @@ class ChunkManager {
     }
 
     /**
+     * Soft sun visibility (penumbra): cast config::sunShadowSamples rays from the
+     * cell, the first straight at the sun and the rest spread over the sun's
+     * angular disc (config::sunDiscAngle), and return the fraction that reach the
+     * sun, scaled to 0..255. Because the disc rays diverge with distance, a far
+     * occluder casts a wider soft edge than a near one — real penumbra. The ring
+     * is rotated by a per-cell hash so the few samples don't band into facets.
+     * @param wx    origin air cell x
+     * @param wy    origin air cell y
+     * @param wz    origin air cell z
+     * @param sx    sun direction x (unit)
+     * @param sy    sun direction y (unit)
+     * @param sz    sun direction z (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return soft visibility 0 (full shadow) .. 255 (full sun)
+     */
+    fn sunRaySoft(wx : i32, wy : i32, wz : i32, sx : f64, sy : f64, sz : f64, ceil : i32) : i32 {
+        let n : i32 = config::sunShadowSamples;
+        if (n < 1) {
+            n = 1;
+        }
+        // Centre ray straight at the sun.
+        let total : i32 = this.sunRayClear(wx, wy, wz, sx, sy, sz, ceil);
+        if (n == 1) {
+            return total * 255;
+        }
+        // Build a basis perpendicular to the sun direction (tangent, bitangent).
+        let ux : f64 = 0.0;
+        let uy : f64 = 1.0;
+        let uz : f64 = 0.0;
+        if (sy > 0.9 || sy < 0.0 - 0.9) {
+            ux = 1.0;
+            uy = 0.0;
+            uz = 0.0;
+        }
+        let tx : f64 = uy * sz - uz * sy;
+        let ty : f64 = uz * sx - ux * sz;
+        let tz : f64 = ux * sy - uy * sx;
+        let tl : f64 = Math::sqrt(tx * tx + ty * ty + tz * tz);
+        if (tl < 0.000001) {
+            tl = 0.000001;
+        }
+        tx = tx / tl;
+        ty = ty / tl;
+        tz = tz / tl;
+        let bx : f64 = sy * tz - sz * ty;
+        let by : f64 = sz * tx - sx * tz;
+        let bz : f64 = sx * ty - sy * tx;
+        // Per-cell ring rotation so few samples don't band.
+        let hash : i32 = (wx * 1664525 + wy * 22695477 + wz * 40503) & 0x7FFFFFFF;
+        let rot : f64 = ((hash % 628) as f64) * 0.01;
+        let r : f64 = config::sunDiscAngle;
+        let cnt : i32 = 1;
+        let i : i32 = 1;
+        while (i < n) {
+            let ang : f64 = 6.2831853 * ((i - 1) as f64) / ((n - 1) as f64) + rot;
+            let ox : f64 = Math::cos(ang) * r;
+            let oy : f64 = Math::sin(ang) * r;
+            let dx : f64 = sx + tx * ox + bx * oy;
+            let dy : f64 = sy + ty * ox + by * oy;
+            let dz : f64 = sz + tz * ox + bz * oy;
+            let dl : f64 = Math::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dl < 0.000001) {
+                dl = 0.000001;
+            }
+            total = total + this.sunRayClear(wx, wy, wz, dx / dl, dy / dl, dz / dl, ceil);
+            cnt = cnt + 1;
+            i = i + 1;
+        }
+        return (total * 255) / cnt;
+    }
+
+    /**
      * Recompute sun visibility for one chunk: every sky-lit air cell in the
      * active band gets a ray cast toward the sun.
      * @param slot  the slot index
@@ -1483,7 +1706,7 @@ class ChunkManager {
                 while (y <= top) {
                     let off : i64 = this.voxIdx(slot, lx, y, lz) as i64;
                     if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.skylight, off) > 0) {
-                        writeU8(this.sunlit, off, this.sunRayClear(cx * s + lx, y, cz * s + lz, sx, sy, sz, ceil));
+                        writeU8(this.sunlit, off, this.sunRaySoft(cx * s + lx, y, cz * s + lz, sx, sy, sz, ceil));
                     }
                     y = y + 1;
                 }

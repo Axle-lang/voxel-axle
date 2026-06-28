@@ -19,3 +19,18 @@ const ambient : f64 = 0.32;  // lower = darker shadow side / cast shadows (more 
 // Fraction of the direct-sun term a cast-shadowed face keeps (0 = flat ambient /
 // fully aggressive, 1 = no shadow). Higher = softer / less aggressive shadows.
 const shadowKeep : f64 = 0.20;
+
+// ── Atmospheric sky ─────────────────────────────────────────
+// The flat sky clear is replaced by a per-pixel gradient: a deeper zenith, a
+// paler/warmer horizon, and a warm glow around the sun (a soft halo plus a
+// tight bright core). Tints multiply / lift the day/night sky colour so the
+// whole thing still tracks dawn → noon → dusk.
+const skyZenithR : f64 = 0.72;   // zenith = skyCol × these (deeper, bluer up high)
+const skyZenithG : f64 = 0.82;
+const skyZenithB : f64 = 1.04;
+const skyHorizonLift : f64 = 0.40;  // horizon fades toward a pale warm white by this much
+const skyHaloR : i32 = 255;      // warm sun-halo colour added around the sun
+const skyHaloG : i32 = 214;
+const skyHaloB : i32 = 138;
+const skyHaloStrength : f64 = 0.9;   // broad halo intensity (applied to cos⁶ around the sun)
+const skyCoreThresh : f64 = 0.9985;  // cos(view,sun) above this = the tight bright core

@@ -217,7 +217,9 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
     x0 : f64, y0 : f64, iz0 : f64, u0 : f64, v0 : f64,
     x1 : f64, y1 : f64, iz1 : f64, u1 : f64, v1 : f64,
     x2 : f64, y2 : f64, iz2 : f64, u2 : f64, v2 : f64,
-    mips : i64, tile : i32, lvlBase : i32, lvlSz : i32, lvlBase2 : i32, lvlSz2 : i32, mipFrac : f64, sharp : f64, tr : f64, tg : f64, tb : f64, wrap : bool, fogr : i32, fogg : i32, fogb : i32) : void {
+    mips : i64, tile : i32, lvlBase : i32, lvlSz : i32, lvlBase2 : i32, lvlSz2 : i32, mipFrac : f64, sharp : f64,
+    tr0 : f64, tg0 : f64, tb0 : f64, tr1 : f64, tg1 : f64, tb1 : f64, tr2 : f64, tg2 : f64, tb2 : f64,
+    wrap : bool, fogr : i32, fogg : i32, fogb : i32) : void {
     let area : f64 = edge(x0, y0, x1, y1, x2, y2);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
@@ -398,9 +400,15 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
                             gf = gf * mf + (((cc >> 8) & 0xFF) as f64) * mipFrac;
                             bf = bf * mf + ((cc & 0xFF) as f64) * mipFrac;
                         }
-                        let r : i32 = Math::floorToInt(rf * tr) as i32;
-                        let g : i32 = Math::floorToInt(gf * tg) as i32;
-                        let bl : i32 = Math::floorToInt(bf * tb) as i32;
+                        // Gouraud: per-vertex tint interpolated by the
+                        // screen-space barycentrics (low-frequency light, so
+                        // affine interpolation is fine and cheap).
+                        let trp : f64 = b0 * tr0 + b1 * tr1 + b2 * tr2;
+                        let tgp : f64 = b0 * tg0 + b1 * tg1 + b2 * tg2;
+                        let tbp : f64 = b0 * tb0 + b1 * tb1 + b2 * tb2;
+                        let r : i32 = Math::floorToInt(rf * trp) as i32;
+                        let g : i32 = Math::floorToInt(gf * tgp) as i32;
+                        let bl : i32 = Math::floorToInt(bf * tbp) as i32;
                         if (r > 255) {
                             r = 255;
                         }

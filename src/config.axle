@@ -44,6 +44,8 @@ use crate::configs::health::{
 use crate::configs::render::{
     renderDist, skyR, skyG, skyB, fogStart, fogEnd,
     lightX, lightY, lightZ, ambient, shadowKeep,
+    skyZenithR, skyZenithG, skyZenithB, skyHorizonLift,
+    skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh,
 };
 
 use crate::configs::blocks::{ Block };
@@ -115,12 +117,13 @@ use crate::configs::water::{
 };
 
 use crate::configs::light::{
-    lightQueueCap, lightMin, lightFalloff, torchWarm,
+    lightQueueCap, lightMin, lightFalloff, torchWarm, aoStrength,
+    sunTintR, sunTintG, sunTintB, shadeTintR, shadeTintG, shadeTintB,
 };
 
 use crate::configs::time::{
     dayLengthTicks, dayStart, nightLevel, sunTilt,
-    sunShadowReach, sunChunksPerTick,
+    sunShadowReach, sunChunksPerTick, sunShadowSamples, sunDiscAngle,
     daySkyR, daySkyG, daySkyB, nightSkyR, nightSkyG, nightSkyB,
     duskSkyR, duskSkyG, duskSkyB,
 };

@@ -14,3 +14,21 @@ const lightQueueCap : i32 = 65536;   // flood-fill stack capacity (cells)
 const lightMin : f64 = 0.05;
 const lightFalloff : f64 = 0.80;
 const torchWarm : f64 = 0.16;
+
+// Ambient occlusion strength for smooth lighting: how much a fully-occluded
+// face corner (AO level 0) is darkened. 0 = no AO, 1 = corner goes black at the
+// deepest seams. The bake stores 0..3 per corner; the renderer maps it to
+// 1 - aoStrength·(3-ao)/3.
+const aoStrength : f64 = 0.55;
+
+// Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
+// surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
+// skylight. The renderer blends between these by how directly a corner faces the
+// sun (and by daylight, so night stays neutral-blue moonlight). Multipliers
+// around 1.0 per channel.
+const sunTintR : f64 = 1.10;   // warm gold for full sun …
+const sunTintG : f64 = 1.02;
+const sunTintB : f64 = 0.82;
+const shadeTintR : f64 = 0.88;  // … cool blue for shade / ambient
+const shadeTintG : f64 = 0.94;
+const shadeTintB : f64 = 1.12;
