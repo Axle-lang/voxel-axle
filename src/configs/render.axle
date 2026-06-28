@@ -56,3 +56,8 @@ const bloomThreshold : f64 = 190.0;  // luminance (0..255) above which a pixel b
 const bloomStrength : f64 = 0.68;    // how strongly the blurred glow is added back
 const bloomRadius : i32 = 5;         // half-res blur radius (larger = wider glow)
 const bloomIters : i32 = 2;          // separable blur passes (smoother glow)
+
+// Worker threads for the full-screen post passes (sky gradient, god-rays,
+// bloom): each is split into this many horizontal row bands (disjoint output →
+// race-free), spawned per frame and joined. 1 = single-threaded.
+const postThreads : i32 = 4;

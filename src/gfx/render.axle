@@ -941,6 +941,15 @@ class Renderer {
      * @param h       framebuffer height
      */
     fn drawSkyGradient(p : Player, pixels : i64, w : i32, h : i32) : void {
+        // Two threads: a worker paints the top half, the main the bottom half.
+        let half : i32 = h / 2;
+        let tk : Task<i32> = spawn skyGradientJob(this, p, pixels, w, h, 0, half);
+        this.drawSkyGradientRows(p, pixels, w, h, half, h);
+        let d : i32 = tk.join();
+    }
+
+    /** Atmospheric sky for rows [y0, y1) — the parallel work unit. */
+    fn drawSkyGradientRows(p : Player, pixels : i64, w : i32, h : i32, y0 : i32, y1 : i32) : void {
         // Base sky colour (already day/dusk/night interpolated).
         let baseR : f64 = this.skyColR as f64;
         let baseG : f64 = this.skyColG as f64;
@@ -968,8 +977,8 @@ class Renderer {
         if (haloFade > 1.0) {
             haloFade = 1.0;
         }
-        let py : i32 = 0;
-        while (py < h) {
+        let py : i32 = y0;
+        while (py < y1) {
             let ndcy : f64 = (config::halfH - ((py as f64) + 0.5)) / config::focal;
             // Camera ray (rx, ndcy, 1) → world dir, inverting toCam's rotation.
             let rz0c : f64 = cosp - ndcy * sinp;   // depends only on row
@@ -1096,13 +1105,26 @@ class Renderer {
         if (expo <= 0.0) {
             return;
         }
+        // Split the rows across two threads (disjoint output rows → race-free):
+        // a worker does the top half while the main thread does the bottom half.
+        let half : i32 = h / 2;
+        let tk : Task<i32> = spawn godRaysJob(this, p, pixels, zbuf, w, h, 0, half, sunSx, sunSy, expo);
+        this.godRaysRows(p, pixels, zbuf, w, h, half, h, sunSx, sunSy, expo);
+        let d : i32 = tk.join();
+    }
+
+    /**
+     * God-rays for the screen rows [y0, y1) — the parallel work unit (see
+     * godRays, which splits the frame into row bands across worker threads).
+     */
+    fn godRaysRows(p : Player, pixels : i64, zbuf : i64, w : i32, h : i32, y0 : i32, y1 : i32, sunSx : f64, sunSy : f64, expo : f64) : void {
         let n : i32 = config::godRaySamples;
         let invN : f64 = 1.0 / (n as f64);
         let cr : f64 = config::skyHaloR as f64;
         let cg : f64 = config::skyHaloG as f64;
         let cb : f64 = config::skyHaloB as f64;
-        let y : i32 = 0;
-        while (y < h) {
+        let y : i32 = y0;
+        while (y < y1) {
             let row : i32 = y * w;
             let x : i32 = 0;
             while (x < w) {
@@ -1167,50 +1189,11 @@ class Renderer {
         }
         let dw : i32 = (w + 1) / 2;
         let dh : i32 = (h + 1) / 2;
-        let thr : f64 = config::bloomThreshold;
-        // 1) Bright extraction + 2× downsample into blR/blG/blB.
-        let dy : i32 = 0;
-        while (dy < dh) {
-            let sy0 : i32 = dy * 2;
-            let dx : i32 = 0;
-            while (dx < dw) {
-                let sx0 : i32 = dx * 2;
-                let ar : f64 = 0.0;
-                let ag : f64 = 0.0;
-                let ab : f64 = 0.0;
-                let jy : i32 = 0;
-                while (jy < 2) {
-                    let yy : i32 = sy0 + jy;
-                    if (yy < h) {
-                        let jx : i32 = 0;
-                        while (jx < 2) {
-                            let xx : i32 = sx0 + jx;
-                            if (xx < w) {
-                                let c : i32 = readI32(pixels, ((yy * w + xx) as i64) * 4);
-                                let r : f64 = ((c >> 16) & 0xFF) as f64;
-                                let g : f64 = ((c >> 8) & 0xFF) as f64;
-                                let b : f64 = (c & 0xFF) as f64;
-                                let lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
-                                if (lum > thr) {
-                                    let f : f64 = (lum - thr) / lum;
-                                    ar = ar + r * f;
-                                    ag = ag + g * f;
-                                    ab = ab + b * f;
-                                }
-                            }
-                            jx = jx + 1;
-                        }
-                    }
-                    jy = jy + 1;
-                }
-                let di : i32 = dy * dw + dx;
-                setF64(this.blR, di, ar * 0.25);
-                setF64(this.blG, di, ag * 0.25);
-                setF64(this.blB, di, ab * 0.25);
-                dx = dx + 1;
-            }
-            dy = dy + 1;
-        }
+        // 1) Bright extraction + downsample — two threads (disjoint output rows).
+        let halfD : i32 = dh / 2;
+        let te : Task<i32> = spawn bloomExtractJob(this, pixels, w, h, dw, dh, 0, halfD);
+        this.bloomExtractRows(pixels, w, h, dw, dh, halfD, dh);
+        let de : i32 = te.join();
         // 2) Separable box blur (bloomIters passes: horizontal then vertical).
         let rad : i32 = config::bloomRadius;
         let invK : f64 = 1.0 / ((2 * rad + 1) as f64);
@@ -1277,10 +1260,65 @@ class Renderer {
             }
             it = it + 1;
         }
-        // 3) Composite: add the upsampled glow over the full frame.
+        // 3) Composite the upsampled glow over the full frame — two threads.
         let st : f64 = config::bloomStrength;
-        let py : i32 = 0;
-        while (py < h) {
+        let halfH : i32 = h / 2;
+        let tc : Task<i32> = spawn bloomCompositeJob(this, pixels, w, h, dw, st, 0, halfH);
+        this.bloomCompositeRows(pixels, w, h, dw, st, halfH, h);
+        let dc : i32 = tc.join();
+    }
+
+    /** Bloom bright-extraction + downsample for half-res rows [dy0, dy1). */
+    fn bloomExtractRows(pixels : i64, w : i32, h : i32, dw : i32, dh : i32, dy0 : i32, dy1 : i32) : void {
+        let thr : f64 = config::bloomThreshold;
+        let dy : i32 = dy0;
+        while (dy < dy1) {
+            let sy0 : i32 = dy * 2;
+            let dx : i32 = 0;
+            while (dx < dw) {
+                let sx0 : i32 = dx * 2;
+                let ar : f64 = 0.0;
+                let ag : f64 = 0.0;
+                let ab : f64 = 0.0;
+                let jy : i32 = 0;
+                while (jy < 2) {
+                    let yy : i32 = sy0 + jy;
+                    if (yy < h) {
+                        let jx : i32 = 0;
+                        while (jx < 2) {
+                            let xx : i32 = sx0 + jx;
+                            if (xx < w) {
+                                let c : i32 = readI32(pixels, ((yy * w + xx) as i64) * 4);
+                                let r : f64 = ((c >> 16) & 0xFF) as f64;
+                                let g : f64 = ((c >> 8) & 0xFF) as f64;
+                                let b : f64 = (c & 0xFF) as f64;
+                                let lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
+                                if (lum > thr) {
+                                    let f : f64 = (lum - thr) / lum;
+                                    ar = ar + r * f;
+                                    ag = ag + g * f;
+                                    ab = ab + b * f;
+                                }
+                            }
+                            jx = jx + 1;
+                        }
+                    }
+                    jy = jy + 1;
+                }
+                let di : i32 = dy * dw + dx;
+                setF64(this.blR, di, ar * 0.25);
+                setF64(this.blG, di, ag * 0.25);
+                setF64(this.blB, di, ab * 0.25);
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+    }
+
+    /** Bloom composite (add upsampled glow) for full-res rows [y0, y1). */
+    fn bloomCompositeRows(pixels : i64, w : i32, h : i32, dw : i32, st : f64, y0 : i32, y1 : i32) : void {
+        let py : i32 = y0;
+        while (py < y1) {
             let row : i32 = py * w;
             let drow : i32 = (py / 2) * dw;
             let px : i32 = 0;
@@ -2093,4 +2131,33 @@ class Renderer {
         this.selEdge(pixels, zbuf, w, h, 2, 6, col);
         this.selEdge(pixels, zbuf, w, h, 3, 7, col);
     }
+}
+
+/**
+ * Worker job: god-rays for one horizontal row band, run on its own thread by
+ * the godRays driver (spawn → join). A thin wrapper so `spawn` calls a free
+ * function (the Renderer is passed explicitly).
+ * @return 0 (Task result unused)
+ */
+fn godRaysJob(r : Renderer, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32, y0 : i32, y1 : i32, sunSx : f64, sunSy : f64, expo : f64) : i32 {
+    r.godRaysRows(p, pixels, zbuf, w, h, y0, y1, sunSx, sunSy, expo);
+    return 0;
+}
+
+/** Worker job: atmospheric sky for one row band (see drawSkyGradient). */
+fn skyGradientJob(r : Renderer, p : Player, pixels : i64, w : i32, h : i32, y0 : i32, y1 : i32) : i32 {
+    r.drawSkyGradientRows(p, pixels, w, h, y0, y1);
+    return 0;
+}
+
+/** Worker job: bloom bright-extraction for one half-res row band. */
+fn bloomExtractJob(r : Renderer, pixels : i64, w : i32, h : i32, dw : i32, dh : i32, dy0 : i32, dy1 : i32) : i32 {
+    r.bloomExtractRows(pixels, w, h, dw, dh, dy0, dy1);
+    return 0;
+}
+
+/** Worker job: bloom composite for one full-res row band. */
+fn bloomCompositeJob(r : Renderer, pixels : i64, w : i32, h : i32, dw : i32, st : f64, y0 : i32, y1 : i32) : i32 {
+    r.bloomCompositeRows(pixels, w, h, dw, st, y0, y1);
+    return 0;
 }

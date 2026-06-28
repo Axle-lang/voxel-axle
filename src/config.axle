@@ -47,7 +47,7 @@ use crate::configs::render::{
     skyZenithR, skyZenithG, skyZenithB, skyHorizonLift,
     skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh, skyCoreStrength,
     godRaysOn, godRaySamples, godRayDecay, godRayWeight, godRayDensity,
-    bloomOn, bloomThreshold, bloomStrength, bloomRadius, bloomIters,
+    bloomOn, bloomThreshold, bloomStrength, bloomRadius, bloomIters, postThreads,
 };
 
 use crate::configs::blocks::{ Block };
