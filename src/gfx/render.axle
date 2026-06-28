@@ -1008,7 +1008,7 @@ class Renderer {
                     let halo : f64 = s2 * s2 * s2 * config::skyHaloStrength * haloFade;
                     if (sd > config::skyCoreThresh) {
                         let cc : f64 = (sd - config::skyCoreThresh) / (1.0 - config::skyCoreThresh);
-                        halo = halo + cc * cc * haloFade;
+                        halo = halo + cc * cc * haloFade * config::skyCoreStrength;
                     }
                     r = r + (config::skyHaloR as f64) * halo;
                     g = g + (config::skyHaloG as f64) * halo;

@@ -45,7 +45,7 @@ use crate::configs::render::{
     renderDist, skyR, skyG, skyB, fogStart, fogEnd,
     lightX, lightY, lightZ, ambient, shadowKeep,
     skyZenithR, skyZenithG, skyZenithB, skyHorizonLift,
-    skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh,
+    skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh, skyCoreStrength,
     godRaysOn, godRaySamples, godRayDecay, godRayWeight, godRayDensity,
     bloomOn, bloomThreshold, bloomStrength, bloomRadius, bloomIters,
 };

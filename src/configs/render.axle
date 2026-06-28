@@ -32,8 +32,9 @@ const skyHorizonLift : f64 = 0.40;  // horizon fades toward a pale warm white by
 const skyHaloR : i32 = 255;      // warm sun-halo colour added around the sun
 const skyHaloG : i32 = 214;
 const skyHaloB : i32 = 138;
-const skyHaloStrength : f64 = 0.9;   // broad halo intensity (applied to cos⁶ around the sun)
-const skyCoreThresh : f64 = 0.9985;  // cos(view,sun) above this = the tight bright core
+const skyHaloStrength : f64 = 0.55;  // broad halo intensity (applied to cos⁶ around the sun)
+const skyCoreThresh : f64 = 0.9992;  // cos(view,sun) above this = the tight bright core (higher = smaller)
+const skyCoreStrength : f64 = 0.45;  // brightness of that tight core (lower = less white-out when facing the sun)
 
 // ── Volumetric god-rays (crepuscular light shafts) ──────────
 // A screen-space radial scatter from the sun's projected position: each pixel
@@ -43,7 +44,7 @@ const skyCoreThresh : f64 = 0.9985;  // cos(view,sun) above this = the tight bri
 const godRaysOn : bool = true;
 const godRaySamples : i32 = 24;     // steps per pixel toward the sun
 const godRayDecay : f64 = 0.92;     // per-step attenuation of the accumulated shaft
-const godRayWeight : f64 = 0.55;    // overall shaft brightness (exposure)
+const godRayWeight : f64 = 0.42;    // overall shaft brightness (exposure)
 const godRayDensity : f64 = 0.92;   // fraction of the pixel→sun distance the march spans
 
 // ── Bloom (soft glow on bright pixels) ──────────────────────
@@ -51,7 +52,7 @@ const godRayDensity : f64 = 0.92;   // fraction of the pixel→sun distance the 
 // Extracted above a luminance threshold at half resolution, blurred, and added
 // back — gives the image a honeyed, sunlit feel without touching midtones.
 const bloomOn : bool = true;
-const bloomThreshold : f64 = 168.0;  // luminance (0..255) above which a pixel blooms
-const bloomStrength : f64 = 0.85;    // how strongly the blurred glow is added back
+const bloomThreshold : f64 = 190.0;  // luminance (0..255) above which a pixel blooms
+const bloomStrength : f64 = 0.68;    // how strongly the blurred glow is added back
 const bloomRadius : i32 = 5;         // half-res blur radius (larger = wider glow)
 const bloomIters : i32 = 2;          // separable blur passes (smoother glow)
