@@ -123,6 +123,7 @@ use crate::configs::light::{
     lightQueueCap, lightMin, lightFalloff, torchWarm, aoStrength,
     sunTintR, sunTintG, sunTintB, shadeTintR, shadeTintG, shadeTintB,
     skyAOSamples, skyAOReach, skyAOChunksPerTick, aoSkyMin,
+    bounceOn, bounceStrength,
 };
 
 use crate::configs::time::{

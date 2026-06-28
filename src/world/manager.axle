@@ -19,7 +19,7 @@
 use sdl_platform::{allocBytes, readU8, writeU8};
 use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI};
 use crate::world::biomes::registry::{biomeAt, Biomes};
-use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission};
+use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor};
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
@@ -66,6 +66,10 @@ class ChunkManager {
     hemiX : i64,     // M precomputed upper-hemisphere ray directions (sky-AO)
     hemiY : i64,
     hemiZ : i64,
+    bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
+    bnG : i64,       // 128 = neutral 1.0): the sky-AO rays that hit a surface
+    bnB : i64,       // sample its albedo, so ambient bleeds the nearby colour
+                     // (green under canopy, warm by sand). Baked with sky-AO.
     ldirty : i32[],  // per-slot "light changed → re-mesh" flag
     lqx : i32[],     // block-light flood stack (add)
     lqy : i32[],
@@ -111,6 +115,10 @@ class ChunkManager {
         this.skyaccess = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.skyAOdirty = malloc<i32>(slots);
         this.skyAOcursor = 0;
+        let volB : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64);
+        this.bnR = allocBytes(volB);
+        this.bnG = allocBytes(volB);
+        this.bnB = allocBytes(volB);
         // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
         // for the sky-access bake.
         let m : i32 = config::skyAOSamples;
@@ -1574,6 +1582,9 @@ class ChunkManager {
             writeU8(this.skylight, base + (i as i64), 0);
             writeU8(this.sunlit, base + (i as i64), 255);  // fully lit until the soft-shadow pass refines it (0..255)
             writeU8(this.skyaccess, base + (i as i64), 255);  // full sky access until the AO bake refines it
+            writeU8(this.bnR, base + (i as i64), 128);  // neutral (1.0) bounce tint until baked
+            writeU8(this.bnG, base + (i as i64), 128);
+            writeU8(this.bnB, base + (i as i64), 128);
             i = i + 1;
         }
         this.skyAOdirty[slot] = 1;  // a freshly (re)generated chunk needs a sky-AO bake
@@ -1819,11 +1830,47 @@ class ChunkManager {
     }
 
     /**
-     * March one hemisphere ray from a cell; 1 if it escapes (clears the terrain
-     * ceiling or runs the full skyAOReach unobstructed), 0 if an opaque voxel
-     * blocks it. Same scheme as sunRayClear but with the shorter AO reach.
+     * Encode a bounce tint channel: normalised colour ratio `ratio` (1.0 = grey),
+     * blended toward neutral by `occ`, stored as a byte where 128 = ×1.0.
      */
-    fn skyHemiClear(wx : i32, wy : i32, wz : i32, dx : f64, dy : f64, dz : f64, ceil : i32) : i32 {
+    fn bounceByte(ratio : f64, occ : f64) : i32 {
+        let f : f64 = 1.0 + (ratio - 1.0) * occ;
+        let v : i32 = Math::floorToInt(f * 128.0) as i32;
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 255) {
+            v = 255;
+        }
+        return v;
+    }
+
+    /**
+     * Packed one-bounce coloured tint (r<<16|g<<8|b, each 128 = ×1.0) at a world
+     * voxel; neutral grey (0x808080) out of range / unloaded.
+     */
+    fn bounceGet(wx : i32, wy : i32, wz : i32) : i32 {
+        if (wy < 0 || wy >= config::worldHeight) {
+            return 0x808080;
+        }
+        let s : i32 = config::chunkSize;
+        let cx : i32 = this.floorDiv(wx, s);
+        let cz : i32 = this.floorDiv(wz, s);
+        let slot : i32 = this.slotFor(cx, cz);
+        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
+            return 0x808080;
+        }
+        let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
+        return (readU8(this.bnR, off) << 16) | (readU8(this.bnG, off) << 8) | readU8(this.bnB, off);
+    }
+
+    /**
+     * March one hemisphere ray from a cell; returns -1 if it escapes (clears the
+     * terrain ceiling or runs the full skyAOReach unobstructed), else the packed
+     * albedo of the opaque voxel it hits. The caller derives sky access from the
+     * escapes and the coloured bounce from the hit albedos.
+     */
+    fn skyHemiHit(wx : i32, wy : i32, wz : i32, dx : f64, dy : f64, dz : f64, ceil : i32) : i32 {
         let ox : f64 = (wx as f64) + 0.5;
         let oy : f64 = (wy as f64) + 0.5;
         let oz : f64 = (wz as f64) + 0.5;
@@ -1831,18 +1878,19 @@ class ChunkManager {
         while (t < config::skyAOReach) {
             let cy : i32 = Math::floorToInt(oy + dy * t) as i32;
             if (cy > ceil) {
-                return 1;
+                return 0 - 1;
             }
             if (cy >= 0 && cy < config::worldHeight) {
                 let cx : i32 = Math::floorToInt(ox + dx * t) as i32;
                 let cz : i32 = Math::floorToInt(oz + dz * t) as i32;
-                if (isOpaque(this.worldGet(cx, cy, cz))) {
-                    return 0;
+                let hb : Block = this.worldGet(cx, cy, cz);
+                if (isOpaque(hb)) {
+                    return albedoFor(hb);
                 }
             }
             t = t + 0.7;
         }
-        return 1;
+        return 0 - 1;
     }
 
     /**
@@ -1873,12 +1921,44 @@ class ChunkManager {
                         let wx : i32 = cx * s + lx;
                         let wz : i32 = cz * s + lz;
                         let esc : i32 = 0;
+                        let hits : i32 = 0;
+                        let ar : i32 = 0;
+                        let ag : i32 = 0;
+                        let ab : i32 = 0;
                         let r : i32 = 0;
                         while (r < m) {
-                            esc = esc + this.skyHemiClear(wx, y, wz, getF64(this.hemiX, r), getF64(this.hemiY, r), getF64(this.hemiZ, r), ceil);
+                            let hit : i32 = this.skyHemiHit(wx, y, wz, getF64(this.hemiX, r), getF64(this.hemiY, r), getF64(this.hemiZ, r), ceil);
+                            if (hit < 0) {
+                                esc = esc + 1;
+                            } else {
+                                ar = ar + ((hit >> 16) & 0xFF);
+                                ag = ag + ((hit >> 8) & 0xFF);
+                                ab = ab + (hit & 0xFF);
+                                hits = hits + 1;
+                            }
                             r = r + 1;
                         }
                         writeU8(this.skyaccess, off, (esc * 255) / m);
+                        // One-bounce coloured tint: average hit albedo, normalised
+                        // to luminance 1 (hue only — brightness is the sky-AO's
+                        // job), blended toward neutral by how occluded the cell is.
+                        if (config::bounceOn && hits > 0) {
+                            let avr : f64 = (ar as f64) / (hits as f64);
+                            let avg : f64 = (ag as f64) / (hits as f64);
+                            let avb : f64 = (ab as f64) / (hits as f64);
+                            let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
+                            if (lum < 1.0) {
+                                lum = 1.0;
+                            }
+                            let occ : f64 = (hits as f64) / (m as f64) * config::bounceStrength;
+                            writeU8(this.bnR, off, this.bounceByte(avr / lum, occ));
+                            writeU8(this.bnG, off, this.bounceByte(avg / lum, occ));
+                            writeU8(this.bnB, off, this.bounceByte(avb / lum, occ));
+                        } else {
+                            writeU8(this.bnR, off, 128);
+                            writeU8(this.bnG, off, 128);
+                            writeU8(this.bnB, off, 128);
+                        }
                     }
                     y = y + 1;
                 }

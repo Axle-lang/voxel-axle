@@ -43,3 +43,9 @@ const skyAOSamples : i32 = 10;
 const skyAOReach : f64 = 14.0;
 const skyAOChunksPerTick : i32 = 3;
 const aoSkyMin : f64 = 0.45;
+
+// One-bounce coloured indirect light (GI tint): the sky-AO rays that hit a
+// surface sample its albedo, so ambient bleeds the nearby colour (green under
+// canopy, warm by sand/wood). Hue-only (brightness stays the sky-AO's job).
+const bounceOn : bool = true;
+const bounceStrength : f64 = 0.5;   // how strongly surrounding colour tints ambient (0 = off)

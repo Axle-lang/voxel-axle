@@ -211,6 +211,36 @@ fn materialOf(id : Block) : AudioMaterial {
 }
 
 /**
+ * Approximate surface albedo of a block, used for one-bounce coloured indirect
+ * light (the sky-AO rays sample the colour of what they hit). Grouped by family
+ * so a ray that lands on grass tints the bounce green, on sand warm, etc.
+ * @param id  the block
+ * @return packed rgb albedo
+ */
+fn albedoFor(id : Block) : i32 {
+    if (isGrassy(id)) {
+        return rgb(112, 150, 72);
+    }
+    if (isLeaves(id)) {
+        return rgb(84, 122, 56);
+    }
+    return match id {
+        Block::Dirt | Block::CoarseDirt | Block::Podzol | Block::Mycelium => rgb(122, 92, 62),
+        Block::Sand | Block::Sandstone => rgb(206, 188, 138),
+        Block::RedSand | Block::RedSandstone => rgb(182, 112, 66),
+        Block::Snow => rgb(236, 240, 246),
+        Block::Ice | Block::PackedIce => rgb(168, 200, 224),
+        Block::Wood | Block::WoodBirch | Block::WoodSpruce | Block::WoodAcacia
+            | Block::WoodJungle | Block::WoodDarkOak | Block::Planks | Block::Bamboo
+            | Block::CherryLog => rgb(140, 106, 66),
+        Block::Pumpkin | Block::Melon => rgb(196, 134, 48),
+        Block::Clay => rgb(160, 164, 172),
+        // Stone, cobble, granite/diorite/andesite, bricks, terracotta, ores, etc.
+        _ => rgb(138, 138, 138),
+    };
+}
+
+/**
  * Atlas tile for a block on face `dir` (top / bottom get their own tile on
  * many blocks; the four sides share one).
  * @param id   the block
