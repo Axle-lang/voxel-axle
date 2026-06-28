@@ -181,43 +181,76 @@ fn buildMipChain(atlas : i64, mips : i64) : void {
 }
 
 /**
- * Textured triangle: perspective-correct UV sampling of an atlas tile at
- * mip level `lvlBase`/`lvlSz` (offset + side length, chosen by the caller
- * from the face's distance). Each channel scaled by its own multiplier
- * (`tr`, `tg`, `tb`): equal = brightness, unequal = a tint (hurt flash).
- * @param pixels   framebuffer base pointer.
- * @param zbuf     z-buffer base pointer.
- * @param w        framebuffer width.
- * @param h        framebuffer height.
- * @param x0       first vertex x.
- * @param y0       first vertex y.
- * @param iz0      first vertex inverse depth.
- * @param u0       first vertex u.
- * @param v0       first vertex v.
- * @param x1       second vertex x.
- * @param y1       second vertex y.
- * @param iz1      second vertex inverse depth.
- * @param u1       second vertex u.
- * @param v1       second vertex v.
- * @param x2       third vertex x.
- * @param y2       third vertex y.
- * @param iz2      third vertex inverse depth.
- * @param u2       third vertex u.
- * @param v2       third vertex v.
- * @param mips     the mip chain buffer.
- * @param tile     the atlas tile index.
- * @param lvlBase  texel offset of the chosen mip level.
- * @param lvlSz    tile side length of the chosen mip level.
- * @param sharp    output pixels per texel (>=1); larger = crisper edge.
- * @param tr       red channel multiplier.
- * @param tg       green channel multiplier.
- * @param tb       blue channel multiplier.
+ * Bilinear sample of one atlas tile at a given mip level, returning packed rgb.
+ * Used for the anisotropic minification taps.
+ * @param mips     the mip chain buffer
+ * @param lvlBase  texel offset of the mip level
+ * @param lvlSz    tile side length of the mip level
+ * @param tile     atlas tile index
+ * @param u        tile u (0..1, may exceed when wrapping)
+ * @param v        tile v
+ * @param wrap     wrap within the tile (scrolled water) vs clamp
+ * @return packed rgb of the bilinear sample
+ */
+fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f64, wrap : bool) : i32 {
+    let tmax : i32 = lvlSz - 1;
+    let tbase : i32 = tile * lvlSz;
+    let fu : f64 = u * (lvlSz as f64) - 0.5;
+    let fv : f64 = v * (lvlSz as f64) - 0.5;
+    let tx0 : i32 = Math::floorToInt(fu) as i32;
+    let ty0 : i32 = Math::floorToInt(fv) as i32;
+    let fx : f64 = fu - (tx0 as f64);
+    let fy : f64 = fv - (ty0 as f64);
+    let tx1 : i32 = tx0 + 1;
+    let ty1 : i32 = ty0 + 1;
+    if (wrap) {
+        tx0 = tx0 & tmax;
+        tx1 = tx1 & tmax;
+        ty0 = ty0 & tmax;
+        ty1 = ty1 & tmax;
+    } else {
+        if (tx0 < 0) { tx0 = 0; } else if (tx0 > tmax) { tx0 = tmax; }
+        if (tx1 < 0) { tx1 = 0; } else if (tx1 > tmax) { tx1 = tmax; }
+        if (ty0 < 0) { ty0 = 0; } else if (ty0 > tmax) { ty0 = tmax; }
+        if (ty1 < 0) { ty1 = 0; } else if (ty1 > tmax) { ty1 = tmax; }
+    }
+    let rw0 : i32 = lvlBase + (tbase + ty0) * lvlSz;
+    let rw1 : i32 = lvlBase + (tbase + ty1) * lvlSz;
+    let c00 : i32 = readI32(mips, ((rw0 + tx0) as i64) * 4);
+    let c10 : i32 = readI32(mips, ((rw0 + tx1) as i64) * 4);
+    let c01 : i32 = readI32(mips, ((rw1 + tx0) as i64) * 4);
+    let c11 : i32 = readI32(mips, ((rw1 + tx1) as i64) * 4);
+    let mfx : f64 = 1.0 - fx;
+    let mfy : f64 = 1.0 - fy;
+    let w00 : f64 = mfx * mfy;
+    let w10 : f64 = fx * mfy;
+    let w01 : f64 = mfx * fy;
+    let w11 : f64 = fx * fy;
+    let rr : i32 = Math::floorToInt((((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11) as i32;
+    let gg : i32 = Math::floorToInt((((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11) as i32;
+    let bb : i32 = Math::floorToInt(((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11) as i32;
+    return rr * 65536 + gg * 256 + bb;
+}
+
+/**
+ * Textured triangle with proper texture filtering: crisp **sharp-bilinear** when
+ * the texture is magnified (near), and true **anisotropic filtering** when
+ * minified (distance / oblique ground) — the mip is chosen from the LESS
+ * compressed screen axis and several taps are averaged along the MORE compressed
+ * one, so distant surfaces stay sharp instead of smearing to a blurry mush. The
+ * per-pixel screen-space UV derivatives come from the triangle's constant
+ * gradients of (u/z, v/z, 1/z). Each channel is scaled by its own per-vertex
+ * multiplier (Gouraud light colour).
+ * @param mips    the mip chain buffer
+ * @param tile    atlas tile index
+ * @param mipOff  i32[mipLevels] of each mip level's texel offset (1 build cost)
+ * @param mipSz   i32[mipLevels] of each mip level's tile side length
  */
 fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
     x0 : f64, y0 : f64, iz0 : f64, u0 : f64, v0 : f64,
     x1 : f64, y1 : f64, iz1 : f64, u1 : f64, v1 : f64,
     x2 : f64, y2 : f64, iz2 : f64, u2 : f64, v2 : f64,
-    mips : i64, tile : i32, lvlBase : i32, lvlSz : i32, lvlBase2 : i32, lvlSz2 : i32, mipFrac : f64, sharp : f64,
+    mips : i64, tile : i32, mipOff : i64, mipSz : i64,
     tr0 : f64, tg0 : f64, tb0 : f64, tr1 : f64, tg1 : f64, tb1 : f64, tr2 : f64, tg2 : f64, tb2 : f64,
     wrap : bool, fogr : i32, fogg : i32, fogb : i32) : void {
     let area : f64 = edge(x0, y0, x1, y1, x2, y2);
@@ -264,15 +297,22 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
     let e1row : f64 = edge(x2, y2, x0, y0, cx0, cy0);
     let e2row : f64 = edge(x0, y0, x1, y1, cx0, cy0);
 
-    // Hoist the tile constants; the inner pixel does raw pointer loads /
-    // stores and a single reciprocal instead of per-pixel `getF64` /
-    // `setF64` / `putPixel` / `readI32` calls and two divides.
-    let tf : f64 = lvlSz as f64;
-    let tmax : i32 = lvlSz - 1;
-    let tbase : i32 = tile * lvlSz;
-    // Sharp-bilinear edge half-width: a function of `sharp` only, so it is
-    // constant for the whole triangle — hoist it out of the per-pixel loop.
-    let rrs : f64 = 0.5 - 0.5 / sharp;
+    // Triangle-constant screen-space gradients of the perspective attributes
+    // (u/z, v/z, 1/z): linear in screen x/y, so they're constant per triangle.
+    // Each pixel derives its UV footprint (du/dx … dv/dy) from these to choose
+    // the mip level and the anisotropic tap count.
+    let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * inv;
+    let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * inv;
+    let gizx : f64 = (ax0 * iz0 + ax1 * iz1 + ax2 * iz2) * inv;
+    let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * inv;
+    let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * inv;
+    let gizy : f64 = (ay0 * iz0 + ay1 * iz1 + ay2 * iz2) * inv;
+    let tp : f64 = config::tilePx as f64;
+    let maxMip : i32 = config::mipLevels - 1;
+    // Magnification (near) path: crisp sharp-bilinear at mip 0.
+    let tf : f64 = tp;
+    let tmax : i32 = config::tilePx - 1;
+    let tbase : i32 = tile * config::tilePx;
 
     let py : i32 = miny;
     while (py <= maxy) {
@@ -294,111 +334,139 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
                         let invz : f64 = 1.0 / izp;
                         let u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
                         let v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
-                        // Sharp-bilinear: keep each texel crisp (HD pixel
-                        // look) but anti-alias only the ~1px edge between
-                        // texels, so textures don't blur yet don't "swim"
-                        // diagonally as the camera turns. `sharp` = output
-                        // pixels per texel (≥1); larger = crisper edge.
-                        let fu0 : f64 = u * tf;
-                        let fv0 : f64 = v * tf;
-                        let flx : f64 = Math::floorToInt(fu0) as f64;
-                        let cdx0 : f64 = fu0 - flx - 0.5;
-                        let ccx0 : f64 = cdx0;
-                        if (ccx0 > rrs) {
-                            ccx0 = rrs;
-                        } else if (ccx0 < 0.0 - rrs) {
-                            ccx0 = 0.0 - rrs;
+                        // Per-pixel UV footprint in full-res texels: the screen-x
+                        // and screen-y derivatives of (u,v). Their lengths give
+                        // texels-per-pixel along each screen axis; the smaller is
+                        // the minor axis (sets the mip), the larger the major
+                        // (sets the anisotropic tap count).
+                        let dudx : f64 = (guwx - u * gizx) * invz;
+                        let dvdx : f64 = (gvwx - v * gizx) * invz;
+                        let dudy : f64 = (guwy - u * gizy) * invz;
+                        let dvdy : f64 = (gvwy - v * gizy) * invz;
+                        let exx : f64 = dudx * tp;
+                        let eyx : f64 = dvdx * tp;
+                        let exy : f64 = dudy * tp;
+                        let eyy : f64 = dvdy * tp;
+                        let px2 : f64 = exx * exx + eyx * eyx;
+                        let py2 : f64 = exy * exy + eyy * eyy;
+                        let minor2 : f64 = px2;
+                        let major2 : f64 = py2;
+                        if (py2 < px2) {
+                            minor2 = py2;
+                            major2 = px2;
                         }
-                        let fu : f64 = flx + (cdx0 - ccx0) * sharp;
-                        let fly : f64 = Math::floorToInt(fv0) as f64;
-                        let cdy0 : f64 = fv0 - fly - 0.5;
-                        let ccy0 : f64 = cdy0;
-                        if (ccy0 > rrs) {
-                            ccy0 = rrs;
-                        } else if (ccy0 < 0.0 - rrs) {
-                            ccy0 = 0.0 - rrs;
-                        }
-                        let fv : f64 = fly + (cdy0 - ccy0) * sharp;
-                        let tx0 : i32 = Math::floorToInt(fu) as i32;
-                        let ty0 : i32 = Math::floorToInt(fv) as i32;
-                        let fx : f64 = fu - (tx0 as f64);
-                        let fy : f64 = fv - (ty0 as f64);
-                        let tx1 : i32 = tx0 + 1;
-                        let ty1 : i32 = ty0 + 1;
-                        if (wrap) {
-                            // Wrap within the (power-of-two) tile so scrolled
-                            // UVs actually repeat — used for flowing water.
-                            tx0 = tx0 & tmax;
-                            tx1 = tx1 & tmax;
-                            ty0 = ty0 & tmax;
-                            ty1 = ty1 & tmax;
-                        } else {
-                            if (tx0 < 0) {
-                                tx0 = 0;
-                            } else if (tx0 > tmax) {
-                                tx0 = tmax;
+                        let rf : f64 = 0.0;
+                        let gf : f64 = 0.0;
+                        let bf : f64 = 0.0;
+                        if (minor2 <= 1.0) {
+                            // ── Magnification (near): crisp sharp-bilinear, mip 0 ──
+                            let sharp : f64 = 16.0;
+                            if (minor2 > 0.0000001) {
+                                sharp = 1.0 / Math::sqrt(minor2);
                             }
-                            if (tx1 < 0) {
-                                tx1 = 0;
-                            } else if (tx1 > tmax) {
-                                tx1 = tmax;
+                            if (sharp < 1.0) {
+                                sharp = 1.0;
                             }
-                            if (ty0 < 0) {
-                                ty0 = 0;
-                            } else if (ty0 > tmax) {
-                                ty0 = tmax;
+                            if (sharp > 16.0) {
+                                sharp = 16.0;
                             }
-                            if (ty1 < 0) {
-                                ty1 = 0;
-                            } else if (ty1 > tmax) {
-                                ty1 = tmax;
+                            let rrs : f64 = 0.5 - 0.5 / sharp;
+                            let fu0 : f64 = u * tf;
+                            let fv0 : f64 = v * tf;
+                            let flx : f64 = Math::floorToInt(fu0) as f64;
+                            let cdx0 : f64 = fu0 - flx - 0.5;
+                            let ccx0 : f64 = cdx0;
+                            if (ccx0 > rrs) {
+                                ccx0 = rrs;
+                            } else if (ccx0 < 0.0 - rrs) {
+                                ccx0 = 0.0 - rrs;
                             }
-                        }
-                        let rw0 : i32 = lvlBase + (tbase + ty0) * lvlSz;
-                        let rw1 : i32 = lvlBase + (tbase + ty1) * lvlSz;
-                        let c00 : i32 = *((mips + ((rw0 + tx0) as i64) * 4) as ptr<i32>);
-                        let c10 : i32 = *((mips + ((rw0 + tx1) as i64) * 4) as ptr<i32>);
-                        let c01 : i32 = *((mips + ((rw1 + tx0) as i64) * 4) as ptr<i32>);
-                        let c11 : i32 = *((mips + ((rw1 + tx1) as i64) * 4) as ptr<i32>);
-                        let mfx : f64 = 1.0 - fx;
-                        let mfy : f64 = 1.0 - fy;
-                        let w00 : f64 = mfx * mfy;
-                        let w10 : f64 = fx * mfy;
-                        let w01 : f64 = mfx * fy;
-                        let w11 : f64 = fx * fy;
-                        let rf : f64 = (((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11;
-                        let gf : f64 = (((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11;
-                        let bf : f64 = ((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11;
-                        // Trilinear: blend in the next-coarser mip (point
-                        // sampled) by the fractional level, so the mip
-                        // transition is smooth at distance instead of a hard
-                        // seam that "swims" as the camera moves. Skipped near
-                        // (mipFrac == 0), so close faces pay nothing.
-                        if (mipFrac > 0.0) {
-                            let cmax : i32 = lvlSz2 - 1;
-                            let ctb : i32 = tile * lvlSz2;
-                            let cux : i32 = Math::floorToInt(u * (lvlSz2 as f64)) as i32;
-                            let cvy : i32 = Math::floorToInt(v * (lvlSz2 as f64)) as i32;
+                            let fu : f64 = flx + (cdx0 - ccx0) * sharp;
+                            let fly : f64 = Math::floorToInt(fv0) as f64;
+                            let cdy0 : f64 = fv0 - fly - 0.5;
+                            let ccy0 : f64 = cdy0;
+                            if (ccy0 > rrs) {
+                                ccy0 = rrs;
+                            } else if (ccy0 < 0.0 - rrs) {
+                                ccy0 = 0.0 - rrs;
+                            }
+                            let fv : f64 = fly + (cdy0 - ccy0) * sharp;
+                            let tx0 : i32 = Math::floorToInt(fu) as i32;
+                            let ty0 : i32 = Math::floorToInt(fv) as i32;
+                            let fx : f64 = fu - (tx0 as f64);
+                            let fy : f64 = fv - (ty0 as f64);
+                            let tx1 : i32 = tx0 + 1;
+                            let ty1 : i32 = ty0 + 1;
                             if (wrap) {
-                                cux = cux & cmax;
-                                cvy = cvy & cmax;
+                                tx0 = tx0 & tmax;
+                                tx1 = tx1 & tmax;
+                                ty0 = ty0 & tmax;
+                                ty1 = ty1 & tmax;
                             } else {
-                                if (cux < 0) {
-                                    cux = 0;
-                                } else if (cux > cmax) {
-                                    cux = cmax;
-                                }
-                                if (cvy < 0) {
-                                    cvy = 0;
-                                } else if (cvy > cmax) {
-                                    cvy = cmax;
-                                }
+                                if (tx0 < 0) { tx0 = 0; } else if (tx0 > tmax) { tx0 = tmax; }
+                                if (tx1 < 0) { tx1 = 0; } else if (tx1 > tmax) { tx1 = tmax; }
+                                if (ty0 < 0) { ty0 = 0; } else if (ty0 > tmax) { ty0 = tmax; }
+                                if (ty1 < 0) { ty1 = 0; } else if (ty1 > tmax) { ty1 = tmax; }
                             }
-                            let cc : i32 = *((mips + ((lvlBase2 + (ctb + cvy) * lvlSz2 + cux) as i64) * 4) as ptr<i32>);
-                            let mf : f64 = 1.0 - mipFrac;
-                            rf = rf * mf + (((cc >> 16) & 0xFF) as f64) * mipFrac;
-                            gf = gf * mf + (((cc >> 8) & 0xFF) as f64) * mipFrac;
-                            bf = bf * mf + ((cc & 0xFF) as f64) * mipFrac;
+                            let rw0 : i32 = (tbase + ty0) * config::tilePx;
+                            let rw1 : i32 = (tbase + ty1) * config::tilePx;
+                            let c00 : i32 = *((mips + ((rw0 + tx0) as i64) * 4) as ptr<i32>);
+                            let c10 : i32 = *((mips + ((rw0 + tx1) as i64) * 4) as ptr<i32>);
+                            let c01 : i32 = *((mips + ((rw1 + tx0) as i64) * 4) as ptr<i32>);
+                            let c11 : i32 = *((mips + ((rw1 + tx1) as i64) * 4) as ptr<i32>);
+                            let mfx : f64 = 1.0 - fx;
+                            let mfy : f64 = 1.0 - fy;
+                            let w00 : f64 = mfx * mfy;
+                            let w10 : f64 = fx * mfy;
+                            let w01 : f64 = mfx * fy;
+                            let w11 : f64 = fx * fy;
+                            rf = (((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11;
+                            gf = (((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11;
+                            bf = ((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11;
+                        } else {
+                            // ── Minification (distance): anisotropic filtering ──
+                            // Mip from the minor axis (with a sharpening bias), then
+                            // average N bilinear taps along the major axis so oblique
+                            // distant surfaces stay sharp without shimmering.
+                            let m2 : f64 = minor2 * config::mipBias;
+                            let mip : i32 = 0;
+                            let lim : f64 = 4.0;
+                            while (mip < maxMip && m2 >= lim) {
+                                lim = lim * 4.0;
+                                mip = mip + 1;
+                            }
+                            let lvlBase : i32 = readI32(mipOff, (mip as i64) * 4);
+                            let lvlSz : i32 = readI32(mipSz, (mip as i64) * 4);
+                            let ratio : f64 = Math::sqrt(major2 / minor2);
+                            let nN : i32 = Math::floorToInt(ratio + 0.5) as i32;
+                            if (nN < 1) {
+                                nN = 1;
+                            }
+                            if (nN > config::maxAniso) {
+                                nN = config::maxAniso;
+                            }
+                            let mju : f64 = dudx;
+                            let mjv : f64 = dvdx;
+                            if (py2 > px2) {
+                                mju = dudy;
+                                mjv = dvdy;
+                            }
+                            let sr : f64 = 0.0;
+                            let sg : f64 = 0.0;
+                            let sb : f64 = 0.0;
+                            let i : i32 = 0;
+                            while (i < nN) {
+                                let tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
+                                let c : i32 = sampleTile(mips, lvlBase, lvlSz, tile, u + mju * tt, v + mjv * tt, wrap);
+                                sr = sr + (((c >> 16) & 0xFF) as f64);
+                                sg = sg + (((c >> 8) & 0xFF) as f64);
+                                sb = sb + ((c & 0xFF) as f64);
+                                i = i + 1;
+                            }
+                            let invN : f64 = 1.0 / (nN as f64);
+                            rf = sr * invN;
+                            gf = sg * invN;
+                            bf = sb * invN;
                         }
                         // Gouraud: per-vertex tint interpolated by the
                         // screen-space barycentrics (low-frequency light, so

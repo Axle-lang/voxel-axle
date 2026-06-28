@@ -13,6 +13,13 @@ const useMobTextures : bool = true;
 // Mip chain depth (64 → 32 → … → 1 = 7 levels). Distant faces sample a
 // coarser, pre-averaged level so textures don't shimmer when moving.
 const mipLevels : i32 = 7;
+// Texture filtering: the rasteriser picks the mip from the LESS compressed
+// screen axis and averages `maxAniso` taps along the MORE compressed one
+// (anisotropic filtering) — this is what keeps oblique distant ground crisp
+// instead of a blurry mush. `mipBias` < 1 sharpens (delays the mip step);
+// lower = sharper but more shimmer.
+const maxAniso : i32 = 8;
+const mipBias : f64 = 0.5;
 
 // ── Block tiles (0 .. blockTiles-1) ─────────────────────────
 const tlGrassTop : i32 = 0;

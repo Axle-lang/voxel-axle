@@ -83,7 +83,7 @@ use crate::configs::hud::{
 };
 
 use crate::configs::atlas::{
-    tilePx, blockTiles, atlasTiles, useMobTextures, mipLevels,
+    tilePx, blockTiles, atlasTiles, useMobTextures, mipLevels, maxAniso, mipBias,
     tlGrassTop, tlGrassSide, tlDirt, tlCoarseDirt,
     tlPodzolTop, tlPodzolSide, tlMyceliumTop, tlMyceliumSide,
     tlSand, tlRedSand, tlGravel, tlClay, tlSnow, tlIce, tlPackedIce,
