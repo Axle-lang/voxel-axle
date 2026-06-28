@@ -116,6 +116,7 @@ use crate::configs::water::{
     waterFogR, waterFogG, waterFogB, waterFogFar, waterFogMax,
     causticFreq, causticAmp, waterEdgeHeight, bubbleCount, bubbleSpeed,
     waterRippleSpeed, waterFlowSpeed,
+    waterSpecStrength, waterFresnelStrength, waterF0,
 };
 
 use crate::configs::light::{

@@ -36,3 +36,11 @@ const bubbleSpeed : f64 = 18.0;
 // Phase speed (time rate) and how fast flowing water scrolls its texture.
 const waterRippleSpeed : f64 = 0.05;
 const waterFlowSpeed : f64 = 0.16;
+
+// Sun reflection on water. The renderer multiplies texel × light, so the glint
+// is a strong warm multiplicative over-brightening where the sun reflects (cos^32
+// of the half-vector); bloom then blows it into a glowing golden streak. Fresnel
+// brightens the water at grazing view angles (a sky-reflection sheen).
+const waterSpecStrength : f64 = 7.0;    // sun-glint intensity (multiplier boost)
+const waterFresnelStrength : f64 = 0.6; // grazing-angle reflection sheen
+const waterF0 : f64 = 0.03;             // base reflectance facing straight on

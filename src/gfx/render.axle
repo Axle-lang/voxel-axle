@@ -621,9 +621,55 @@ class Renderer {
             let tR : f64 = 1.0 + (tintR - 1.0) * skyShare;
             let tG : f64 = 1.0 + (tintG - 1.0) * skyShare;
             let tB : f64 = 1.0 + (tintB - 1.0) * skyShare;
-            setF64(this.car, k, cbase * (1.0 + wf) * tR);
-            setF64(this.cag, k, cbase * tG);
-            setF64(this.cab, k, cbase * (1.0 - wf) * tB);
+            let crk : f64 = cbase * (1.0 + wf) * tR;
+            let cgk : f64 = cbase * tG;
+            let cbk : f64 = cbase * (1.0 - wf) * tB;
+            if (isWaterFace) {
+                // View vector from this corner to the eye.
+                let vx : f64 = p.eye.x - ((x + oxv) as f64);
+                let vy : f64 = p.eye.y - cornerY;
+                let vz : f64 = p.eye.z - ((z + ozv) as f64);
+                let vl : f64 = Math::sqrt(vx * vx + vy * vy + vz * vz);
+                if (vl < 0.0001) {
+                    vl = 0.0001;
+                }
+                vx = vx / vl;
+                vy = vy / vl;
+                vz = vz / vl;
+                // Sun glint: half-vector specular, cos^32, gated by sun visibility
+                // and daylight. A strong warm multiplier that bloom turns to gold.
+                let hx : f64 = vx + this.sunX;
+                let hy : f64 = vy + this.sunY;
+                let hz : f64 = vz + this.sunZ;
+                let hl : f64 = Math::sqrt(hx * hx + hy * hy + hz * hz);
+                if (hl < 0.0001) {
+                    hl = 0.0001;
+                }
+                let ndh : f64 = (nx * hx + ny * hy + nz * hz) / hl;
+                if (ndh < 0.0) {
+                    ndh = 0.0;
+                }
+                let s2 : f64 = ndh * ndh;
+                let s4 : f64 = s2 * s2;
+                let s8 : f64 = s4 * s4;
+                let s16 : f64 = s8 * s8;
+                let spec : f64 = s16 * s16 * vis * this.daylight * config::waterSpecStrength;
+                // Fresnel: brighter at grazing view angles (sky-reflection sheen).
+                let ndv : f64 = nx * vx + ny * vy + nz * vz;
+                if (ndv < 0.0) {
+                    ndv = 0.0;
+                }
+                let om : f64 = 1.0 - ndv;
+                let om2 : f64 = om * om;
+                let fres : f64 = config::waterF0 + (1.0 - config::waterF0) * om2 * om2 * om;
+                let fboost : f64 = 1.0 + fres * config::waterFresnelStrength;
+                crk = crk * fboost * (1.0 + spec * 1.10);
+                cgk = cgk * fboost * (1.0 + spec * 1.00);
+                cbk = cbk * fboost * (1.0 + spec * 0.72);
+            }
+            setF64(this.car, k, crk);
+            setF64(this.cag, k, cgk);
+            setF64(this.cab, k, cbk);
             k = k + 1;
         }
 
