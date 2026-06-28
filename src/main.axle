@@ -453,9 +453,12 @@ fn main() : void {
             renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
             renderer.renderMobs(mobs, player, pixels, zbuf, w, h);
             renderer.renderTorches(man, player, pixels, zbuf, w, h);
-            // Living-water post-pass (depth fog + moving caustics) under the HUD.
+            // Volumetric god-rays from the sun (above water only); then the
+            // living-water post-pass (depth fog + moving caustics) under the HUD.
             if (underwater) {
                 renderer.underwaterOverlay(pixels, zbuf, w, h, phase);
+            } else {
+                renderer.godRays(player, pixels, zbuf, w, h);
             }
             if (!paused) {
                 if (picker.hit == 1) {

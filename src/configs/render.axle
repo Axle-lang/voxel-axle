@@ -34,3 +34,14 @@ const skyHaloG : i32 = 214;
 const skyHaloB : i32 = 138;
 const skyHaloStrength : f64 = 0.9;   // broad halo intensity (applied to cos⁶ around the sun)
 const skyCoreThresh : f64 = 0.9985;  // cos(view,sun) above this = the tight bright core
+
+// ── Volumetric god-rays (crepuscular light shafts) ──────────
+// A screen-space radial scatter from the sun's projected position: each pixel
+// marches toward the sun summing the visible-sky mask, so terrain silhouettes
+// carve bright warm shafts. Cost is O(w·h·samples) per frame — keep samples
+// modest. Disabled below the horizon.
+const godRaysOn : bool = true;
+const godRaySamples : i32 = 24;     // steps per pixel toward the sun
+const godRayDecay : f64 = 0.92;     // per-step attenuation of the accumulated shaft
+const godRayWeight : f64 = 0.55;    // overall shaft brightness (exposure)
+const godRayDensity : f64 = 0.92;   // fraction of the pixel→sun distance the march spans

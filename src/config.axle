@@ -46,6 +46,7 @@ use crate::configs::render::{
     lightX, lightY, lightZ, ambient, shadowKeep,
     skyZenithR, skyZenithG, skyZenithB, skyHorizonLift,
     skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh,
+    godRaysOn, godRaySamples, godRayDecay, godRayWeight, godRayDensity,
 };
 
 use crate::configs::blocks::{ Block };

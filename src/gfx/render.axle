@@ -997,6 +997,97 @@ class Renderer {
         }
     }
 
+    /**
+     * Volumetric god-rays (crepuscular shafts): a screen-space radial scatter
+     * from the sun's projected position. Each pixel marches toward the sun and
+     * sums the visible-sky mask (z-buffer cleared = sky) with per-step decay, so
+     * terrain silhouettes carve warm bright shafts out of the sky glow. Additive,
+     * warm-tinted, scaled by daylight. Skipped with the sun below the horizon or
+     * behind the camera. Call after the opaque world + mobs + torches are drawn.
+     * @param p       player (camera orientation)
+     * @param pixels  framebuffer
+     * @param zbuf    depth buffer (0 where sky)
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     */
+    fn godRays(p : Player, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+        if (!config::godRaysOn || this.sunY < 0.02) {
+            return;
+        }
+        // Project the sun direction to screen (mirrors drawSky).
+        let rx : f64 = this.sunX * p.cosy + this.sunZ * p.siny;
+        let rz : f64 = (0.0 - this.sunX) * p.siny + this.sunZ * p.cosy;
+        let ry2 : f64 = this.sunY * p.cosp - rz * p.sinp;
+        let rz2 : f64 = this.sunY * p.sinp + rz * p.cosp;
+        if (rz2 < 0.05) {
+            return;   // sun behind the camera
+        }
+        let sunSx : f64 = this.hw + config::focal * rx / rz2;
+        let sunSy : f64 = config::halfH - config::focal * ry2 / rz2;
+        // Overall exposure: fade in as the sun climbs, scale by daylight.
+        let climb : f64 = this.sunY * 4.0;
+        if (climb > 1.0) {
+            climb = 1.0;
+        }
+        let expo : f64 = config::godRayWeight * this.daylight * climb;
+        if (expo <= 0.0) {
+            return;
+        }
+        let n : i32 = config::godRaySamples;
+        let invN : f64 = 1.0 / (n as f64);
+        let cr : f64 = config::skyHaloR as f64;
+        let cg : f64 = config::skyHaloG as f64;
+        let cb : f64 = config::skyHaloB as f64;
+        let y : i32 = 0;
+        while (y < h) {
+            let row : i32 = y * w;
+            let x : i32 = 0;
+            while (x < w) {
+                // March from this pixel toward the sun.
+                let stepx : f64 = (sunSx - (x as f64)) * invN * config::godRayDensity;
+                let stepy : f64 = (sunSy - (y as f64)) * invN * config::godRayDensity;
+                let sxp : f64 = x as f64;
+                let syp : f64 = y as f64;
+                let illum : f64 = 0.0;
+                let dec : f64 = 1.0;
+                let i : i32 = 0;
+                while (i < n) {
+                    sxp = sxp + stepx;
+                    syp = syp + stepy;
+                    let ix : i32 = Math::floorToInt(sxp) as i32;
+                    let iy : i32 = Math::floorToInt(syp) as i32;
+                    if (ix >= 0 && ix < w && iy >= 0 && iy < h) {
+                        if (getF64(zbuf, (iy * w + ix) as i64) <= 0.0) {
+                            illum = illum + dec;   // a sky sample contributes
+                        }
+                    }
+                    dec = dec * config::godRayDecay;
+                    i = i + 1;
+                }
+                if (illum > 0.0) {
+                    let f : f64 = illum * invN * expo;
+                    let idx : i64 = (row + x) as i64;
+                    let c : i32 = readI32(pixels, idx * 4);
+                    let r : i32 = ((c >> 16) & 0xFF) + (Math::floorToInt(cr * f) as i32);
+                    let g : i32 = ((c >> 8) & 0xFF) + (Math::floorToInt(cg * f) as i32);
+                    let b : i32 = (c & 0xFF) + (Math::floorToInt(cb * f) as i32);
+                    if (r > 255) {
+                        r = 255;
+                    }
+                    if (g > 255) {
+                        g = 255;
+                    }
+                    if (b > 255) {
+                        b = 255;
+                    }
+                    putPixel(pixels, row + x, (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF));
+                }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+
     fn render(man : ChunkManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32, underwater : bool, phase : f64, dayTime : f64) : void {
         // Refresh the sun direction, daylight factor and sky/fog colour.
         this.updateDayState(dayTime);
