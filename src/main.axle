@@ -475,7 +475,7 @@ fn main() : void {
             man.stepSkyAO(config::skyAOChunksPerTick);
             let sunDone : i32 = sunTask.join();
             renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
-            renderer.renderMobs(mobs, player, pixels, zbuf, w, h);
+            renderer.renderMobs(man, mobs, player, pixels, zbuf, w, h);
             renderer.renderTorches(man, player, pixels, zbuf, w, h);
             // Volumetric god-rays from the sun (above water only); then the
             // living-water post-pass (depth fog + moving caustics) under the HUD.

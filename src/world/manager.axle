@@ -1830,6 +1830,22 @@ class ChunkManager {
     }
 
     /**
+     * Soft sun visibility averaged over the 4 air cells meeting at a face corner
+     * (the corner's air cell `b` plus its two edge neighbours and the diagonal,
+     * given by the tangent offsets t1/t2). Symmetric in the corner, so coplanar
+     * faces sharing a corner get the SAME value — the cast shadow interpolates
+     * smoothly across faces instead of stepping block by block. Returns 0..255.
+     */
+    fn sunSoftCorner(bx : i32, by : i32, bz : i32,
+        t1x : i32, t1y : i32, t1z : i32, t2x : i32, t2y : i32, t2z : i32) : i32 {
+        let a : i32 = this.sunlitGet(bx, by, bz);
+        let b : i32 = this.sunlitGet(bx + t1x, by + t1y, bz + t1z);
+        let c : i32 = this.sunlitGet(bx + t2x, by + t2y, bz + t2z);
+        let d : i32 = this.sunlitGet(bx + t1x + t2x, by + t1y + t2y, bz + t1z + t2z);
+        return (a + b + c + d) / 4;
+    }
+
+    /**
      * Encode a bounce tint channel: normalised colour ratio `ratio` (1.0 = grey),
      * blended toward neutral by `occ`, stored as a byte where 128 = ×1.0.
      */

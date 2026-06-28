@@ -76,6 +76,9 @@ class Renderer {
     skyColG : i32,
     skyColB : i32,
     lcurve : i64,     // 16 f64s: lightFalloff^(15-level), the brightness curve
+    mobLight : f64,   // ambient light factor of the mob currently being drawn
+                      // (sky×daylight + block at its cell) so mobs darken at
+                      // night / in caves instead of being lit 24/7
     blR : i64,        // bloom: half-res bright buffers (R/G/B) + blur scratch (bt*)
     blG : i64,
     blB : i64,
@@ -89,6 +92,7 @@ class Renderer {
      */
     constructor() {
         this.hw = config::halfW;
+        this.mobLight = 1.0;
         this.mips = 0;
         this.sunX = 0.0;
         this.sunY = 1.0;
@@ -557,44 +561,29 @@ class Renderer {
         } else if (nz < 0.0 - 0.5) {
             sbz = z - 1;
         }
-        // Soft shadow: visibility 0..255 → keep shadowKeep of the direct term in
-        // full shadow, all of it in full sun, smooth penumbra between.
-        let vis : f64 = (man.sunlitGet(sbx, sby, sbz) as f64) * 0.00392157;
-        let keepF : f64 = config::shadowKeep + (1.0 - config::shadowKeep) * vis;
-        bright = config::ambient + keepF * (bright - config::ambient);
+        // `bright` is now the pure Lambert (sun-direction) term; the cast shadow
+        // is applied PER CORNER below (smooth, face-independent), not flattened
+        // over the whole face here — that's what removes the block staircase.
 
         // Hemispherical sky access (baked ray-traced AO): darkens the ambient sky
         // light in valleys, recesses and under canopy. Sampled once per face.
         let skyAcc : f64 = (man.skyaccessGet(sbx, sby, sbz) as f64) * 0.00392157;
         let skyAOFac : f64 = config::aoSkyMin + (1.0 - config::aoSkyMin) * skyAcc;
-
-        // Warm sun / cool shade: how directly this face is in the sun (0 = full
-        // shade, 1 = full sun), scaled by daylight so night stays neutral. The
-        // sky-lit part of each corner is tinted between cool-blue shade and
-        // warm-gold sun; torch-lit parts keep their own warmth (skyShare gates).
-        let directness : f64 = 0.0;
-        if (bright > config::ambient) {
-            directness = (bright - config::ambient) / (1.0 - config::ambient);
-        }
-        let wsun : f64 = directness * this.daylight;
-        let tintR : f64 = config::shadeTintR + (config::sunTintR - config::shadeTintR) * wsun;
-        let tintG : f64 = config::shadeTintG + (config::sunTintG - config::shadeTintG) * wsun;
-        let tintB : f64 = config::shadeTintB + (config::sunTintB - config::shadeTintB) * wsun;
-        // One-bounce coloured indirect light: modulate the tint by the nearby
-        // surfaces' colour baked into the bounce map (128 = ×1.0 per channel).
+        // One-bounce coloured indirect tint (per face): nearby surfaces' colour.
         let bnc : i32 = man.bounceGet(sbx, sby, sbz);
-        tintR = tintR * (((bnc >> 16) & 0xFF) as f64) * 0.0078125;
-        tintG = tintG * (((bnc >> 8) & 0xFF) as f64) * 0.0078125;
-        tintB = tintB * ((bnc & 0xFF) as f64) * 0.0078125;
+        let bncR : f64 = (((bnc >> 16) & 0xFF) as f64) * 0.0078125;
+        let bncG : f64 = (((bnc >> 8) & 0xFF) as f64) * 0.0078125;
+        let bncB : f64 = ((bnc & 0xFF) as f64) * 0.0078125;
 
         // Load the 4 corners into camera space + their tile UVs, and bake each
-        // corner's light colour (smooth light + AO) into the car/cag/cab inputs
-        // so clipNear interpolates colour like it does UV. A water face's top
-        // corners are dropped to a Minecraft-style sloped surface: each corner
-        // takes the average height of the water columns meeting at it, so
-        // adjacent levels join in a continuous ramp with no vertical "façade"
-        // gaps between layers.
+        // corner's light colour (smooth light + AO + per-corner soft shadow) into
+        // the car/cag/cab inputs so clipNear interpolates colour like it does UV.
+        // A water face's top corners are dropped to a Minecraft-style sloped
+        // surface: each corner takes the average height of the water columns
+        // meeting at it, so adjacent levels join in a continuous ramp with no
+        // vertical "façade" gaps between layers.
         let di : i32 = dir as i32;
+        let naxis : i32 = di / 2;   // normal axis: 0=X, 1=Y, 2=Z
         let q : i32 = di * 4;
         let k : i32 = 0;
         while (k < 4) {
@@ -609,9 +598,36 @@ class Renderer {
             this.toCam(p, (x + oxv) as f64, cornerY, (z + ozv) as f64, k);
             setF64(this.cau, k, (this.uvu[q + k] as f64) + flowU);
             setF64(this.cav, k, (this.uvv[q + k] as f64) + flowV);
+            // Per-corner SOFT CAST SHADOW: average the soft sun-visibility over
+            // the 4 air cells meeting at this corner (symmetric → continuous
+            // across faces, no block staircase), then keep that fraction of the
+            // direct sun term. The two in-plane tangent offsets come from the
+            // corner's block offset and the face normal axis.
+            let sgx : i32 = oxv * 2 - 1;
+            let sgy : i32 = oyv * 2 - 1;
+            let sgz : i32 = ozv * 2 - 1;
+            let t1x : i32 = 0;
+            let t1y : i32 = 0;
+            let t1z : i32 = 0;
+            let t2x : i32 = 0;
+            let t2y : i32 = 0;
+            let t2z : i32 = 0;
+            if (naxis == 0) {
+                t1y = sgy;
+                t2z = sgz;
+            } else if (naxis == 1) {
+                t1x = sgx;
+                t2z = sgz;
+            } else {
+                t1x = sgx;
+                t2y = sgy;
+            }
+            let visK : f64 = (man.sunSoftCorner(sbx, sby, sbz, t1x, t1y, t1z, t2x, t2y, t2z) as f64) * 0.00392157;
+            let keepK : f64 = config::shadowKeep + (1.0 - config::shadowKeep) * visK;
+            let brightK : f64 = config::ambient + keepK * (bright - config::ambient);
             // Per-corner smooth light: sky/block nibbles averaged at bake time,
             // through the exponential curve (sky dimmed by daylight), times the
-            // face shading and the AO factor; block light tints warm.
+            // per-corner shaded brightness and the AO factor; block light warm.
             let lb : i32 = readU8(man.flight, (idx * 4 + k) as i64);
             let skyLk : i32 = (lb >> 4) & 0xF;
             let blkLk : i32 = lb & 0xF;
@@ -624,14 +640,23 @@ class Renderer {
                 cfk = blkFk;
             }
             let lfac : f64 = config::lightMin + (1.0 - config::lightMin) * cfk;
-            let cbase : f64 = bright * lfac * aoFac;
+            let cbase : f64 = brightK * lfac * aoFac;
             let wf : f64 = (blkLk as f64) * 0.0667 * config::torchWarm;
-            // Warm/cool tint applies in proportion to how much SKY light (vs
-            // torch) drives this corner, so caves lit by torches stay warm.
+            // Warm sun / cool shade by how directly THIS corner is sunlit, ×
+            // the one-bounce tint, applied in proportion to the sky-light share
+            // (so torch-lit caves stay warm).
+            let directK : f64 = 0.0;
+            if (brightK > config::ambient) {
+                directK = (brightK - config::ambient) / (1.0 - config::ambient);
+            }
+            let wsunK : f64 = directK * this.daylight;
+            let tintRk : f64 = (config::shadeTintR + (config::sunTintR - config::shadeTintR) * wsunK) * bncR;
+            let tintGk : f64 = (config::shadeTintG + (config::sunTintG - config::shadeTintG) * wsunK) * bncG;
+            let tintBk : f64 = (config::shadeTintB + (config::sunTintB - config::shadeTintB) * wsunK) * bncB;
             let skyShare : f64 = skyFk / (skyFk + blkFk + 0.0001);
-            let tR : f64 = 1.0 + (tintR - 1.0) * skyShare;
-            let tG : f64 = 1.0 + (tintG - 1.0) * skyShare;
-            let tB : f64 = 1.0 + (tintB - 1.0) * skyShare;
+            let tR : f64 = 1.0 + (tintRk - 1.0) * skyShare;
+            let tG : f64 = 1.0 + (tintGk - 1.0) * skyShare;
+            let tB : f64 = 1.0 + (tintBk - 1.0) * skyShare;
             let crk : f64 = cbase * (1.0 + wf) * tR;
             let cgk : f64 = cbase * tG;
             let cbk : f64 = cbase * (1.0 - wf) * tB;
@@ -664,7 +689,7 @@ class Renderer {
                 let s4 : f64 = s2 * s2;
                 let s8 : f64 = s4 * s4;
                 let s16 : f64 = s8 * s8;
-                let spec : f64 = s16 * s16 * vis * this.daylight * config::waterSpecStrength;
+                let spec : f64 = s16 * s16 * visK * this.daylight * config::waterSpecStrength;
                 // Fresnel: brighter at grazing view angles (sky-reflection sheen).
                 let ndv : f64 = nx * vx + ny * vy + nz * vz;
                 if (ndv < 0.0) {
@@ -1556,7 +1581,7 @@ class Renderer {
         // (0.5..1.0) makes every box edge read as a hard seam. Compress it
         // toward bright so adjacent faces blend and the model looks rounded
         // rather than crated. (drawQuad is mob-only; terrain is unaffected.)
-        let bright : f64 = 0.80 + 0.20 * this.shadeN(nx, ny, nz);
+        let bright : f64 = (0.80 + 0.20 * this.shadeN(nx, ny, nz)) * this.mobLight;
         let sx0 : f64 = getF64(this.csx, 0);
         let sy0 : f64 = getF64(this.csy, 0);
         let iz0 : f64 = getF64(this.ciz, 0);
@@ -1868,32 +1893,67 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn renderMobs(mm : MobManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    /**
+     * Ambient light factor (0..1) for a mob at world position (mx,my,mz): the
+     * brighter of sky×daylight and block light at its cell, through the same
+     * exponential curve as terrain. So mobs darken at night / underground and
+     * are lit by nearby torches, instead of glowing at full brightness 24/7.
+     * @param man  the chunk manager (light maps)
+     * @param mx   mob x
+     * @param my   mob feet y
+     * @param mz   mob z
+     * @return ambient light factor in [lightMin, 1]
+     */
+    fn mobLightAt(man : ChunkManager, mx : f64, my : f64, mz : f64) : f64 {
+        let wx : i32 = Math::floorToInt(mx) as i32;
+        let wy : i32 = Math::floorToInt(my + 0.5) as i32;
+        let wz : i32 = Math::floorToInt(mz) as i32;
+        let skyF : f64 = getF64(this.lcurve, man.skGetW(wx, wy, wz)) * this.daylight;
+        let blkF : f64 = getF64(this.lcurve, man.blGetW(wx, wy, wz));
+        let cf : f64 = skyF;
+        if (blkF > cf) {
+            cf = blkF;
+        }
+        return config::lightMin + (1.0 - config::lightMin) * cf;
+    }
+
+    fn renderMobs(man : ChunkManager, mm : MobManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
         // One typed array per species; draw funcs take the base Mob (the
-        // accessors upcast), reading only inherited fields.
+        // accessors upcast), reading only inherited fields. Each mob's ambient
+        // light factor is sampled once (mobLight) and applied in drawQuad.
         let i : i32 = 0;
         while (i < mm.chN) {
-            this.drawChicken(p, mm.chickenAt(i), pixels, zbuf, w, h);
+            let m : Mob = mm.chickenAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
+            this.drawChicken(p, m, pixels, zbuf, w, h);
             i = i + 1;
         }
         i = 0;
         while (i < mm.shN) {
-            this.drawSheep(p, mm.sheepAt(i), pixels, zbuf, w, h);
+            let m : Mob = mm.sheepAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
+            this.drawSheep(p, m, pixels, zbuf, w, h);
             i = i + 1;
         }
         i = 0;
         while (i < mm.coN) {
-            this.drawCow(p, mm.cowAt(i), pixels, zbuf, w, h);
+            let m : Mob = mm.cowAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
+            this.drawCow(p, m, pixels, zbuf, w, h);
             i = i + 1;
         }
         i = 0;
         while (i < mm.pgN) {
-            this.drawPig(p, mm.pigAt(i), pixels, zbuf, w, h);
+            let m : Mob = mm.pigAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
+            this.drawPig(p, m, pixels, zbuf, w, h);
             i = i + 1;
         }
         i = 0;
         while (i < mm.crN) {
-            this.drawCreeper(p, mm.creeperAt(i), pixels, zbuf, w, h);
+            let m : Mob = mm.creeperAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
+            this.drawCreeper(p, m, pixels, zbuf, w, h);
             i = i + 1;
         }
     }
