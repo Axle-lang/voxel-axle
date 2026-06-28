@@ -67,6 +67,21 @@ fn axis(kb : i64, plus : i32, minus : i32) : f64 {
 }
 
 /**
+ * Worker job: the directional sun-shadow bake, run on its own OS thread (via
+ * `spawn`) so it overlaps the hemispherical sky-access bake on the main thread.
+ * The two write disjoint per-voxel maps (sunlit vs skyaccess/bounce) and only
+ * read the world, so they are data-race free; both are joined before the render
+ * reads them — staying in lock-step with the frame/tick.
+ * @param man      the chunk manager
+ * @param dayTime  time of day (0..1) driving the sun direction
+ * @return 0 (Task result is unused; spawn requires a value)
+ */
+fn bakeSunJob(man : ChunkManager, dayTime : f64) : i32 {
+    man.stepSunShadows(dayTime, config::sunChunksPerTick);
+    return 0;
+}
+
+/**
  * Converts a world coordinate to its containing chunk index.
  * @param p  a world-space coordinate along one axis
  * @return the chunk index that contains that coordinate
@@ -447,12 +462,14 @@ fn main() : void {
             // Day clock: advances with the fixed-step tick, wrapped to [0, 1).
             let dayTime : f64 = config::dayStart + (sched.tick as f64) / (config::dayLengthTicks as f64);
             dayTime = dayTime - (Math::floorToInt(dayTime) as f64);
-            // Directional cast shadows: refresh a few chunks' sun-visibility per
-            // frame (round-robin) so shadows track the moving sun, optimised.
-            man.stepSunShadows(dayTime, config::sunChunksPerTick);
-            // Hemispherical sky-access bake (ray-traced ambient occlusion): a few
-            // chunks per frame, once each — static until an edit re-flags them.
+            // Lighting bakes in parallel, synced to the frame: the sun-shadow
+            // bake runs on a worker thread while the main thread does the
+            // hemispherical sky-access / colour-bounce bake. They touch disjoint
+            // per-voxel maps and only read the world, so there is no data race;
+            // both finish (join) before the render reads them.
+            let sunTask : Task<i32> = spawn bakeSunJob(man, dayTime);
             man.stepSkyAO(config::skyAOChunksPerTick);
+            let sunDone : i32 = sunTask.join();
             renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
             renderer.renderMobs(mobs, player, pixels, zbuf, w, h);
             renderer.renderTorches(man, player, pixels, zbuf, w, h);
