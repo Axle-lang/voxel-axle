@@ -17,3 +17,11 @@ const humidScale : f64 = 0.0018;
 // altitude (so high ground turns to taiga / snow / bare peaks).
 const oceanLevel : f64 = 0.34;
 const altitudeCooling : f64 = 0.0065;
+
+// ── Erosion + peaks/valleys (Minecraft 1.21-style terrain shaping) ──
+// erosion: low = rugged/mountainous (tall, jagged), high = flat/eroded
+// (plains, plateaus). weirdness drives a RIDGED "peaks & valleys" field that
+// carves ridgelines and valleys. Both vary slowly (low frequency) so relief is
+// coherent over large regions instead of uniform bumpiness.
+const erosionScale : f64 = 0.0026;
+const weirdScale : f64 = 0.0090;

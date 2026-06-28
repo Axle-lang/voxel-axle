@@ -108,7 +108,41 @@ fn continentalness(wx : f64, wz : f64) : f64 {
 }
 
 /**
- * Terrain surface height (blocks) at world column (wx, wz).
+ * Erosion in [0,1): LOW = rugged / mountainous (tall, jagged relief), HIGH =
+ * flat / eroded (plains, plateaus). A slow field so ruggedness is coherent.
+ * @param wx  the world x coordinate
+ * @param wz  the world z coordinate
+ * @return the erosion value in [0,1)
+ */
+fn erosion(wx : f64, wz : f64) : f64 {
+    return fbm(wx * config::erosionScale + 53.0, wz * config::erosionScale - 29.0, config::seedI + 333, 3);
+}
+
+/**
+ * Ridged "peaks & valleys" in [0,1) from the weirdness field: 1 along sharp
+ * ridgelines, 0 in valley bottoms (Minecraft's PV term). The fold `1-|2w-1|`
+ * turns smooth noise into ridges; squaring sharpens the crests.
+ * @param wx  the world x coordinate
+ * @param wz  the world z coordinate
+ * @return the ridge value in [0,1)
+ */
+fn ridge(wx : f64, wz : f64) : f64 {
+    let w : f64 = fbm(wx * config::weirdScale + 7.0, wz * config::weirdScale + 31.0, config::seedI + 777, 4);
+    let r : f64 = 2.0 * w - 1.0;
+    if (r < 0.0) {
+        r = 0.0 - r;
+    }
+    r = 1.0 - r;
+    return r * r;
+}
+
+/**
+ * Terrain surface height (blocks) at world column (wx, wz). Minecraft 1.21-style
+ * shaping: continentalness sets a base elevation (ocean → coast → inland
+ * plateau via a spline), erosion sets how much vertical relief is allowed
+ * (flat plains vs rugged mountains), and a ridged peaks-&-valleys field carves
+ * ridgelines and valleys scaled by that relief — so the world has flat regions,
+ * rolling hills, plateaus, cliffs and dramatic varied mountains.
  * @param wx  the world x coordinate
  * @param wz  the world z coordinate
  * @return the terrain surface height in blocks
@@ -119,19 +153,31 @@ fn terrainHeight(wx : f64, wz : f64) : f64 {
     let sea : f64 = config::seaLevel as f64;
     let ocean : f64 = config::oceanLevel;
     if (cont < ocean) {
-        // Ocean basin: a coherent sea floor, deeper toward open water. Never
-        // rises to the surface, so seas are real bodies — not scattered pits.
+        // Ocean basin: a coherent sea floor, deeper toward open water.
         let d : f64 = (ocean - cont) / ocean;
-        return sea - 1.0 - d * 20.0 - hills * 4.0;
+        return sea - 1.0 - d * 22.0 - hills * 4.0;
     }
-    // Land: clamped to at least sea + 1, so dry biomes never pool water. Rolling
-    // hills, with steep peaks where the continent is thickest.
-    let land : f64 = (cont - ocean) / (1.0 - ocean);
-    let h : f64 = sea + 1.0 + land * 26.0 + (hills - 0.5) * 13.0;
-    if (cont > 0.72) {
-        let m : f64 = (cont - 0.72) / 0.28;
-        h = h + m * m * 50.0;
+    let land : f64 = (cont - ocean) / (1.0 - ocean);   // 0 (coast) .. 1 (deep inland)
+    // Base elevation spline: gentle coast, rising to an inland plateau.
+    let base : f64 = 0.0;
+    if (land < 0.30) {
+        base = (land / 0.30) * 8.0;
+    } else if (land < 0.62) {
+        base = 8.0 + ((land - 0.30) / 0.32) * 10.0;
+    } else {
+        base = 18.0 + ((land - 0.62) / 0.38) * 16.0;   // up to ~34 above sea
     }
+    // Erosion → relief amplitude: high erosion flattens (plains/plateaus), low
+    // erosion unleashes tall jagged relief. Cubed so most land is calm and only
+    // the least-eroded regions become real mountains.
+    let ero : f64 = erosion(wx, wz);
+    let amp : f64 = 1.0 - ero;
+    amp = amp * amp * amp;
+    // Ridged peaks & valleys, plus rolling hills, scaled by the amplitude.
+    let pv : f64 = ridge(wx, wz);
+    let mountains : f64 = pv * amp * 58.0;
+    let rolling : f64 = (hills - 0.5) * (6.0 + amp * 22.0);
+    let h : f64 = sea + 2.0 + base + mountains + rolling;
     if (h < sea + 1.0) {
         h = sea + 1.0;
     }
