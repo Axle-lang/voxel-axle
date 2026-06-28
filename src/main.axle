@@ -40,7 +40,7 @@ use crate::entities::player::Player;
 use crate::entities::mobs::MobManager;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::ray::{Picker, cellInPlayer};
-use crate::game::sfx::AudioManager;
+use crate::game::sfx::{ AudioManager, audioLoop };
 use crate::game::tick::TickManager;
 use crate::gfx::render::Renderer;
 use crate::gfx::hud::drawHud;
@@ -173,6 +173,10 @@ fn main() : void {
     // hurts and splashes, and the creeper's fuse / blast — every positional
     // sound attenuated by 3D distance. Missing clips are silent.
     let sfx : AudioManager = new AudioManager();
+    // Pump the audio device on its own OS thread so a heavy render/light-bake
+    // frame can't starve the queue and stutter the sound (the queue is topped up
+    // every few ms regardless of frame time). Stopped + joined at quit.
+    let audioTask : Task<i32> = spawn audioLoop(sfx);
     let attackCd : i32 = 0;
     let footTimer : i32 = 0;       // frames until the next footfall
     let prevHp : i32 = player.hp;  // to detect the player taking damage
@@ -497,13 +501,16 @@ fn main() : void {
             SDL_RenderCopy(ren, tex, nullPtr(), nullPtr());
             SDL_RenderPresent(ren);
         }
-        // Feed the audio mixer once per frame (drives all queued sound), with
-        // the listener at the player so positional sounds attenuate live.
+        // Update the listener at the player so positional sounds attenuate live;
+        // the dedicated audio thread does the actual device feeding (pumpTick).
         sfx.setListener(player.pos.x, player.pos.y, player.pos.z);
-        sfx.pump();
         // Hold the loop to the tick rate (CPU cap independent of v-sync).
         clock.cap();
     }
+
+    // Stop the audio thread and wait for it before tearing down SDL.
+    sfx.stop();
+    let audioDone : i32 = audioTask.join();
 
     cfree(asPtr(pixels));
     cfree(asPtr(zbuf));

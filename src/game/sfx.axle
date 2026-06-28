@@ -57,6 +57,11 @@ fn matFolder(m : AudioMaterial) : string {
 
 class AudioManager {
     mixer : Mixer,
+    lock : AtomicBoolean,    // spinlock guarding the mixer between the main
+                             // thread (play / setListener) and the audio thread
+                             // (pump) — see audioLoop. AtomicBoolean is the only
+                             // std lock primitive with a usable constructor.
+    running : AtomicBoolean, // false tells the audio thread to exit (on quit)
     base : string,
     footstepBanks : SoundBank[],
     digBanks : SoundBank[],
@@ -75,6 +80,8 @@ class AudioManager {
     /** Open the mixer, resolve the sounds/ prefix and load every bank. */
     constructor() {
         this.mixer = new Mixer();
+        this.lock = new AtomicBoolean(false);
+        this.running = new AtomicBoolean(true);
         this.base = "assets/sounds/";
         if (!fileExists("assets/sounds/step/grass/1.wav")) {
             this.base = "../assets/sounds/";
@@ -145,12 +152,41 @@ class AudioManager {
      * @param z  listener z
      */
     fn setListener(x : f64, y : f64, z : f64) : void {
+        this.acquire();
         this.mixer.setListener(x, y, z);
+        this.release();
     }
 
-    /** Feed the audio device. Call once per frame, after setListener. */
-    fn pump() : void {
+    /** Spin until this thread owns the mixer lock (short critical sections). */
+    fn acquire() : void {
+        while (!this.lock.compareAndSet(false, true)) {
+        }
+    }
+
+    /** Release the mixer lock. */
+    fn release() : void {
+        this.lock.set(false);
+    }
+
+    /**
+     * Top up the audio device queue under the lock. Called by the dedicated
+     * audio thread (audioLoop), NOT per frame — so a slow render/bake frame can
+     * no longer starve the queue and make the sound stutter.
+     */
+    fn pumpTick() : void {
+        this.acquire();
         this.mixer.pump();
+        this.release();
+    }
+
+    /** Signal the audio thread to stop (call before joining it on quit). */
+    fn stop() : void {
+        this.running.set(false);
+    }
+
+    /** Whether the audio thread should keep running. */
+    fn isRunning() : bool {
+        return this.running.get();
     }
 
     /**
@@ -164,7 +200,9 @@ class AudioManager {
         if (!bank.loaded()) {
             bank = this.footstepBanks[AudioMaterial::Stone as i32];
         }
+        this.acquire();
         bank.playRand(this.mixer, rnd, config::volFootstep);
+        this.release();
     }
 
     /**
@@ -181,8 +219,10 @@ class AudioManager {
         if (!bank.loaded()) {
             bank = this.digBanks[AudioMaterial::Stone as i32];
         }
+        this.acquire();
         bank.playRandPos(this.mixer, rnd, config::volBreak,
             (bx as f64) + 0.5, (by as f64) + 0.5, (bz as f64) + 0.5, config::sndBreakDist);
+        this.release();
     }
 
     /**
@@ -194,6 +234,7 @@ class AudioManager {
      * @param rnd   variant selector in [0, 1)
      */
     fn mobSay(kind : MobKind, x : f64, y : f64, z : f64, rnd : f64) : void {
+        this.acquire();
         match kind {
             MobKind::Chicken => {
                 this.chickenSayBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
@@ -210,6 +251,7 @@ class AudioManager {
             // The creeper has no idle voice (only its fuse / blast).
             _ => {}
         }
+        this.release();
     }
 
     /**
@@ -222,6 +264,7 @@ class AudioManager {
      * @param rnd   variant selector in [0, 1)
      */
     fn mobHurt(kind : MobKind, x : f64, y : f64, z : f64, rnd : f64) : void {
+        this.acquire();
         match kind {
             MobKind::Chicken => {
                 this.chickenHurtBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
@@ -234,6 +277,7 @@ class AudioManager {
                 this.playerHurtBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
         }
+        this.release();
     }
 
     /**
@@ -241,7 +285,9 @@ class AudioManager {
      * @param rnd  variant selector in [0, 1)
      */
     fn playerHurt(rnd : f64) : void {
+        this.acquire();
         this.playerHurtBank.playRand(this.mixer, rnd, config::volPlayer);
+        this.release();
     }
 
     /**
@@ -249,7 +295,9 @@ class AudioManager {
      * @param rnd  variant selector in [0, 1)
      */
     fn splash(rnd : f64) : void {
+        this.acquire();
         this.splashBank.playRand(this.mixer, rnd, config::volPlayer);
+        this.release();
     }
 
     /**
@@ -257,7 +305,9 @@ class AudioManager {
      * @param rnd  variant selector in [0, 1)
      */
     fn ambientUnderwater(rnd : f64) : void {
+        this.acquire();
         this.ambientUWBank.playRand(this.mixer, rnd, config::volAmbient);
+        this.release();
     }
 
     /**
@@ -267,7 +317,9 @@ class AudioManager {
      * @param z  creeper z
      */
     fn creeperFuse(x : f64, y : f64, z : f64) : void {
+        this.acquire();
         this.creeperChargeBank.playRandPos(this.mixer, 0.0, config::volCreeper, x, y, z, config::sndCreeperDist);
+        this.release();
     }
 
     /**
@@ -277,6 +329,23 @@ class AudioManager {
      * @param z  creeper z
      */
     fn creeperBlast(x : f64, y : f64, z : f64) : void {
+        this.acquire();
         this.creeperBlastBank.playRandPos(this.mixer, 0.0, config::volCreeper, x, y, z, config::sndCreeperDist);
+        this.release();
     }
+}
+
+/**
+ * The audio thread body: top up the device queue continuously, decoupled from
+ * the frame loop, so heavy render/light-bake frames can't starve the sound. Runs
+ * on its own OS thread (spawned in main); exits when the manager is stopped.
+ * @param sfx  the audio manager to pump
+ * @return 0 (Task result unused)
+ */
+fn audioLoop(sfx : AudioManager) : i32 {
+    while (sfx.isRunning()) {
+        sfx.pumpTick();
+        System::sleep(4);
+    }
+    return 0;
 }
