@@ -56,6 +56,16 @@ class ChunkManager {
                      // (stepSunShadows → sunRaySoft); read at render to soften
                      // shadowed sky-lit faces. Sweeps as the sun moves.
     sunCursor : i32, // round-robin slot index for the throttled shadow refresh
+    skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (ambient
+                     // occlusion / one-bounce-free GI): fraction of upper-
+                     // hemisphere rays that escape to the sky. Static (doesn't
+                     // move with the sun) — baked once per chunk on load/edit.
+                     // Read at render to darken ambient in valleys / under canopy.
+    skyAOdirty : i32[], // per-slot "sky-access needs (re)baking" flag
+    skyAOcursor : i32,  // round-robin slot index for the throttled sky-AO bake
+    hemiX : i64,     // M precomputed upper-hemisphere ray directions (sky-AO)
+    hemiY : i64,
+    hemiZ : i64,
     ldirty : i32[],  // per-slot "light changed → re-mesh" flag
     lqx : i32[],     // block-light flood stack (add)
     lqy : i32[],
@@ -98,6 +108,25 @@ class ChunkManager {
         this.skylight = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunlit = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunCursor = 0;
+        this.skyaccess = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
+        this.skyAOdirty = malloc<i32>(slots);
+        this.skyAOcursor = 0;
+        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
+        // for the sky-access bake.
+        let m : i32 = config::skyAOSamples;
+        this.hemiX = allocBytes((m as i64) * 8);
+        this.hemiY = allocBytes((m as i64) * 8);
+        this.hemiZ = allocBytes((m as i64) * 8);
+        let hi : i32 = 0;
+        while (hi < m) {
+            let yy : f64 = ((hi as f64) + 0.5) / (m as f64);   // 0..1 toward up
+            let rr : f64 = Math::sqrt(1.0 - yy * yy);
+            let th : f64 = (hi as f64) * 2.399963;             // golden angle
+            setF64(this.hemiX, hi, rr * Math::cos(th));
+            setF64(this.hemiY, hi, yy);
+            setF64(this.hemiZ, hi, rr * Math::sin(th));
+            hi = hi + 1;
+        }
         this.flight = allocBytes((faceCap as i64) * 4);
         this.fao = allocBytes((faceCap as i64) * 4);
         this.lcoff = malloc<i32>(72);
@@ -1429,6 +1458,7 @@ class ChunkManager {
                 this.ldirty[i] = 0;
                 if (this.loaded[i] == 1) {
                     this.buildMesh(i, this.cxs[i], this.czs[i]);
+                    this.skyAOdirty[i] = 1;   // geometry/light changed → re-bake sky access
                 }
             }
             i = i + 1;
@@ -1543,8 +1573,10 @@ class ChunkManager {
             writeU8(this.light, base + (i as i64), 0);
             writeU8(this.skylight, base + (i as i64), 0);
             writeU8(this.sunlit, base + (i as i64), 255);  // fully lit until the soft-shadow pass refines it (0..255)
+            writeU8(this.skyaccess, base + (i as i64), 255);  // full sky access until the AO bake refines it
             i = i + 1;
         }
+        this.skyAOdirty[slot] = 1;  // a freshly (re)generated chunk needs a sky-AO bake
     }
 
     // ── Directional sun shadows ─────────────────────────────────
@@ -1760,6 +1792,130 @@ class ChunkManager {
             guard = guard + 1;
             if (this.loaded[slot] == 1) {
                 this.computeChunkSun(slot, this.cxs[slot], this.czs[slot], sx, sy, sz, ceil);
+                done = done + 1;
+            }
+        }
+    }
+
+    // ── Hemispherical sky-access (ambient occlusion / GI) ────────
+
+    /**
+     * Sky access 0..255 at a world voxel: 255 = fully open to the sky, lower =
+     * occluded by surrounding terrain (valleys, overhangs, under canopy). Out of
+     * range / unloaded reads fully open so it never wrongly darkens a face.
+     */
+    fn skyaccessGet(wx : i32, wy : i32, wz : i32) : i32 {
+        if (wy < 0 || wy >= config::worldHeight) {
+            return 255;
+        }
+        let s : i32 = config::chunkSize;
+        let cx : i32 = this.floorDiv(wx, s);
+        let cz : i32 = this.floorDiv(wz, s);
+        let slot : i32 = this.slotFor(cx, cz);
+        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
+            return 255;
+        }
+        return readU8(this.skyaccess, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+    }
+
+    /**
+     * March one hemisphere ray from a cell; 1 if it escapes (clears the terrain
+     * ceiling or runs the full skyAOReach unobstructed), 0 if an opaque voxel
+     * blocks it. Same scheme as sunRayClear but with the shorter AO reach.
+     */
+    fn skyHemiClear(wx : i32, wy : i32, wz : i32, dx : f64, dy : f64, dz : f64, ceil : i32) : i32 {
+        let ox : f64 = (wx as f64) + 0.5;
+        let oy : f64 = (wy as f64) + 0.5;
+        let oz : f64 = (wz as f64) + 0.5;
+        let t : f64 = 0.6;
+        while (t < config::skyAOReach) {
+            let cy : i32 = Math::floorToInt(oy + dy * t) as i32;
+            if (cy > ceil) {
+                return 1;
+            }
+            if (cy >= 0 && cy < config::worldHeight) {
+                let cx : i32 = Math::floorToInt(ox + dx * t) as i32;
+                let cz : i32 = Math::floorToInt(oz + dz * t) as i32;
+                if (isOpaque(this.worldGet(cx, cy, cz))) {
+                    return 0;
+                }
+            }
+            t = t + 0.7;
+        }
+        return 1;
+    }
+
+    /**
+     * Bake hemispherical sky access for one chunk: every open, sky-lit air cell
+     * in the active band casts the M precomputed hemisphere rays and stores the
+     * escaped fraction (0..255). Static — recomputed only when the chunk's
+     * geometry/light changes (skyAOdirty).
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @param ceil  tallest terrain Y over loaded chunks
+     */
+    fn computeChunkSkyAO(slot : i32, cx : i32, cz : i32, ceil : i32) : void {
+        let s : i32 = config::chunkSize;
+        let m : i32 = config::skyAOSamples;
+        let top : i32 = this.maxFY[slot] + 1;
+        if (top > config::worldHeight - 1) {
+            top = config::worldHeight - 1;
+        }
+        let lz : i32 = 0;
+        while (lz < s) {
+            let lx : i32 = 0;
+            while (lx < s) {
+                let y : i32 = 0;
+                while (y <= top) {
+                    let off : i64 = this.voxIdx(slot, lx, y, lz) as i64;
+                    if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.skylight, off) > 0) {
+                        let wx : i32 = cx * s + lx;
+                        let wz : i32 = cz * s + lz;
+                        let esc : i32 = 0;
+                        let r : i32 = 0;
+                        while (r < m) {
+                            esc = esc + this.skyHemiClear(wx, y, wz, getF64(this.hemiX, r), getF64(this.hemiY, r), getF64(this.hemiZ, r), ceil);
+                            r = r + 1;
+                        }
+                        writeU8(this.skyaccess, off, (esc * 255) / m);
+                    }
+                    y = y + 1;
+                }
+                lx = lx + 1;
+            }
+            lz = lz + 1;
+        }
+    }
+
+    /**
+     * Throttled sky-access bake: process up to `budget` dirty loaded chunks per
+     * call (round-robin). Sky access is static, so once every loaded chunk is
+     * baked this idles until an edit or load re-flags a chunk.
+     * @param budget  max chunks to bake this call
+     */
+    fn stepSkyAO(budget : i32) : void {
+        let slots : i32 = config::span * config::span;
+        let ceil : i32 = 0;
+        let j : i32 = 0;
+        while (j < slots) {
+            if (this.loaded[j] == 1 && this.maxFY[j] > ceil) {
+                ceil = this.maxFY[j];
+            }
+            j = j + 1;
+        }
+        let done : i32 = 0;
+        let guard : i32 = 0;
+        while (done < budget && guard < slots) {
+            let slot : i32 = this.skyAOcursor;
+            this.skyAOcursor = this.skyAOcursor + 1;
+            if (this.skyAOcursor >= slots) {
+                this.skyAOcursor = 0;
+            }
+            guard = guard + 1;
+            if (this.loaded[slot] == 1 && this.skyAOdirty[slot] == 1) {
+                this.computeChunkSkyAO(slot, this.cxs[slot], this.czs[slot], ceil);
+                this.skyAOdirty[slot] = 0;
                 done = done + 1;
             }
         }

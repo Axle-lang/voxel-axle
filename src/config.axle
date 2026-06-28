@@ -122,6 +122,7 @@ use crate::configs::water::{
 use crate::configs::light::{
     lightQueueCap, lightMin, lightFalloff, torchWarm, aoStrength,
     sunTintR, sunTintG, sunTintB, shadeTintR, shadeTintG, shadeTintB,
+    skyAOSamples, skyAOReach, skyAOChunksPerTick, aoSkyMin,
 };
 
 use crate::configs::time::{

@@ -450,6 +450,9 @@ fn main() : void {
             // Directional cast shadows: refresh a few chunks' sun-visibility per
             // frame (round-robin) so shadows track the moving sun, optimised.
             man.stepSunShadows(dayTime, config::sunChunksPerTick);
+            // Hemispherical sky-access bake (ray-traced ambient occlusion): a few
+            // chunks per frame, once each — static until an edit re-flags them.
+            man.stepSkyAO(config::skyAOChunksPerTick);
             renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
             renderer.renderMobs(mobs, player, pixels, zbuf, w, h);
             renderer.renderTorches(man, player, pixels, zbuf, w, h);

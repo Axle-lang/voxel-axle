@@ -32,3 +32,14 @@ const sunTintB : f64 = 0.82;
 const shadeTintR : f64 = 0.88;  // … cool blue for shade / ambient
 const shadeTintG : f64 = 0.94;
 const shadeTintB : f64 = 1.12;
+
+// Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
+// cell casts skyAOSamples rays over the upper hemisphere (up to skyAOReach
+// blocks); the escaped fraction darkens the ambient SKY light at render —
+// contact shadows in valleys, corners and under canopy. Baked & amortised
+// (skyAOChunksPerTick chunks/frame, once per chunk; static, no re-bake until an
+// edit). aoSkyMin is the darkest the sky term drops to at zero access.
+const skyAOSamples : i32 = 10;
+const skyAOReach : f64 = 14.0;
+const skyAOChunksPerTick : i32 = 3;
+const aoSkyMin : f64 = 0.45;
