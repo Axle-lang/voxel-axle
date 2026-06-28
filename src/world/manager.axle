@@ -392,32 +392,59 @@ class ChunkManager {
      * @param camCX  the camera chunk x coordinate
      * @param camCZ  the camera chunk z coordinate
      */
-    fn ensureLoaded(camCX : i32, camCZ : i32) : void {
+    fn ensureLoaded(camCX : i32, camCZ : i32) : i32 {
         let r : i32 = config::viewRadius;
-        // Pass 1: generate + seed every missing chunk WITHOUT meshing. Meshing a
-        // chunk bakes each border face's light from the neighbour voxel across
-        // the seam; if that neighbour chunk isn't loaded yet it reads 0, baking
-        // a hard black face. Generating the whole batch first means every
-        // neighbour exists before anything is meshed.
-        let dz : i32 = 0 - r;
-        while (dz <= r) {
-            let dx : i32 = 0 - r;
-            while (dx <= r) {
-                let cx : i32 = camCX + dx;
-                let cz : i32 = camCZ + dz;
-                let slot : i32 = this.slotFor(cx, cz);
-                if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-                    this.regen(slot, cx, cz);
-                }
-                dx = dx + 1;
-            }
-            dz = dz + 1;
+        let budget : i32 = config::chunkLoadsPerFrame;
+        if (budget < 1) {
+            budget = 1;
         }
-        // Pass 2: mesh every chunk flagged dirty in pass 1 (the new chunks and
-        // their already-loaded neighbours, whose border faces must re-bake now
-        // that the new chunk is present). All neighbours now exist → no black
-        // seams, no waiting for an edit to refresh.
-        this.flushLightMesh();
+        // Generate + seed up to `budget` missing chunks per call, NEAREST FIRST
+        // (concentric Chebyshev rings), so crossing into new chunks fills in over
+        // a few frames instead of one stutter. Meshing a chunk bakes each border
+        // face's light from the neighbour across the seam, so it's deferred to a
+        // second pass (flushLightMesh) once this batch's neighbours all exist —
+        // no black seams.
+        let built : i32 = 0;
+        let d : i32 = 0;
+        while (d <= r && built < budget) {
+            let dz : i32 = 0 - d;
+            while (dz <= d && built < budget) {
+                let dx : i32 = 0 - d;
+                while (dx <= d && built < budget) {
+                    // Only the cells on this ring (Chebyshev distance == d).
+                    let ad : i32 = dx;
+                    if (ad < 0) {
+                        ad = 0 - ad;
+                    }
+                    let az : i32 = dz;
+                    if (az < 0) {
+                        az = 0 - az;
+                    }
+                    let cheb : i32 = ad;
+                    if (az > cheb) {
+                        cheb = az;
+                    }
+                    if (cheb == d) {
+                        let cx : i32 = camCX + dx;
+                        let cz : i32 = camCZ + dz;
+                        let slot : i32 = this.slotFor(cx, cz);
+                        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
+                            this.regen(slot, cx, cz);
+                            built = built + 1;
+                        }
+                    }
+                    dx = dx + 1;
+                }
+                dz = dz + 1;
+            }
+            d = d + 1;
+        }
+        // Mesh the chunks flagged dirty this call (the new ones + their loaded
+        // neighbours, whose border faces re-bake against the new chunk).
+        if (built > 0) {
+            this.flushLightMesh();
+        }
+        return built;
     }
 
     /** Flag a chunk for (re)mesh if it's currently loaded at (cx, cz). */

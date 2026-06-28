@@ -119,7 +119,10 @@ fn main() : void {
 
     Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
     let man : ChunkManager = new ChunkManager();
-    man.ensureLoaded(0, 0);
+    // Initial load: drive the per-call budget to completion so the whole spawn
+    // view is ready before play (no popping in at the start).
+    while (man.ensureLoaded(0, 0) > 0) {
+    }
 
     // Choose an open hilltop to start on and a yaw facing the clearing.
     let sp : Spawn = new Spawn();
@@ -127,7 +130,8 @@ fn main() : void {
     let player : Player = new Player((sp.sx as f64) + 0.5, sp.h as f64, (sp.sz as f64) + 0.5);
     player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
     player.refresh();
-    man.ensureLoaded(chunkOf(player.pos.x), chunkOf(player.pos.z));
+    while (man.ensureLoaded(chunkOf(player.pos.x), chunkOf(player.pos.z)) > 0) {
+    }
 
     let mobs : MobManager = new MobManager();
     let renderer : Renderer = new Renderer();
@@ -360,9 +364,11 @@ fn main() : void {
             // both far cheaper than the former unconditional every-frame work.
             let pcx : i32 = chunkOf(player.pos.x);
             let pcz : i32 = chunkOf(player.pos.z);
-            if (sched.dueStream(pcx, pcz)) {
-                man.ensureLoaded(pcx, pcz);
-            }
+            // Stream every frame: ensureLoaded builds at most a few chunks per
+            // call (nearest-first), so entering new chunks fills in smoothly over
+            // a handful of frames instead of one stutter. Cheap when the view is
+            // already full (just a ring scan).
+            man.ensureLoaded(pcx, pcz);
             if (sched.dueMaintain()) {
                 mobs.maintain(man, player);
             }

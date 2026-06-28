@@ -14,7 +14,7 @@ use crate::configs::screen::{
 };
 
 use crate::configs::world::{
-    chunkSize, viewRadius, span, maxFacesPerChunk, maxTorchesPerChunk,
+    chunkSize, viewRadius, span, maxFacesPerChunk, maxTorchesPerChunk, chunkLoadsPerFrame,
     seaLevel, maxHeight, worldHeight, tickHz, maintainTicks,
     simTicks, simBudget, simQueueCap, flowSearch,
 };

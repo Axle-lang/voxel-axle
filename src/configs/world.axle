@@ -10,6 +10,12 @@ const chunkSize : i32 = 16;
 const viewRadius : i32 = 6;  // chunks loaded each side → 13×13
 const span : i32 = 13;  // 2*viewRadius + 1
 const maxFacesPerChunk : i32 = 14000;
+// Streamed chunk (re)builds per frame: spreads the cost of entering new chunks
+// over several frames (nearest-first) instead of a single stutter when crossing
+// a chunk border. Generation stays on the main thread (the world is read every
+// tick by physics + the render + the light thread, so it must not change
+// mid-frame), so this amortises rather than offloads.
+const chunkLoadsPerFrame : i32 = 2;
 const maxTorchesPerChunk : i32 = 256;  // thin-post torches collected per chunk
 const seaLevel : i32 = 24;
 const maxHeight : i32 = 96;
