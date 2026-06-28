@@ -16,6 +16,7 @@ use crate::world::manager::ChunkManager;
 use crate::entities::mobs::MobManager;
 use crate::entities::mob::Mob;
 use crate::world::blocks::{ fluidLevel, isWater, isSource };
+use crate::world::noise::{ snowDepth };
 use crate::config;
 use crate::config::{ FaceDir, Block };
 
@@ -495,6 +496,13 @@ class Renderer {
         let packed : i32 = man.ftile[idx];
         let dir : FaceDir = faceDirFrom(packed / 256);
         let isWaterFace : bool = (packed % 256) == config::tlWater;
+        // A thin snow layer renders at a partial, noise-varied height (top + side
+        // tops lowered to y + snowH), like a short water surface.
+        let isSnowFace : bool = man.worldGet(x, y, z) == Block::SnowLayer;
+        let snowH : f64 = 0.0;
+        if (isSnowFace) {
+            snowH = snowDepth(x as f64, z as f64);
+        }
         let nx : f64 = 0.0;
         let ny : f64 = 0.0;
         let nz : f64 = 0.0;
@@ -611,6 +619,8 @@ class Renderer {
             let cornerY : f64 = (y as f64) + (oyv as f64);
             if (isWaterFace && oyv > 0) {
                 cornerY = (y as f64) + this.waterCornerY(man, x + oxv, y, z + ozv);
+            } else if (isSnowFace && oyv > 0) {
+                cornerY = (y as f64) + snowH;
             }
             this.toCam(p, (x + oxv) as f64, cornerY, (z + ozv) as f64, k);
             setF64(this.cau, k, (this.uvu[q + k] as f64) + flowU);

@@ -87,4 +87,7 @@ enum Block : i32 {
     FlowWater7,
     // Decoration / light sources
     Torch,
+    // A thin snow layer (partial height, set per column by noise) that sits on
+    // top of the ground / tree canopy in cold biomes.
+    SnowLayer,
 }

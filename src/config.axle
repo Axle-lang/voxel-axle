@@ -21,7 +21,7 @@ use crate::configs::world::{
 
 use crate::configs::noise::{
     seedI, warpScale, contScale, hillScale, tempScale, humidScale,
-    oceanLevel, altitudeCooling, erosionScale, weirdScale,
+    oceanLevel, altitudeCooling, erosionScale, weirdScale, snowScale,
 };
 
 use crate::configs::physics::{

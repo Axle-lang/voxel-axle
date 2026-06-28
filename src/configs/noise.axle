@@ -25,3 +25,6 @@ const altitudeCooling : f64 = 0.0065;
 // coherent over large regions instead of uniform bumpiness.
 const erosionScale : f64 = 0.0026;
 const weirdScale : f64 = 0.0090;
+// Snow-cover variation frequency: how quickly the snow-layer depth drifts across
+// cold ground (higher = patchier).
+const snowScale : f64 = 0.085;

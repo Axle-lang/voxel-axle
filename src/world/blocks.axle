@@ -25,7 +25,12 @@ fn isAir(id : Block) : bool {
  * @return whether the block is transparent
  */
 fn isTransparent(id : Block) : bool {
-    return id == Block::Air || isWater(id) || id == Block::Torch;
+    return id == Block::Air || isWater(id) || id == Block::Torch || id == Block::SnowLayer;
+}
+
+/** A thin partial-height snow layer that sits on the ground / canopy. */
+fn isSnowLayer(id : Block) : bool {
+    return id == Block::SnowLayer;
 }
 
 /**
@@ -124,7 +129,7 @@ fn isSource(id : Block) : bool {
 fn isCollidable(id : Block) : bool {
     // Torches are solid for aiming (you can target/break them) but you walk
     // through them.
-    return isSolid(id) && id != Block::Torch;
+    return isSolid(id) && id != Block::Torch && id != Block::SnowLayer;
 }
 
 /**
@@ -163,7 +168,7 @@ fn isLeaves(id : Block) : bool {
  * @return whether the block is opaque to light
  */
 fn isOpaque(id : Block) : bool {
-    return id != Block::Air && !isWater(id) && id != Block::Torch && !isLeaves(id);
+    return id != Block::Air && !isWater(id) && id != Block::Torch && !isLeaves(id) && id != Block::SnowLayer;
 }
 
 /**
@@ -228,7 +233,7 @@ fn albedoFor(id : Block) : i32 {
         Block::Dirt | Block::CoarseDirt | Block::Podzol | Block::Mycelium => rgb(122, 92, 62),
         Block::Sand | Block::Sandstone => rgb(206, 188, 138),
         Block::RedSand | Block::RedSandstone => rgb(182, 112, 66),
-        Block::Snow => rgb(236, 240, 246),
+        Block::Snow | Block::SnowLayer => rgb(236, 240, 246),
         Block::Ice | Block::PackedIce => rgb(168, 200, 224),
         Block::Wood | Block::WoodBirch | Block::WoodSpruce | Block::WoodAcacia
             | Block::WoodJungle | Block::WoodDarkOak | Block::Planks | Block::Bamboo
@@ -293,7 +298,7 @@ fn tileFor(id : Block, dir : FaceDir) : i32 {
         Block::RedSand => config::tlRedSand,
         Block::Gravel => config::tlGravel,
         Block::Clay => config::tlClay,
-        Block::Snow => config::tlSnow,
+        Block::Snow | Block::SnowLayer => config::tlSnow,
         Block::Ice => config::tlIce,
         Block::PackedIce => config::tlPackedIce,
 
@@ -432,7 +437,7 @@ fn color(id : Block) : i32 {
         Block::TerracottaWhite => rgb(208, 176, 156),
         Block::Gravel => rgb(122, 118, 112),
         Block::Clay => rgb(160, 165, 172),
-        Block::Snow => rgb(236, 240, 246),
+        Block::Snow | Block::SnowLayer => rgb(236, 240, 246),
         Block::Ice => rgb(150, 180, 235),
         Block::PackedIce => rgb(140, 168, 222),
         Block::Water => rgb(58, 110, 200),

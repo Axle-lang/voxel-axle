@@ -17,9 +17,9 @@
 // physics — both interfaces are unchanged, so nothing downstream moved.
 
 use sdl_platform::{allocBytes, readU8, writeU8};
-use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI};
+use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI, snowDepth};
 use crate::world::biomes::registry::{biomeAt, Biomes};
-use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves};
+use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves, isSnowLayer};
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
@@ -577,6 +577,21 @@ class ChunkManager {
                     this.setVoxLocal(slot, lx, ly, lz, id);
                     ly = ly + 1;
                 }
+                // Cold-biome ground: a thin, noise-varied snow layer on top of
+                // the surface (bare patches where the noise is low, the odd full
+                // block where it's high) — so the ground carries snow to match
+                // the snow on the trees.
+                if (this.coldBiome(biome) && h > config::seaLevel && h < config::worldHeight) {
+                    let frac : f64 = snowDepth(wx as f64, wz as f64);
+                    if (frac > 0.0) {
+                        let sb : Block = Block::SnowLayer;
+                        if (frac >= 0.95) {
+                            sb = Block::Snow;
+                        }
+                        this.setVoxLocal(slot, lx, h, lz, sb);
+                        this.bumpFY(slot, h);
+                    }
+                }
                 lx = lx + 1;
             }
             lz = lz + 1;
@@ -613,7 +628,7 @@ class ChunkManager {
                         this.stampTree(this.reg.treeKind(biome), this.reg.treeHeight(biome), slot, olx, h, olz);
                         // Cold biomes: dust the canopy with a thin snow cap.
                         if (this.coldBiome(biome)) {
-                            this.snowCapTree(slot, olx, olz, h, this.reg.treeHeight(biome));
+                            this.snowCapTree(slot, olx, olz, h, this.reg.treeHeight(biome), cx * s, cz * s);
                         }
                     }
                 }
@@ -639,7 +654,7 @@ class ChunkManager {
      * @param baseY   the trunk base Y
      * @param height  the trunk height
      */
-    fn snowCapTree(slot : i32, olx : i32, olz : i32, baseY : i32, height : i32) : void {
+    fn snowCapTree(slot : i32, olx : i32, olz : i32, baseY : i32, height : i32, cx0 : i32, cz0 : i32) : void {
         let s : i32 = config::chunkSize;
         let topSearch : i32 = baseY + height + 4;
         if (topSearch >= config::worldHeight) {
@@ -657,7 +672,17 @@ class ChunkManager {
                     while (y > baseY && !done) {
                         if (isLeaves(this.getVox(slot, lx, y, lz))) {
                             if (y + 1 < config::worldHeight && this.getVox(slot, lx, y + 1, lz) == Block::Air) {
-                                this.setVoxLocal(slot, lx, y + 1, lz, Block::Snow);
+                                let wx : i32 = cx0 + lx;
+                                let wz : i32 = cz0 + lz;
+                                let frac : f64 = snowDepth(wx as f64, wz as f64);
+                                if (frac > 0.0) {
+                                    let sb : Block = Block::SnowLayer;
+                                    if (frac >= 0.95) {
+                                        sb = Block::Snow;
+                                    }
+                                    this.setVoxLocal(slot, lx, y + 1, lz, sb);
+                                    this.bumpFY(slot, y + 1);
+                                }
                             }
                             done = true;
                         }
@@ -1157,6 +1182,25 @@ class ChunkManager {
                             if (this.getVox(slot, lx, ly + 1, lz) == air) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
                             }
+                            if (this.getVox(slot, lx + 1, ly, lz) == air) {
+                                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+                            }
+                            if (this.getVox(slot, lx - 1, ly, lz) == air) {
+                                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+                            }
+                            if (this.getVox(slot, lx, ly, lz + 1) == air) {
+                                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+                            }
+                            if (this.getVox(slot, lx, ly, lz - 1) == air) {
+                                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+                            }
+                        } else if (isSnowLayer(id)) {
+                            // Thin snow: a top face (rendered at a partial,
+                            // noise-varied height) plus side walls only where it
+                            // borders air, so a snow field's outer edge shows but
+                            // internal seams and sides hidden by taller neighbours
+                            // are culled. It never hides the block it rests on.
+                            this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
                             if (this.getVox(slot, lx + 1, ly, lz) == air) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
                             }

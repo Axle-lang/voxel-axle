@@ -205,6 +205,27 @@ fn humidity(wx : f64, wz : f64) : f64 {
 }
 
 /**
+ * Snow-cover depth at a column in [0,1]: 0 = a bare patch, ~0.18..0.75 = a thin
+ * partial snow layer (the common case), 1 = a full snow block. Driven by noise
+ * so cold-biome ground and canopies carry an uneven, drifted dusting (varying
+ * level), with occasional bare ground and the odd full block — not a uniform
+ * slab. Shared by the generator (placement) and the renderer (layer height).
+ * @param wx  the world x coordinate
+ * @param wz  the world z coordinate
+ * @return the snow depth fraction in [0,1]
+ */
+fn snowDepth(wx : f64, wz : f64) : f64 {
+    let n : f64 = fbm(wx * config::snowScale + 71.0, wz * config::snowScale - 53.0, config::seedI + 1212, 3);
+    if (n < 0.12) {
+        return 0.0;
+    }
+    if (n > 0.93) {
+        return 1.0;
+    }
+    return 0.18 + (n - 0.12) / 0.81 * 0.57;
+}
+
+/**
  * Scatter value in [0,1) for tree placement.
  * @param wx  the world x coordinate
  * @param wz  the world z coordinate
