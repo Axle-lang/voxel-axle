@@ -19,7 +19,7 @@
 use sdl_platform::{allocBytes, readU8, writeU8};
 use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI};
 use crate::world::biomes::registry::{biomeAt, Biomes};
-use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor};
+use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves};
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
@@ -611,11 +611,62 @@ class ChunkManager {
                     thr = thr + (1.0 - thr) * config::treeThin;
                     if (treeHash(wx as f64, wz as f64) > thr) {
                         this.stampTree(this.reg.treeKind(biome), this.reg.treeHeight(biome), slot, olx, h, olz);
+                        // Cold biomes: dust the canopy with a thin snow cap.
+                        if (this.coldBiome(biome)) {
+                            this.snowCapTree(slot, olx, olz, h, this.reg.treeHeight(biome));
+                        }
                     }
                 }
                 olx = olx + 1;
             }
             olz = olz + 1;
+        }
+    }
+
+    /** True for the cold, snowy biomes whose trees should carry snow. */
+    fn coldBiome(b : BiomeId) : bool {
+        return b == BiomeId::Snowy || b == BiomeId::Taiga || b == BiomeId::Mountain;
+    }
+
+    /**
+     * Dust a freshly-stamped tree's canopy with a thin snow cap: over each
+     * column of the tree footprint, drop a single Snow block onto the topmost
+     * leaf (into the air above it). One block per column → a light dusting that
+     * follows the canopy silhouette, not a solid slab.
+     * @param slot    the slot index
+     * @param olx     the tree origin local x
+     * @param olz     the tree origin local z
+     * @param baseY   the trunk base Y
+     * @param height  the trunk height
+     */
+    fn snowCapTree(slot : i32, olx : i32, olz : i32, baseY : i32, height : i32) : void {
+        let s : i32 = config::chunkSize;
+        let topSearch : i32 = baseY + height + 4;
+        if (topSearch >= config::worldHeight) {
+            topSearch = config::worldHeight - 1;
+        }
+        let dz : i32 = 0 - 2;
+        while (dz <= 2) {
+            let dx : i32 = 0 - 2;
+            while (dx <= 2) {
+                let lx : i32 = olx + dx;
+                let lz : i32 = olz + dz;
+                if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
+                    let y : i32 = topSearch;
+                    let done : bool = false;
+                    while (y > baseY && !done) {
+                        if (isLeaves(this.getVox(slot, lx, y, lz))) {
+                            if (y + 1 < config::worldHeight && this.getVox(slot, lx, y + 1, lz) == Block::Air) {
+                                this.setVoxLocal(slot, lx, y + 1, lz, Block::Snow);
+                            }
+                            done = true;
+                        }
+                        y = y - 1;
+                    }
+                }
+                dx = dx + 1;
+            }
+            dz = dz + 1;
         }
     }
 
