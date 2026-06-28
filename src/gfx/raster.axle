@@ -181,6 +181,23 @@ fn buildMipChain(atlas : i64, mips : i64) : void {
 }
 
 /**
+ * One projected, lit triangle vertex for the textured rasteriser: screen
+ * position (sx, sy), inverse depth (iz), tile UV (u, v) and the per-vertex
+ * Gouraud light-colour multipliers (tr, tg, tb). A value-type bundle so the
+ * rasteriser takes 3 of these instead of two dozen loose scalars.
+ */
+struct RasterVert {
+    sx : f64,
+    sy : f64,
+    iz : f64,
+    u : f64,
+    v : f64,
+    tr : f64,
+    tg : f64,
+    tb : f64,
+}
+
+/**
  * Bilinear sample of one atlas tile at a given mip level, returning packed rgb.
  * Used for the anisotropic minification taps.
  * @param mips     the mip chain buffer
@@ -247,12 +264,16 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
  * @param mipSz   i32[mipLevels] of each mip level's tile side length
  */
 fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
-    x0 : f64, y0 : f64, iz0 : f64, u0 : f64, v0 : f64,
-    x1 : f64, y1 : f64, iz1 : f64, u1 : f64, v1 : f64,
-    x2 : f64, y2 : f64, iz2 : f64, u2 : f64, v2 : f64,
+    a0 : RasterVert, a1 : RasterVert, a2 : RasterVert,
     mips : i64, tile : i32, mipOff : i64, mipSz : i64,
-    tr0 : f64, tg0 : f64, tb0 : f64, tr1 : f64, tg1 : f64, tb1 : f64, tr2 : f64, tg2 : f64, tb2 : f64,
     wrap : bool, fogr : i32, fogg : i32, fogb : i32) : void {
+    // Unpack the vertex bundles into the locals the body uses.
+    let x0 : f64 = a0.sx; let y0 : f64 = a0.sy; let iz0 : f64 = a0.iz; let u0 : f64 = a0.u; let v0 : f64 = a0.v;
+    let x1 : f64 = a1.sx; let y1 : f64 = a1.sy; let iz1 : f64 = a1.iz; let u1 : f64 = a1.u; let v1 : f64 = a1.v;
+    let x2 : f64 = a2.sx; let y2 : f64 = a2.sy; let iz2 : f64 = a2.iz; let u2 : f64 = a2.u; let v2 : f64 = a2.v;
+    let tr0 : f64 = a0.tr; let tg0 : f64 = a0.tg; let tb0 : f64 = a0.tb;
+    let tr1 : f64 = a1.tr; let tg1 : f64 = a1.tg; let tb1 : f64 = a1.tb;
+    let tr2 : f64 = a2.tr; let tg2 : f64 = a2.tg; let tb2 : f64 = a2.tb;
     let area : f64 = edge(x0, y0, x1, y1, x2, y2);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;

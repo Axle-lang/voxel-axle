@@ -10,7 +10,7 @@
 
 use sdl_platform::{allocBytes, getF64, setF64, putPixel, readI32, readU8, rgb};
 use crate::gfx::color::{scaleRgb, tintIf};
-use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize};
+use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert};
 use crate::entities::player::Player;
 use crate::world::manager::ChunkManager;
 use crate::entities::mobs::MobManager;
@@ -744,13 +744,10 @@ class Renderer {
         let t : i32 = 1;
         while (t < n - 1) {
             rasterTriTex(pixels, zbuf, w, h,
-                getF64(this.csx, 0), getF64(this.csy, 0), getF64(this.ciz, 0), getF64(this.cbu, 0), getF64(this.cbv, 0),
-                getF64(this.csx, t), getF64(this.csy, t), getF64(this.ciz, t), getF64(this.cbu, t), getF64(this.cbv, t),
-                getF64(this.csx, t + 1), getF64(this.csy, t + 1), getF64(this.ciz, t + 1), getF64(this.cbu, t + 1), getF64(this.cbv, t + 1),
+                RasterVert { sx: getF64(this.csx, 0), sy: getF64(this.csy, 0), iz: getF64(this.ciz, 0), u: getF64(this.cbu, 0), v: getF64(this.cbv, 0), tr: getF64(this.cbr, 0), tg: getF64(this.cbg, 0), tb: getF64(this.cbb, 0) },
+                RasterVert { sx: getF64(this.csx, t), sy: getF64(this.csy, t), iz: getF64(this.ciz, t), u: getF64(this.cbu, t), v: getF64(this.cbv, t), tr: getF64(this.cbr, t), tg: getF64(this.cbg, t), tb: getF64(this.cbb, t) },
+                RasterVert { sx: getF64(this.csx, t + 1), sy: getF64(this.csy, t + 1), iz: getF64(this.ciz, t + 1), u: getF64(this.cbu, t + 1), v: getF64(this.cbv, t + 1), tr: getF64(this.cbr, t + 1), tg: getF64(this.cbg, t + 1), tb: getF64(this.cbb, t + 1) },
                 this.mips, tile, this.mipOff, this.mipSz,
-                getF64(this.cbr, 0), getF64(this.cbg, 0), getF64(this.cbb, 0),
-                getF64(this.cbr, t), getF64(this.cbg, t), getF64(this.cbb, t),
-                getF64(this.cbr, t + 1), getF64(this.cbg, t + 1), getF64(this.cbb, t + 1),
                 isWaterFace, this.skyColR, this.skyColG, this.skyColB);
             t = t + 1;
         }
@@ -1576,11 +1573,15 @@ class Renderer {
             }
 
             rasterTriTex(pixels, zbuf, w, h,
-                sx0, sy0, iz0, 0.0, 1.0, sx1, sy1, iz1, 1.0, 1.0, sx2, sy2, iz2, 1.0, 0.0,
-                this.mips, tile, this.mipOff, this.mipSz, tr, tg, tb, tr, tg, tb, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
+                RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB);
             rasterTriTex(pixels, zbuf, w, h,
-                sx0, sy0, iz0, 0.0, 1.0, sx2, sy2, iz2, 1.0, 0.0, sx3, sy3, iz3, 0.0, 0.0,
-                this.mips, tile, this.mipOff, this.mipSz, tr, tg, tb, tr, tg, tb, tr, tg, tb, false, this.skyColR, this.skyColG, this.skyColB);
+                RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB);
         } else {
             let col : i32 = scaleRgb(tintIf(hurt, color), bright);
             rasterTri(pixels, zbuf, w, h, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
