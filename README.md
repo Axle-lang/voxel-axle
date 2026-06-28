@@ -1,17 +1,26 @@
 # voxel — a Minecraft-style survival world in Axle (SDL2)
 
 A first-person **survival** voxel world software-rendered into an SDL2
-window. You are a real entity: gravity pulls you down, you stand and walk
-on solid streamed terrain, jump, swim, and take fall / drowning damage
-with health that regenerates. The land is an **infinite, streamed**
-landscape of Minecraft-like biomes — ocean, beach, plains, forest,
-desert, savanna, snowy, mountains — with trees and oceans, and
-texture-skinned passive **mobs** (chickens, sheep, cows) that wander and
-graze, panic-run when struck, and topple over when killed. Everything is
-drawn by a z-buffered, textured triangle rasteriser over face-culled
-geometry.
+window — no GPU, every pixel shaded on the CPU. You are a real entity:
+gravity pulls you down, you stand and walk on **voxel-accurate** streamed
+terrain, jump, swim, auto-step ledges, and take fall / drowning damage with
+health that regenerates. The land is an **infinite, streamed** landscape of
+~18 Minecraft-like biomes — ocean, beach, plains, forest, birch & cherry
+groves, jungle, bamboo, savanna, badlands, swamp, taiga, snowy, mountains,
+mushroom fields, frozen ocean — shaped by continentalness / erosion /
+peaks-and-valleys noise, dressed with trees, oceans and thin variable-depth
+snow, and roamed by texture-skinned **mobs** (chickens, sheep, cows, pigs,
+creepers). Over it all runs a real **lighting engine**: a propagating
+sky + block light field, a day/night cycle with a moving sun, soft
+directional shadows, god-rays, bloom and an atmospheric sky — with the
+audio, lighting and rasteriser spread across **threads** so it stays smooth.
 
 ## Screenshots
+
+![Lighting engine — birch & cherry grove under sun glow, soft shadows and atmospheric sky](doc/lightengine.png)
+
+*The lighting engine: warm sunlit ground, soft shadows under the canopy, a
+sun glow with god-rays and a graded atmospheric sky.*
 
 | Forest | Desert | Coast |
 |--------|--------|-------|
@@ -19,16 +28,18 @@ geometry.
 
 ## Controls
 
-| Input            | Action                  |
-|------------------|-------------------------|
-| Mouse            | look around (captured)  |
-| `W` `A` `S` `D`  | walk                    |
-| `LCtrl`          | sprint                  |
-| `Space`          | jump / swim up          |
-| Left-click       | dig the block / attack the mob in front |
-| Right-click      | place the held block    |
-| `1`–`9`          | select hotbar slot      |
-| `Esc` / close    | quit                    |
+| Input            | Action                                   |
+|------------------|------------------------------------------|
+| Mouse            | look around (captured)                   |
+| `W` `A` `S` `D`  | walk                                     |
+| `LCtrl`          | sprint                                   |
+| `Space`          | jump / swim up / fly up (creative)       |
+| `LShift`         | fly down (creative)                      |
+| Left-click       | dig the block / attack the mob in front  |
+| Right-click      | place the held block                     |
+| `1`–`9`          | select hotbar slot                       |
+| `F3` + `F4`      | toggle survival ↔ creative (free flight) |
+| `Esc` / close    | quit                                     |
 
 ## Prerequisites
 
@@ -99,19 +110,22 @@ sit next to the produced binary (in `target/`).
 
 The code is built as a small object hierarchy on top of a data-oriented
 chunk world. Living things share one physics implementation through
-inheritance; the world, renderer and HUD are plain engine modules.
+inheritance; the world, renderer and HUD are plain engine modules. Hot
+geometry is bundled in value `struct`s (`Vec3`, `FrameBuf`, `RasterVert`)
+instead of long argument lists.
 
 ```
                  ┌────────────┐
-                 │   Entity   │  posX/Y/Z, velY, hp, radius, gravity +
-                 │            │  solid collision + auto-step, damage / heal
-                 └─────┬──────┘
+                 │   Entity   │  pos, velY, hp, radius, gravity + VOXEL
+                 │            │  AABB collision, auto-step up / step-down,
+                 └─────┬──────┘  damage / heal
             extends    │    extends
         ┌──────────────┴───────────────┐
    ┌────▼─────┐                    ┌────▼────┐
-   │  Player  │ FPS camera, input, │   Mob   │ AI + skins (chicken/sheep/cow)
-   │          │ jump/swim, fall &  │         │
-   │          │ drown & regen      │         │
+   │  Player  │ FPS camera, input, │   Mob   │ AI + skins (chicken / sheep /
+   │          │ jump / swim, fall  │         │ cow / pig / creeper), wander /
+   │          │ & drown & regen,   │         │ graze / flee / die
+   │          │ creative flight    │         │
    └──────────┘                    └─────────┘
 ```
 
@@ -123,45 +137,48 @@ prefix (like Rust); same-folder siblings can be imported by bare name.
 
 ```
 src/
-  main.axle              thin entry: window + buffers, then the
-                         input → simulate → render loop (paced by the clock)
-  config.axle            every tunable: screen, stream, noise, blocks &
-                         biomes, physics, ticks, mobs, HUD ← change the feel
-  platform/
-    mem.axle             libc alloc, pointer helpers, framebuffer/byte
-                         accessors, the rgb packer
-    sdl.axle             SDL2 FFI: window/renderer/texture, events,
-                         keyboard, relative mouse, frame timing
-    file.axle            binary file reading + runtime atlas load
-    clock.axle           FrameClock: holds the loop to config::tickHz
+  main.axle              thin entry: window + buffers + worker threads, then
+                         the input → simulate → render loop (paced by the clock)
+  config.axle            re-export hub for every tunable in configs/* …
+  configs/               screen, render, atlas, light, time, water, noise,
+                         world, biomes, blocks, trees, physics, mobs, gameplay,
+                         health, hud, audio, face — change the feel here
+  input.axle  mathx.axle  vec3.axle   keyboard axes, math helpers, Vec3 struct
+  clock.axle             FrameClock: holds the loop to config::tickHz
+  platform/ (mem · sdl · file)   libc/framebuffer helpers, SDL2 FFI, atlas load
   world/
-    noise.axle           value noise + fbm; height / temperature / humidity
-    blocks.axle          block table: id → tile / colour / predicates
-    biome.axle           temp × humidity × height → biome → surface/trees
-    manager.axle         ChunkManager: streamed voxel chunks, meshing,
-                         columnHeight/collisionHeight, breakAt/placeAt
+    noise.axle           value noise + fbm; continentalness / erosion /
+                         peaks-valleys terrain, climate, snow depth
+    blocks.axle          block table: id → tile / colour / predicates,
+                         blockBoxHeight category helpers
+    biome.axle  biomes/  climate → biome; one module per biome + a registry
+    manager.axle         ChunkManager: streamed voxel chunks, meshing, the
+                         block + sky LIGHT engine (own thread), break/place
+    blocksim.axle        block updates: falling sand/gravel, water flow
   entities/
-    entity.axle          Entity base: gravity, solid collision, damage
-    player.axle          Player extends Entity: look, move, survival, hotbar
-    mob.axle             Mob extends Entity: animal AI (wander/graze/flee/die)
-    mobs.axle            MobManager: spawn ring, AI update, despawn, melee
+    entity.axle          Entity base: gravity, voxel AABB collision, damage
+    player.axle          Player: look, move, survival, hotbar, creative fly
+    mob.axle  mobs.axle  Mob AI base + MobManager (spawn ring / cull / melee)
+    chicken·sheep·cow·pig·creeper   per-animal skins & behaviour
   game/
     start.axle           start-position search + facing yaw
-    ray.axle             Picker: look-ray voxel pick (dig/place targets)
+    ray.axle             Picker: look-ray voxel pick with real per-block boxes
+    sfx.axle             AudioManager + audio thread (SDL mixing)
+    tick.axle            fixed-timestep helpers
   gfx/
-    color.axle           colour math (scale/tint) + rectangle fill
-    raster.axle          triangle rasteriser + z-buffer (textured + flat)
-    render.axle          project + cull + draw world faces; mob cuboids
-    health.axle          the Minecraft-style heart row
-    hotbar.axle          the inventory bar
-    hud.axle             composes the HUD overlay (health + hotbar)
+    color.axle  font.axle   colour math + bitmap text
+    raster.axle          triangle rasteriser + z-buffer (textured + flat),
+                         mip-chain + anisotropic sampling
+    render.axle          project + cull + shade world; lighting, soft shadows,
+                         god-rays, bloom, sky; mobs; selection box (threaded)
+    health·hotbar·hud·menu   heart row, inventory bar, HUD, pause menu
 ```
 
 ### Why inheritance here
 
 `Player` and `Mob` are genuinely the same *kind* of thing physically: both
-fall, both stand on the heightmap, both step up one-block ledges, both can
-be hurt. That shared behaviour lives once in `Entity` and is reused by both
+fall, both stand on terrain, both step up one-block ledges, both can be
+hurt. That shared behaviour lives once in `Entity` and is reused by both
 subclasses unchanged — `Player.update` and `Mob.aiStep` only decide *what
 horizontal move to feed the shared `tick`*, and how to react to health and
 the recorded landing `impact`. Adding a new animal is a new `Entity`
@@ -172,79 +189,97 @@ subclass plus a draw case.
 1. **Streaming.** A `span × span` ring of chunk slots is addressed by
    chunk-coordinate modulo `span`, so a chunk keeps its slot as the player
    moves; crossing a border only regenerates the newly entered chunks.
-2. **Generation.** Per column, `terrainHeight` warps the sample point,
-   raises land out of the ocean with low-frequency *continentalness*, adds
-   hills, and lifts mountains where continentalness is high. A
-   `temperature × humidity` climate grid (plus elevation) picks the biome,
-   which decides the surface/filler blocks and the tree density.
-3. **Physics.** `Entity` integrates gravity into `velY` and lands the feet
-   on `ChunkManager.collisionHeight()` — the solid surface of the column,
-   which folds a tree trunk's top into the terrain so trunks are solid.
-   Horizontal movement keeps the whole body (a disc of `radius`) outside
-   block faces, so you cannot clip through a cliff or a trunk, while still
-   auto-stepping up gentle one-block ledges. Hard landings record an
-   `impact` the `Player` turns into fall damage; submersion drains breath
-   then health; time without damage regenerates it.
-4. **Mobs.** `MobManager` keeps a live `Mob[]`, spawns chickens / sheep /
-   cows on dry land in a ring around the player, steps each one's AI,
-   despawns the distant, and resolves a left-click into damage on the
-   nearest mob in the view cone. Each mob eases smoothly toward a target
-   heading, alternates wandering with standing to graze, hops now and then,
-   and bolts away in a panic when hit (chickens flutter down slowly).
-   Killing one starts a `dying` state: the renderer collapses it over
-   `deathFrames` (sink + squash + topple) before the manager removes it.
+2. **Generation.** Per column, low-frequency *continentalness* raises land
+   out of the ocean, *erosion* flattens or roughens it, and a ridged
+   *peaks-and-valleys* term carves mountains and valleys; height splines tie
+   them together into coherent 1.21-style landforms. A `temperature ×
+   humidity × elevation` climate grid picks the biome (one module under
+   `world/biomes/`), which decides the surface/filler blocks and tree
+   density. Cold biomes lay a thin, noise-varied **snow layer** (random
+   depth) on the ground and dust the tree canopies.
+3. **Physics.** `Entity` integrates gravity into `velY` and resolves
+   collision against the **real voxel field**: the body is a `radius`-wide,
+   `height`-tall AABB tested against every voxel it overlaps, so you can't
+   clip a cliff, a trunk or walk into a wall — and you *can* walk under
+   overhangs and into dug tunnels. Gentle ledges (≤ `stepHeight`) auto-step
+   up, and a **step-down assist** eases small drops so borders glide instead
+   of stuttering. **Partial-height blocks** (snow today, slabs later) occupy
+   their true box — one authority, `ChunkManager.blockBoxHeight`, feeds
+   collision, meshing, the picker and the selection outline alike, so the
+   hitbox always matches what you see. Hard landings become fall damage;
+   submersion drains breath then health; time without damage regenerates it.
+4. **Lighting.** A flood-filled **sky + block light** field gives every voxel
+   corner a smooth (Gouraud) light value with ambient occlusion; torches
+   inject warm block light. A **day/night cycle** moves a sun (and a
+   procedural sun/moon disc) across an **atmospheric sky gradient**;
+   **directional sun shadows** are cast with a soft, smoothed penumbra (no
+   block staircase), warm sunlight reads against cool shade, and a one-bounce
+   colour tint bleeds nearby surfaces. Bright pixels (sun, water glints) get
+   **bloom**, and the sun throws screen-space **god-rays**. Mobs are lit by
+   the same scene light, so they darken at night and under canopy. The whole
+   light field is recomputed on a **dedicated thread**.
 5. **Rendering.** World faces are near-plane clipped (so hugging a block
-   never tears a hole), projected (`1/z`) and filled with their
-   **Minecraft block texture** (perspective-correct atlas sampling), shaded
-   by `normal·light`. Mobs are stacks of textured boxes (legs/head/body
-   from the entity skins, with a walk-cycle bob) sharing the world
-   z-buffer; a struck mob flashes red. The heart HUD and crosshair are
-   painted on top.
+   never tears a hole), projected (`1/z`) and filled with their **128 px HD
+   Minecraft texture** (perspective-correct atlas sampling, a mip-chain and
+   **anisotropic filtering** for sharp near surfaces and shimmer-free
+   distance), shaded by the baked corner light + shadows. Water draws as a
+   sloped, scrolling surface with specular + Fresnel. Mobs are stacks of
+   textured boxes with a walk-cycle bob, sharing the world z-buffer; a struck
+   mob flashes red. The heart HUD, hotbar and crosshair are painted on top.
+6. **Threading.** The work that used to stutter under load now runs in
+   parallel: **audio** mixes on its own thread (no more crackle when a lot is
+   happening), the **light** engine recomputes on its own thread, the world
+   triangle queue is rasterised in **vertical tiles** across worker threads,
+   and the sky / god-ray / bloom post-passes are split into row bands
+   (`spawn` → `join`).
+7. **Mobs.** `MobManager` keeps a live `Mob[]`, spawns animals on dry land in
+   a ring around the player, steps each one's AI, despawns the distant, and
+   resolves a left-click into damage on the nearest mob in the view cone.
+   Each eases toward a target heading, alternates wandering with grazing,
+   hops now and then, and bolts in a panic when hit (chickens flutter down
+   slowly). Killing one plays a `dying` collapse (sink + squash + topple)
+   before removal.
 
 ## Textures
 
-Real Minecraft block textures are baked into `atlas.raw` (11 tiles, a
-vertical strip): grass top/side, dirt, stone, sand, snow, gravel, oak log
-side/top, leaves, water. The engine **loads `atlas.raw` at runtime**
-(`sdl.loadAtlas`, tried from the project dir or `target/`) — it is not
-embedded in the source, so textures can be re-baked without rebuilding.
+Real Minecraft block textures are baked into `atlas.raw` as a vertical strip
+of **128 px (HD)** tiles (grass top/side, dirt, stone, sand, snow, gravel,
+oak/birch log side+top, leaves, water, …). The engine **loads `atlas.raw` at
+runtime** (`sdl.loadAtlas`, tried from the project dir or `target/`) — it is
+not embedded in the source, so textures can be re-baked without rebuilding.
 `blocks.tileFor(id, dir)` maps a block face to its tile, the mesher stores
-the tile per face, and `raster.rasterTriTex` samples it.
+the tile per face, and `raster.rasterTriTex` samples it through the mip-chain
+with anisotropic taps. Re-bake with `python bake_atlas.py` (reads the HD
+resource pack, tints grass/leaves, writes `atlas.raw` to the root and
+`target/`).
 
 **Mobs** are skinned from the Minecraft entity textures under
-`assets/textures/entity/` (chicken, sheep, cow). `bake_mobs.py` crops a
-representative 64×64 tile per body part, appends them to `atlas.raw`, and
-regenerates the embedded hex; `config::useMobTextures` is on, so
-`render.drawQuad` samples those tiles (flat colour is the fallback when
-it's off). Re-run `python bake_mobs.py` after editing the entity PNGs.
-
-(Flat-colour fallback: set `useMobTextures` to `false` and the mobs draw
-from their per-part `rgb(...)` colours instead.)
+`assets/textures/entity/`. `bake_mobs.py` crops a tile per body part and
+appends them to the atlas; `config::useMobTextures` toggles textured vs
+flat-colour mobs. Re-run `python bake_mobs.py` after editing the entity PNGs.
 
 ## Seams for new features
 
-- **New block**: id in `config`, tile/colour in `blocks`, place it in
-  `manager`/`biome`.
-- **New biome**: id in `config`, a branch in `biome.biomeAt`, its
-  surface/filler/tree-density.
-- **New animal**: a new `Entity` subclass (copy `mob`), a spawn case in
-  `mobs`, and a draw case in `render`.
-- **Editing the world** (dig / place): implemented — `ChunkManager.breakAt`
-  / `placeAt` rewrite the chunk's full voxel field (and neighbour skirts) and
-  re-`buildMesh` the affected slots; a look-ray (`Picker` in `main.axle`)
-  picks the targeted voxel.
+- **New block**: id in `configs/blocks`, tile/colour & predicates in
+  `world/blocks`, place it in `manager`/`biome`.
+- **New partial block** (slab, carpet): one `match` arm in
+  `ChunkManager.blockBoxHeight` plus listing it in `blocks.isPartialShape` —
+  collision, meshing, picking and the selection outline pick it up for free.
+- **New biome**: a module under `world/biomes/` + an entry in the registry,
+  with its climate band, surface/filler and tree density.
+- **New animal**: a new `Entity` subclass (copy an existing one), a spawn
+  case in `mobs`, and a draw case in `render`.
+- **Editing the world** (dig / place): `ChunkManager.breakAt` / `placeAt`
+  rewrite the chunk's voxel field (and neighbour skirts) and re-`buildMesh`
+  the affected slots; the look-ray `Picker` (`game/ray.axle`) picks the
+  targeted voxel against its real per-block box.
 
 ## Notes / limitations
 
-- The world is now a **full voxel field** per chunk (an id per voxel, padded
-  with a one-voxel skirt of neighbour data for seamless meshing); terrain,
-  trees and player edits all live in it and the mesher emits a face wherever
-  a block meets air.
-- Collision is still **column-based**: entities stand on a per-column solid
-  height (`ctop`, the highest collidable voxel, tree trunks and placed blocks
-  included; leaf canopies passable). So you can dig pits and build up, but you
-  can't yet walk under an overhang or into a horizontally-dug tunnel — a
-  voxel-accurate collision pass is the next step.
+- Collision is **voxel-accurate**: the body AABB is tested against every
+  overlapping voxel (trunks and placed blocks included; leaf canopies stay
+  passable), so overhangs and dug tunnels work. Partial blocks use their real
+  box height.
 - Edits are not persisted: a chunk that streams out of the loaded ring and
   back is regenerated, discarding edits made to it.
 - The loop runs a **fixed timestep** (`config::tickHz`, default 60): the
