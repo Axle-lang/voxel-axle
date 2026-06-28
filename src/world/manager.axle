@@ -56,6 +56,9 @@ class ChunkManager {
                      // (stepSunShadows → sunRaySoft); read at render to soften
                      // shadowed sky-lit faces. Sweeps as the sun moves.
     sunCursor : i32, // round-robin slot index for the throttled shadow refresh
+    curDayTime : f64,       // latest time-of-day, published by the main loop each
+                            // frame for the background light thread to read
+    lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
     skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (ambient
                      // occlusion / one-bounce-free GI): fraction of upper-
                      // hemisphere rays that escape to the sky. Static (doesn't
@@ -112,6 +115,8 @@ class ChunkManager {
         this.skylight = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunlit = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.sunCursor = 0;
+        this.curDayTime = config::dayStart;
+        this.lightRunning = new AtomicBoolean(true);
         this.skyaccess = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
         this.skyAOdirty = malloc<i32>(slots);
         this.skyAOcursor = 0;
@@ -2017,6 +2022,34 @@ class ChunkManager {
         }
     }
 
+    /** Publish the current time of day for the background light thread. */
+    fn setDayTime(d : f64) : void {
+        this.curDayTime = d;
+    }
+
+    /** Tell the background light thread to stop (call before joining it). */
+    fn stopLight() : void {
+        this.lightRunning.set(false);
+    }
+
+    /** Whether the background light thread should keep running. */
+    fn lightAlive() : bool {
+        return this.lightRunning.get();
+    }
+
+    /**
+     * One pass of the whole lighting system: refresh the directional sun-shadow
+     * map and bake any pending hemispherical sky-access / colour-bounce. Run by
+     * the dedicated light thread (lightLoop), reading the time of day published
+     * by the main loop. Writes only the per-voxel light maps (sunlit / skyaccess
+     * / bounce); the render thread reads them byte-wise, so a torn read is at
+     * worst one frame stale — never a crash (the chunk ring never reallocates).
+     */
+    fn stepLight() : void {
+        this.stepSunShadows(this.curDayTime, config::sunChunksPerTick);
+        this.stepSkyAO(config::skyAOChunksPerTick);
+    }
+
     /**
      * Dig (set to air) a world voxel.
      * @param wx  the world x coordinate
@@ -2037,4 +2070,22 @@ class ChunkManager {
     fn placeAt(wx : i32, wy : i32, wz : i32, block : Block) : void {
         this.setVoxel(wx, wy, wz, block);
     }
+}
+
+/**
+ * The light thread body: continuously refresh the sun-shadow map and bake sky
+ * access / colour bounce, decoupled from the render thread, so heavy frames
+ * never delay the lighting and the main loop never blocks on it. Reads the time
+ * of day the main loop publishes via setDayTime; paced by a short sleep so it
+ * advances at a steady rate independent of the render frame rate. Runs on its
+ * own OS thread (spawned in main); exits when stopLight() is called.
+ * @param man  the chunk manager owning the light maps
+ * @return 0 (Task result unused)
+ */
+fn lightLoop(man : ChunkManager) : i32 {
+    while (man.lightAlive()) {
+        man.stepLight();
+        System::sleep(8);
+    }
+    return 0;
 }

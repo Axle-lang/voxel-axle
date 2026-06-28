@@ -34,7 +34,7 @@ use crate::clock::GameClock;
 use crate::input::{
     SC_W, SC_A, SC_S, SC_D, SC_SPACE, SC_LCTRL, SC_LSHIFT, SC_F3, SC_F4, SC_ESC, SC_1,
 };
-use crate::world::manager::ChunkManager;
+use crate::world::manager::{ ChunkManager, lightLoop };
 use crate::world::blocksim::BlockSim;
 use crate::entities::player::Player;
 use crate::entities::mobs::MobManager;
@@ -64,21 +64,6 @@ fn axis(kb : i64, plus : i32, minus : i32) : f64 {
         v = v - 1.0;
     }
     return v;
-}
-
-/**
- * Worker job: the directional sun-shadow bake, run on its own OS thread (via
- * `spawn`) so it overlaps the hemispherical sky-access bake on the main thread.
- * The two write disjoint per-voxel maps (sunlit vs skyaccess/bounce) and only
- * read the world, so they are data-race free; both are joined before the render
- * reads them — staying in lock-step with the frame/tick.
- * @param man      the chunk manager
- * @param dayTime  time of day (0..1) driving the sun direction
- * @return 0 (Task result is unused; spawn requires a value)
- */
-fn bakeSunJob(man : ChunkManager, dayTime : f64) : i32 {
-    man.stepSunShadows(dayTime, config::sunChunksPerTick);
-    return 0;
 }
 
 /**
@@ -177,6 +162,12 @@ fn main() : void {
     // frame can't starve the queue and stutter the sound (the queue is topped up
     // every few ms regardless of frame time). Stopped + joined at quit.
     let audioTask : Task<i32> = spawn audioLoop(sfx);
+    // The whole lighting system (sun shadows + sky-access + colour bounce) runs
+    // on its own OS thread, reading the time of day the main loop publishes. It
+    // updates the per-voxel light maps continuously and independently of the
+    // render frame rate, so heavy frames never delay the light and the main loop
+    // never blocks on it. Stopped + joined at quit.
+    let lightTask : Task<i32> = spawn lightLoop(man);
     let attackCd : i32 = 0;
     let footTimer : i32 = 0;       // frames until the next footfall
     let prevHp : i32 = player.hp;  // to detect the player taking damage
@@ -466,14 +457,10 @@ fn main() : void {
             // Day clock: advances with the fixed-step tick, wrapped to [0, 1).
             let dayTime : f64 = config::dayStart + (sched.tick as f64) / (config::dayLengthTicks as f64);
             dayTime = dayTime - (Math::floorToInt(dayTime) as f64);
-            // Lighting bakes in parallel, synced to the frame: the sun-shadow
-            // bake runs on a worker thread while the main thread does the
-            // hemispherical sky-access / colour-bounce bake. They touch disjoint
-            // per-voxel maps and only read the world, so there is no data race;
-            // both finish (join) before the render reads them.
-            let sunTask : Task<i32> = spawn bakeSunJob(man, dayTime);
-            man.stepSkyAO(config::skyAOChunksPerTick);
-            let sunDone : i32 = sunTask.join();
+            // Publish the time of day for the dedicated light thread (it bakes
+            // the sun shadows + sky access continuously off the render path); the
+            // render just reads the latest light maps.
+            man.setDayTime(dayTime);
             renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
             renderer.renderMobs(man, mobs, player, pixels, zbuf, w, h);
             renderer.renderTorches(man, player, pixels, zbuf, w, h);
@@ -508,9 +495,11 @@ fn main() : void {
         clock.cap();
     }
 
-    // Stop the audio thread and wait for it before tearing down SDL.
+    // Stop the worker threads (audio + lighting) and wait for them before SDL teardown.
     sfx.stop();
+    man.stopLight();
     let audioDone : i32 = audioTask.join();
+    let lightDone : i32 = lightTask.join();
 
     cfree(asPtr(pixels));
     cfree(asPtr(zbuf));
