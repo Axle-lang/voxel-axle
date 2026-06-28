@@ -10,7 +10,8 @@
 
 use sdl_platform::{allocBytes, getF64, setF64, putPixel, readI32, readU8, rgb};
 use crate::gfx::color::{scaleRgb, tintIf};
-use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert, RasterTri};
+use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert, RasterTri, FrameBuf};
+use crate::vec3::{ Vec3, vec3 };
 use crate::entities::player::Player;
 use crate::world::manager::ChunkManager;
 use crate::entities::mobs::MobManager;
@@ -1375,7 +1376,11 @@ class Renderer {
         }
     }
 
-    fn render(man : ChunkManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32, underwater : bool, phase : f64, dayTime : f64) : void {
+    fn render(man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
+        let pixels : i64 = fb.pixels;
+        let zbuf : i64 = fb.zbuf;
+        let w : i32 = fb.w;
+        let h : i32 = fb.h;
         // Refresh the sun direction, daylight factor and sky/fog colour.
         this.updateDayState(dayTime);
         // Underwater the cleared "void" becomes deep water instead of sky.
@@ -1383,7 +1388,7 @@ class Renderer {
         if (underwater) {
             bg = rgb(config::waterDeepR, config::waterDeepG, config::waterDeepB);
         }
-        clearFrame(pixels, zbuf, w, h, bg);
+        clearFrame(fb, bg);
         // Atmospheric sky gradient + warm sun halo over the cleared frame, then
         // the sun/moon discs ride on top — all behind the world (above water).
         if (!underwater) {
@@ -1415,20 +1420,20 @@ class Renderer {
         let nT : i32 = config::rasterTiles;
         if (nT >= 4) {
             let bw : i32 = (w + 3) / 4;
-            let ta : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw, bw * 2);
-            let tb : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw * 2, bw * 3);
-            let tc : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw * 3, w);
-            this.rasterizeBand(pixels, zbuf, w, h, 0, bw);
+            let ta : Task<i32> = spawn rasterTilesJob(this, fb, bw, bw * 2);
+            let tb : Task<i32> = spawn rasterTilesJob(this, fb, bw * 2, bw * 3);
+            let tc : Task<i32> = spawn rasterTilesJob(this, fb, bw * 3, w);
+            this.rasterizeBand(fb, 0, bw);
             let da : i32 = ta.join();
             let db : i32 = tb.join();
             let dc : i32 = tc.join();
         } else if (nT == 2) {
             let bw : i32 = (w + 1) / 2;
-            let ta : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw, w);
-            this.rasterizeBand(pixels, zbuf, w, h, 0, bw);
+            let ta : Task<i32> = spawn rasterTilesJob(this, fb, bw, w);
+            this.rasterizeBand(fb, 0, bw);
             let da : i32 = ta.join();
         } else {
-            this.rasterizeBand(pixels, zbuf, w, h, 0, w);
+            this.rasterizeBand(fb, 0, w);
         }
     }
 
@@ -1437,12 +1442,12 @@ class Renderer {
      * [bx0, bx1). Each band is disjoint, so threads never touch the same z-buffer
      * pixel. Called by the main thread and the rasterTilesJob worker.
      */
-    fn rasterizeBand(pixels : i64, zbuf : i64, w : i32, h : i32, bx0 : i32, bx1 : i32) : void {
+    fn rasterizeBand(fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
         let i : i32 = 0;
         while (i < this.triN) {
             let tri : RasterTri = this.triBuf[i];
             let wrap : bool = tri.wrap != 0;
-            rasterTriTex(pixels, zbuf, w, h, tri.a, tri.b, tri.c,
+            rasterTriTex(fb, tri.a, tri.b, tri.c,
                 this.mips, tri.tile, this.mipOff, this.mipSz,
                 wrap, this.skyColR, this.skyColG, this.skyColB, bx0, bx1);
             i = i + 1;
@@ -1460,7 +1465,7 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn renderTorches(man : ChunkManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn renderTorches(man : ChunkManager, p : Player, fb : FrameBuf) : void {
         let hw : f64 = 0.09;
         let ht : f64 = 0.55;
         let col : i32 = rgb(240, 180, 70);
@@ -1481,11 +1486,11 @@ class Renderer {
                     let z1 : f64 = cz + hw;
                     let y0 : f64 = man.ty[base + ti] as f64;
                     let y1 : f64 = y0 + ht;
-                    this.drawQuad(p, pixels, zbuf, w, h, x1, y0, z1, x1, y0, z0, x1, y1, z0, x1, y1, z1, 1.0, 0.0, 0.0, col, tl, false);
-                    this.drawQuad(p, pixels, zbuf, w, h, x0, y0, z0, x0, y0, z1, x0, y1, z1, x0, y1, z0, 0.0 - 1.0, 0.0, 0.0, col, tl, false);
-                    this.drawQuad(p, pixels, zbuf, w, h, x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, 0.0, 0.0, 1.0, col, tl, false);
-                    this.drawQuad(p, pixels, zbuf, w, h, x1, y0, z0, x0, y0, z0, x0, y1, z0, x1, y1, z0, 0.0, 0.0, 0.0 - 1.0, col, tl, false);
-                    this.drawQuad(p, pixels, zbuf, w, h, x0, y1, z0, x1, y1, z0, x1, y1, z1, x0, y1, z1, 0.0, 1.0, 0.0, col, tl, false);
+                    this.drawQuad(p, fb, vec3(x1, y0, z1), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(1.0, 0.0, 0.0), col, tl, false);
+                    this.drawQuad(p, fb, vec3(x0, y0, z0), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x0, y1, z0), vec3(0.0 - 1.0, 0.0, 0.0), col, tl, false);
+                    this.drawQuad(p, fb, vec3(x0, y0, z1), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 0.0, 1.0), col, tl, false);
+                    this.drawQuad(p, fb, vec3(x1, y0, z0), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(0.0, 0.0, 0.0 - 1.0), col, tl, false);
+                    this.drawQuad(p, fb, vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 1.0, 0.0), col, tl, false);
                     ti = ti + 1;
                 }
             }
@@ -1631,10 +1636,16 @@ class Renderer {
      * @param tile    atlas tile index, or negative for flat-shaded
      * @param hurt    true to tint the face red for the damage flash
      */
-    fn drawQuad(p : Player, pixels : i64, zbuf : i64, w : i32, h : i32,
-        ax : f64, ay : f64, az : f64, bx : f64, by : f64, bz : f64,
-        cx : f64, cy : f64, cz : f64, dx : f64, dy : f64, dz : f64,
-        nx : f64, ny : f64, nz : f64, color : i32, tile : i32, hurt : bool) : void {
+    fn drawQuad(p : Player, fb : FrameBuf, a : Vec3, b : Vec3, c : Vec3, d : Vec3, n : Vec3, color : i32, tile : i32, hurt : bool) : void {
+        let pixels : i64 = fb.pixels;
+        let zbuf : i64 = fb.zbuf;
+        let w : i32 = fb.w;
+        let h : i32 = fb.h;
+        let ax : f64 = a.x; let ay : f64 = a.y; let az : f64 = a.z;
+        let bx : f64 = b.x; let by : f64 = b.y; let bz : f64 = b.z;
+        let cx : f64 = c.x; let cy : f64 = c.y; let cz : f64 = c.z;
+        let dx : f64 = d.x; let dy : f64 = d.y; let dz : f64 = d.z;
+        let nx : f64 = n.x; let ny : f64 = n.y; let nz : f64 = n.z;
         let mx : f64 = (ax + bx + cx + dx) * 0.25;
         let my : f64 = (ay + by + cy + dy) * 0.25;
         let mz : f64 = (az + bz + cz + dz) * 0.25;
@@ -1679,20 +1690,20 @@ class Renderer {
                 tb = bright * 0.4;
             }
 
-            rasterTriTex(pixels, zbuf, w, h,
+            rasterTriTex(fb,
                 RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB, 0, w);
-            rasterTriTex(pixels, zbuf, w, h,
+            rasterTriTex(fb,
                 RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB, 0, w);
         } else {
             let col : i32 = scaleRgb(tintIf(hurt, color), bright);
-            rasterTri(pixels, zbuf, w, h, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
-            rasterTri(pixels, zbuf, w, h, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
+            rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
+            rasterTri(fb, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
         }
     }
 
@@ -1715,15 +1726,15 @@ class Renderer {
      * @param tile    atlas tile index, or negative for flat-shaded
      * @param hurt    true to tint the face red for the damage flash
      */
-    fn oquad(p : Player, pixels : i64, zbuf : i64, w : i32, h : i32,
+    fn oquad(p : Player, fb : FrameBuf,
         i0 : i32, i1 : i32, i2 : i32, i3 : i32,
         nx : f64, ny : f64, nz : f64, color : i32, tile : i32, hurt : bool) : void {
-        this.drawQuad(p, pixels, zbuf, w, h,
-            getF64(this.obx, i0), getF64(this.oby, i0), getF64(this.obz, i0),
-            getF64(this.obx, i1), getF64(this.oby, i1), getF64(this.obz, i1),
-            getF64(this.obx, i2), getF64(this.oby, i2), getF64(this.obz, i2),
-            getF64(this.obx, i3), getF64(this.oby, i3), getF64(this.obz, i3),
-            nx, ny, nz, color, tile, hurt);
+        this.drawQuad(p, fb,
+            vec3(getF64(this.obx, i0), getF64(this.oby, i0), getF64(this.obz, i0)),
+            vec3(getF64(this.obx, i1), getF64(this.oby, i1), getF64(this.obz, i1)),
+            vec3(getF64(this.obx, i2), getF64(this.oby, i2), getF64(this.obz, i2)),
+            vec3(getF64(this.obx, i3), getF64(this.oby, i3), getF64(this.obz, i3)),
+            vec3(nx, ny, nz), color, tile, hurt);
     }
 
     /**
@@ -1750,7 +1761,7 @@ class Renderer {
      * @param skinTile  atlas tile for the non-forward faces
      * @param faceTile  atlas tile for the +forward face
      */
-    fn drawObox(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32,
+    fn drawObox(p : Player, m : Mob, fb : FrameBuf,
         mr : f64, my : f64, mf : f64, hr : f64, hy : f64, hf : f64,
         color : i32, skinTile : i32, faceTile : i32) : void {
         let fwdx : f64 = Math::cos(m.heading);
@@ -1803,14 +1814,14 @@ class Renderer {
         let unx : f64 = st * rgtx;
         let uny : f64 = ct;
         let unz : f64 = st * rgtz;
-        this.oquad(p, pixels, zbuf, w, h, 1, 5, 7, 3, rnx, rny, rnz, color, skinTile, hurt);
-        this.oquad(p, pixels, zbuf, w, h, 4, 0, 2, 6, 0.0 - rnx, 0.0 - rny, 0.0 - rnz, color, skinTile, hurt);
-        this.oquad(p, pixels, zbuf, w, h, 2, 3, 7, 6, unx, uny, unz, color, skinTile, hurt);
-        this.oquad(p, pixels, zbuf, w, h, 4, 5, 7, 6, fwdx, 0.0, fwdz, color, faceTile, hurt);
-        this.oquad(p, pixels, zbuf, w, h, 1, 0, 2, 3, 0.0 - fwdx, 0.0, 0.0 - fwdz, color, skinTile, hurt);
+        this.oquad(p, fb, 1, 5, 7, 3, rnx, rny, rnz, color, skinTile, hurt);
+        this.oquad(p, fb, 4, 0, 2, 6, 0.0 - rnx, 0.0 - rny, 0.0 - rnz, color, skinTile, hurt);
+        this.oquad(p, fb, 2, 3, 7, 6, unx, uny, unz, color, skinTile, hurt);
+        this.oquad(p, fb, 4, 5, 7, 6, fwdx, 0.0, fwdz, color, faceTile, hurt);
+        this.oquad(p, fb, 1, 0, 2, 3, 0.0 - fwdx, 0.0, 0.0 - fwdz, color, skinTile, hurt);
         // Once tipping over, the underside comes into view, so draw it too.
         if (pr > 0.0) {
-            this.oquad(p, pixels, zbuf, w, h, 0, 1, 5, 4, 0.0 - unx, 0.0 - uny, 0.0 - unz, color, skinTile, hurt);
+            this.oquad(p, fb, 0, 1, 5, 4, 0.0 - unx, 0.0 - uny, 0.0 - unz, color, skinTile, hurt);
         }
     }
 
@@ -1824,16 +1835,16 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn drawChicken(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn drawChicken(p : Player, m : Mob, fb : FrameBuf) : void {
         let sw : f64 = Math::sin(m.walkPhase) * 0.08;   // forward leg stride
         let leg : i32 = rgb(232, 150, 40);
         let body : i32 = rgb(236, 236, 232);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.07, 0.10, sw, 0.035, 0.10, 0.04, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.07, 0.10, 0.0 - sw, 0.035, 0.10, 0.04, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.27, 0.0, 0.15, 0.14, 0.18, body, config::tlChickenBody, config::tlChickenBody);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.47, 0.18, 0.11, 0.12, 0.10, body, config::tlChickenBody, config::tlChickenHead);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.45, 0.30, 0.05, 0.04, 0.06, rgb(232, 170, 40), 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.58, 0.08, 0.05, 0.06, 0.04, rgb(200, 40, 40), 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.07, 0.10, sw, 0.035, 0.10, 0.04, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0 - 0.07, 0.10, 0.0 - sw, 0.035, 0.10, 0.04, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0, 0.27, 0.0, 0.15, 0.14, 0.18, body, config::tlChickenBody, config::tlChickenBody);
+        this.drawObox(p, m, fb, 0.0, 0.47, 0.18, 0.11, 0.12, 0.10, body, config::tlChickenBody, config::tlChickenHead);
+        this.drawObox(p, m, fb, 0.0, 0.45, 0.30, 0.05, 0.04, 0.06, rgb(232, 170, 40), 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0, 0.58, 0.08, 0.05, 0.06, 0.04, rgb(200, 40, 40), 0 - 1, 0 - 1);
     }
 
     /**
@@ -1846,15 +1857,15 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn drawSheep(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn drawSheep(p : Player, m : Mob, fb : FrameBuf) : void {
         let sw : f64 = Math::sin(m.walkPhase) * 0.11;
         let leg : i32 = rgb(54, 46, 40);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.20, 0.16, 0.18 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.20, 0.16, 0.18 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.20, 0.16, 0.0 - 0.18 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.20, 0.16, 0.0 - 0.18 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.50, 0.0, 0.28, 0.30, 0.40, rgb(232, 230, 222), config::tlSheepWool, config::tlSheepWool);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.54, 0.46, 0.15, 0.15, 0.14, rgb(226, 222, 214), config::tlSheepWool, config::tlSheepHead);
+        this.drawObox(p, m, fb, 0.0 - 0.20, 0.16, 0.18 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.20, 0.16, 0.18 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0 - 0.20, 0.16, 0.0 - 0.18 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.20, 0.16, 0.0 - 0.18 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0, 0.50, 0.0, 0.28, 0.30, 0.40, rgb(232, 230, 222), config::tlSheepWool, config::tlSheepWool);
+        this.drawObox(p, m, fb, 0.0, 0.54, 0.46, 0.15, 0.15, 0.14, rgb(226, 222, 214), config::tlSheepWool, config::tlSheepHead);
     }
 
     /**
@@ -1866,15 +1877,15 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn drawCow(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn drawCow(p : Player, m : Mob, fb : FrameBuf) : void {
         let sw : f64 = Math::sin(m.walkPhase) * 0.12;
         let leg : i32 = rgb(70, 54, 44);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.26, 0.20, 0.24 + sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.26, 0.20, 0.24 - sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.26, 0.20, 0.0 - 0.24 - sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.26, 0.20, 0.0 - 0.24 + sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.60, 0.0, 0.38, 0.34, 0.50, rgb(110, 86, 66), config::tlCowBody, config::tlCowBody);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.64, 0.58, 0.18, 0.18, 0.18, rgb(110, 86, 66), config::tlCowBody, config::tlCowHead);
+        this.drawObox(p, m, fb, 0.0 - 0.26, 0.20, 0.24 + sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.26, 0.20, 0.24 - sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0 - 0.26, 0.20, 0.0 - 0.24 - sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.26, 0.20, 0.0 - 0.24 + sw, 0.09, 0.20, 0.09, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0, 0.60, 0.0, 0.38, 0.34, 0.50, rgb(110, 86, 66), config::tlCowBody, config::tlCowBody);
+        this.drawObox(p, m, fb, 0.0, 0.64, 0.58, 0.18, 0.18, 0.18, rgb(110, 86, 66), config::tlCowBody, config::tlCowHead);
     }
 
     /**
@@ -1886,16 +1897,16 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn drawPig(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn drawPig(p : Player, m : Mob, fb : FrameBuf) : void {
         let sw : f64 = Math::sin(m.walkPhase) * 0.10;
         let leg : i32 = rgb(196, 128, 128);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.20, 0.16, 0.20 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.20, 0.16, 0.20 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0 - 0.20, 0.16, 0.0 - 0.20 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.20, 0.16, 0.0 - 0.20 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.46, 0.0, 0.30, 0.26, 0.42, rgb(222, 150, 150), config::tlPigBody, config::tlPigBody);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.50, 0.48, 0.18, 0.17, 0.16, rgb(226, 156, 156), config::tlPigBody, config::tlPigHead);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.47, 0.64, 0.08, 0.07, 0.05, rgb(232, 170, 170), 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0 - 0.20, 0.16, 0.20 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.20, 0.16, 0.20 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0 - 0.20, 0.16, 0.0 - 0.20 - sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.20, 0.16, 0.0 - 0.20 + sw, 0.07, 0.16, 0.07, leg, 0 - 1, 0 - 1);
+        this.drawObox(p, m, fb, 0.0, 0.46, 0.0, 0.30, 0.26, 0.42, rgb(222, 150, 150), config::tlPigBody, config::tlPigBody);
+        this.drawObox(p, m, fb, 0.0, 0.50, 0.48, 0.18, 0.17, 0.16, rgb(226, 156, 156), config::tlPigBody, config::tlPigHead);
+        this.drawObox(p, m, fb, 0.0, 0.47, 0.64, 0.08, 0.07, 0.05, rgb(232, 170, 170), 0 - 1, 0 - 1);
     }
 
     /**
@@ -1911,7 +1922,7 @@ class Renderer {
      * @param w       framebuffer width
      * @param h       framebuffer height
      */
-    fn drawCreeper(p : Player, m : Mob, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn drawCreeper(p : Player, m : Mob, fb : FrameBuf) : void {
         let sw : f64 = Math::sin(m.walkPhase) * 0.10;
 
         // Pick the skin/face tiles and matching base tints for the current
@@ -1953,12 +1964,12 @@ class Renderer {
         // Four legs (plain skin), the upright body (vest), then the head
         // whose forward face carries the creeper / meme mug. Every extent
         // and offset is scaled by `s` so the swell grows from the feet.
-        this.drawObox(p, m, pixels, zbuf, w, h, (0.0 - 0.12) * s, 0.13 * s, (0.12 + sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.12 * s, 0.13 * s, (0.12 - sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
-        this.drawObox(p, m, pixels, zbuf, w, h, (0.0 - 0.12) * s, 0.13 * s, (0.0 - 0.12 - sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.12 * s, 0.13 * s, (0.0 - 0.12 + sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 0.58 * s, 0.0, 0.16 * s, 0.32 * s, 0.11 * s, body, skin, skin);
-        this.drawObox(p, m, pixels, zbuf, w, h, 0.0, 1.06 * s, 0.0, 0.18 * s, 0.18 * s, 0.18 * s, body, skin, face);
+        this.drawObox(p, m, fb, (0.0 - 0.12) * s, 0.13 * s, (0.12 + sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
+        this.drawObox(p, m, fb, 0.12 * s, 0.13 * s, (0.12 - sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
+        this.drawObox(p, m, fb, (0.0 - 0.12) * s, 0.13 * s, (0.0 - 0.12 - sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
+        this.drawObox(p, m, fb, 0.12 * s, 0.13 * s, (0.0 - 0.12 + sw) * s, 0.07 * s, 0.13 * s, 0.07 * s, leg, legTile, legTile);
+        this.drawObox(p, m, fb, 0.0, 0.58 * s, 0.0, 0.16 * s, 0.32 * s, 0.11 * s, body, skin, skin);
+        this.drawObox(p, m, fb, 0.0, 1.06 * s, 0.0, 0.18 * s, 0.18 * s, 0.18 * s, body, skin, face);
     }
 
     /**
@@ -1994,7 +2005,7 @@ class Renderer {
         return config::lightMin + (1.0 - config::lightMin) * cf;
     }
 
-    fn renderMobs(man : ChunkManager, mm : MobManager, p : Player, pixels : i64, zbuf : i64, w : i32, h : i32) : void {
+    fn renderMobs(man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf) : void {
         // One typed array per species; draw funcs take the base Mob (the
         // accessors upcast), reading only inherited fields. Each mob's ambient
         // light factor is sampled once (mobLight) and applied in drawQuad.
@@ -2002,35 +2013,35 @@ class Renderer {
         while (i < mm.chN) {
             let m : Mob = mm.chickenAt(i);
             this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
-            this.drawChicken(p, m, pixels, zbuf, w, h);
+            this.drawChicken(p, m, fb);
             i = i + 1;
         }
         i = 0;
         while (i < mm.shN) {
             let m : Mob = mm.sheepAt(i);
             this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
-            this.drawSheep(p, m, pixels, zbuf, w, h);
+            this.drawSheep(p, m, fb);
             i = i + 1;
         }
         i = 0;
         while (i < mm.coN) {
             let m : Mob = mm.cowAt(i);
             this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
-            this.drawCow(p, m, pixels, zbuf, w, h);
+            this.drawCow(p, m, fb);
             i = i + 1;
         }
         i = 0;
         while (i < mm.pgN) {
             let m : Mob = mm.pigAt(i);
             this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
-            this.drawPig(p, m, pixels, zbuf, w, h);
+            this.drawPig(p, m, fb);
             i = i + 1;
         }
         i = 0;
         while (i < mm.crN) {
             let m : Mob = mm.creeperAt(i);
             this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z);
-            this.drawCreeper(p, m, pixels, zbuf, w, h);
+            this.drawCreeper(p, m, fb);
             i = i + 1;
         }
     }
@@ -2093,7 +2104,11 @@ class Renderer {
      * @param iz      inverse depth of the dot
      * @param color   dot color
      */
-    fn selDot(pixels : i64, zbuf : i64, w : i32, h : i32, px : i32, py : i32, iz : f64, color : i32) : void {
+    fn selDot(fb : FrameBuf, px : i32, py : i32, iz : f64, color : i32) : void {
+        let pixels : i64 = fb.pixels;
+        let zbuf : i64 = fb.zbuf;
+        let w : i32 = fb.w;
+        let h : i32 = fb.h;
         let yy : i32 = py;
         while (yy <= py + 1) {
             let xx : i32 = px;
@@ -2122,7 +2137,7 @@ class Renderer {
      * @param b       second projected corner slot
      * @param color   line color
      */
-    fn selEdge(pixels : i64, zbuf : i64, w : i32, h : i32, a : i32, b : i32, color : i32) : void {
+    fn selEdge(fb : FrameBuf, a : i32, b : i32, color : i32) : void {
         let ax : f64 = getF64(this.csx, a);
         let bx : f64 = getF64(this.csx, b);
         if (ax < 0.0 - 1.0e8 || bx < 0.0 - 1.0e8) {
@@ -2156,7 +2171,7 @@ class Renderer {
             let px : i32 = Math::floorToInt(ax + ddx * t) as i32;
             let py : i32 = Math::floorToInt(ay + ddy * t) as i32;
             let iz : f64 = aiz + (biz - aiz) * t;
-            this.selDot(pixels, zbuf, w, h, px, py, iz, color);
+            this.selDot(fb, px, py, iz, color);
             i = i + 1;
         }
     }
@@ -2175,7 +2190,7 @@ class Renderer {
      * @param by      targeted block y
      * @param bz      targeted block z
      */
-    fn drawSelection(p : Player, pixels : i64, zbuf : i64, w : i32, h : i32, bx : i32, by : i32, bz : i32) : void {
+    fn drawSelection(p : Player, fb : FrameBuf, bx : i32, by : i32, bz : i32) : void {
         let k : i32 = 0;
         while (k < 8) {
             let cdx : f64 = (k & 1) as f64;
@@ -2187,18 +2202,18 @@ class Renderer {
             k = k + 1;
         }
         let col : i32 = rgb(36, 38, 44);
-        this.selEdge(pixels, zbuf, w, h, 0, 1, col);
-        this.selEdge(pixels, zbuf, w, h, 2, 3, col);
-        this.selEdge(pixels, zbuf, w, h, 4, 5, col);
-        this.selEdge(pixels, zbuf, w, h, 6, 7, col);
-        this.selEdge(pixels, zbuf, w, h, 0, 2, col);
-        this.selEdge(pixels, zbuf, w, h, 1, 3, col);
-        this.selEdge(pixels, zbuf, w, h, 4, 6, col);
-        this.selEdge(pixels, zbuf, w, h, 5, 7, col);
-        this.selEdge(pixels, zbuf, w, h, 0, 4, col);
-        this.selEdge(pixels, zbuf, w, h, 1, 5, col);
-        this.selEdge(pixels, zbuf, w, h, 2, 6, col);
-        this.selEdge(pixels, zbuf, w, h, 3, 7, col);
+        this.selEdge(fb,0, 1, col);
+        this.selEdge(fb,2, 3, col);
+        this.selEdge(fb,4, 5, col);
+        this.selEdge(fb,6, 7, col);
+        this.selEdge(fb,0, 2, col);
+        this.selEdge(fb,1, 3, col);
+        this.selEdge(fb,4, 6, col);
+        this.selEdge(fb,5, 7, col);
+        this.selEdge(fb,0, 4, col);
+        this.selEdge(fb,1, 5, col);
+        this.selEdge(fb,2, 6, col);
+        this.selEdge(fb,3, 7, col);
     }
 }
 
@@ -2220,8 +2235,8 @@ fn skyGradientJob(r : Renderer, p : Player, pixels : i64, w : i32, h : i32, y0 :
 }
 
 /** Worker job: rasterise the world triangle queue into one column band. */
-fn rasterTilesJob(r : Renderer, pixels : i64, zbuf : i64, w : i32, h : i32, bx0 : i32, bx1 : i32) : i32 {
-    r.rasterizeBand(pixels, zbuf, w, h, bx0, bx1);
+fn rasterTilesJob(r : Renderer, fb : FrameBuf, bx0 : i32, bx1 : i32) : i32 {
+    r.rasterizeBand(fb, bx0, bx1);
     return 0;
 }
 

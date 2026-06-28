@@ -43,6 +43,7 @@ use crate::game::ray::{Picker, cellInPlayer};
 use crate::game::sfx::{ AudioManager, audioLoop };
 use crate::game::tick::TickManager;
 use crate::gfx::render::Renderer;
+use crate::gfx::raster::FrameBuf;
 use crate::gfx::hud::drawHud;
 use crate::gfx::menu::{drawPauseMenu, menuHit};
 use crate::config;
@@ -467,9 +468,12 @@ fn main() : void {
             // the sun shadows + sky access continuously off the render path); the
             // render just reads the latest light maps.
             man.setDayTime(dayTime);
-            renderer.render(man, player, pixels, zbuf, w, h, underwater, phase, dayTime);
-            renderer.renderMobs(man, mobs, player, pixels, zbuf, w, h);
-            renderer.renderTorches(man, player, pixels, zbuf, w, h);
+            // Bundle the render target (rebuilt each frame — a resize reallocs
+            // pixels/zbuf and changes w).
+            let fb : FrameBuf = FrameBuf { pixels: pixels, zbuf: zbuf, w: w, h: h };
+            renderer.render(man, player, fb, underwater, phase, dayTime);
+            renderer.renderMobs(man, mobs, player, fb);
+            renderer.renderTorches(man, player, fb);
             // Volumetric god-rays from the sun (above water only); then the
             // living-water post-pass (depth fog + moving caustics) under the HUD.
             if (underwater) {
@@ -481,7 +485,7 @@ fn main() : void {
             renderer.bloomPass(pixels, w, h);
             if (!paused) {
                 if (picker.hit == 1) {
-                    renderer.drawSelection(player, pixels, zbuf, w, h, picker.bx, picker.by, picker.bz);
+                    renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz);
                 }
                 drawHud(pixels, w, h, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
                 renderer.crosshair(pixels, w, h);

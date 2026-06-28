@@ -8,6 +8,18 @@ use crate::config;
 use crate::mathx::{ clampF64, clampI32 };
 
 /**
+ * The render target bundle: framebuffer + z-buffer base pointers and the frame
+ * size. A value-type struct passed in place of the four loose `pixels, zbuf, w,
+ * h` arguments that every render/raster routine used to take.
+ */
+struct FrameBuf {
+    pixels : i64,
+    zbuf : i64,
+    w : i32,
+    h : i32,
+}
+
+/**
  * Lesser of two f64 values.
  * @param a  first value.
  * @param b  second value.
@@ -55,8 +67,10 @@ fn edge(ax : f64, ay : f64, bx : f64, by : f64, px : f64, py : f64) : f64 {
  * @param h       framebuffer height.
  * @param bg      background colour.
  */
-fn clearFrame(pixels : i64, zbuf : i64, w : i32, h : i32, bg : i32) : void {
-    let n : i32 = w * h;
+fn clearFrame(fb : FrameBuf, bg : i32) : void {
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let n : i32 = fb.w * fb.h;
     let i : i32 = 0;
     while (i < n) {
         putPixel(pixels, i, bg);
@@ -277,10 +291,14 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
  * @param mipOff  i32[mipLevels] of each mip level's texel offset (1 build cost)
  * @param mipSz   i32[mipLevels] of each mip level's tile side length
  */
-fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
+fn rasterTriTex(fb : FrameBuf,
     a0 : RasterVert, a1 : RasterVert, a2 : RasterVert,
     mips : i64, tile : i32, mipOff : i64, mipSz : i64,
     wrap : bool, fogr : i32, fogg : i32, fogb : i32, bandX0 : i32, bandX1 : i32) : void {
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let w : i32 = fb.w;
+    let h : i32 = fb.h;
     // Unpack the vertex bundles into the locals the body uses.
     let x0 : f64 = a0.sx; let y0 : f64 = a0.sy; let iz0 : f64 = a0.iz; let u0 : f64 = a0.u; let v0 : f64 = a0.v;
     let x1 : f64 = a1.sx; let y1 : f64 = a1.sy; let iz1 : f64 = a1.iz; let u1 : f64 = a1.u; let v1 : f64 = a1.v;
@@ -580,11 +598,15 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
  * @param iz2     third vertex inverse depth.
  * @param color   fill colour.
  */
-fn rasterTri(pixels : i64, zbuf : i64, w : i32, h : i32,
+fn rasterTri(fb : FrameBuf,
     x0 : f64, y0 : f64, iz0 : f64,
     x1 : f64, y1 : f64, iz1 : f64,
     x2 : f64, y2 : f64, iz2 : f64,
     color : i32) : void {
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let w : i32 = fb.w;
+    let h : i32 = fb.h;
     let area : f64 = edge(x0, y0, x1, y1, x2, y2);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
