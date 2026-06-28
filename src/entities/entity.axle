@@ -105,7 +105,7 @@ class Entity {
             while (x <= x1) {
                 let z : i32 = z0;
                 while (z <= z1) {
-                    if (world.collideCell(x, y, z, py)) {
+                    if (world.solidAt(x, y, z)) {
                         return true;
                     }
                     z = z + 1;
@@ -135,17 +135,16 @@ class Entity {
         let x1 : i32 = Math::floorToInt(px + r - eps) as i32;
         let z0 : i32 = Math::floorToInt(pz - r) as i32;
         let z1 : i32 = Math::floorToInt(pz + r - eps) as i32;
-        let best : f64 = 0.0 - 1000000.0;
+        let best : i32 = 0 - 1000000;
         let x : i32 = x0;
         while (x <= x1) {
             let z : i32 = z0;
             while (z <= z1) {
                 let y : i32 = yHi;
                 while (y >= yLo) {
-                    let st : f64 = world.supportHeight(x, y, z);
-                    if (st > 0.0 - 900000.0) {
-                        if (st > best) {
-                            best = st;
+                    if (world.solidAt(x, y, z)) {
+                        if (y + 1 > best) {
+                            best = y + 1;
                         }
                         y = yLo - 1;
                     } else {
@@ -156,7 +155,7 @@ class Entity {
             }
             x = x + 1;
         }
-        return best;
+        return best as f64;
     }
 
     /**

@@ -384,47 +384,9 @@ class ChunkManager {
         return isCollidable(this.worldGet(wx, wy, wz));
     }
 
-    /**
-     * Collision test for one cell against a body whose feet are at `py`: full
-     * blocks always collide; a thin SnowLayer collides only while the feet are
-     * below its partial top (wy + snowDepth) — so you stand ON the snow at its
-     * real height instead of inside a phantom full cube. Everything else (air,
-     * water) is non-colliding.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @param py  the body's foot height
-     * @return whether the cell blocks the body at `py`
-     */
-    fn collideCell(wx : i32, wy : i32, wz : i32, py : f64) : bool {
-        let b : Block = this.worldGet(wx, wy, wz);
-        if (isCollidable(b)) {
-            return true;
-        }
-        if (b == Block::SnowLayer) {
-            return py < (wy as f64) + snowDepth(wx as f64, wz as f64);
-        }
-        return false;
-    }
-
-    /**
-     * Top surface height of one cell for standing on: full blocks → wy+1, a thin
-     * SnowLayer → wy + snowDepth (its partial top), nothing → a very low value.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @return the support height, or -1e6 if the cell is not standable
-     */
-    fn supportHeight(wx : i32, wy : i32, wz : i32) : f64 {
-        let b : Block = this.worldGet(wx, wy, wz);
-        if (isCollidable(b)) {
-            return (wy + 1) as f64;
-        }
-        if (b == Block::SnowLayer) {
-            return (wy as f64) + snowDepth(wx as f64, wz as f64);
-        }
-        return 0.0 - 1000000.0;
-    }
+    // (A thin SnowLayer is non-collidable — pure visual cover. The player walks
+    //  through the shallow snow rather than auto-stepping onto it, so block
+    //  borders stay smooth and a small drift never reads as a jump or a wall.)
 
     // ── Streaming ───────────────────────────────────────────────
 
