@@ -198,6 +198,20 @@ struct RasterVert {
 }
 
 /**
+ * One queued textured triangle (3 verts + atlas tile + wrap flag). The world
+ * pass projects/lights/clips faces into a queue of these once; worker threads
+ * then rasterise the queue, each into its own screen-column band — so the heavy
+ * per-face lighting is done once and only the fill is parallelised.
+ */
+struct RasterTri {
+    a : RasterVert,
+    b : RasterVert,
+    c : RasterVert,
+    tile : i32,
+    wrap : i32,
+}
+
+/**
  * Bilinear sample of one atlas tile at a given mip level, returning packed rgb.
  * Used for the anisotropic minification taps.
  * @param mips     the mip chain buffer
@@ -266,7 +280,7 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
 fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
     a0 : RasterVert, a1 : RasterVert, a2 : RasterVert,
     mips : i64, tile : i32, mipOff : i64, mipSz : i64,
-    wrap : bool, fogr : i32, fogg : i32, fogb : i32) : void {
+    wrap : bool, fogr : i32, fogg : i32, fogb : i32, bandX0 : i32, bandX1 : i32) : void {
     // Unpack the vertex bundles into the locals the body uses.
     let x0 : f64 = a0.sx; let y0 : f64 = a0.sy; let iz0 : f64 = a0.iz; let u0 : f64 = a0.u; let v0 : f64 = a0.v;
     let x1 : f64 = a1.sx; let y1 : f64 = a1.sy; let iz1 : f64 = a1.iz; let u1 : f64 = a1.u; let v1 : f64 = a1.v;
@@ -301,6 +315,18 @@ fn rasterTriTex(pixels : i64, zbuf : i64, w : i32, h : i32,
     }
     if (maxy > h - 1) {
         maxy = h - 1;
+    }
+    // Tile clip: this call only fills the column band [bandX0, bandX1) so worker
+    // threads own disjoint screen columns (no z-buffer race). A triangle outside
+    // the band is rejected here cheaply.
+    if (minx < bandX0) {
+        minx = bandX0;
+    }
+    if (maxx > bandX1 - 1) {
+        maxx = bandX1 - 1;
+    }
+    if (minx > maxx) {
+        return;
     }
 
     // Incremental edge functions: the three edge values are linear in the

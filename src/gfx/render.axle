@@ -10,7 +10,7 @@
 
 use sdl_platform::{allocBytes, getF64, setF64, putPixel, readI32, readU8, rgb};
 use crate::gfx::color::{scaleRgb, tintIf};
-use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert};
+use crate::gfx::raster::{rasterTriTex, rasterTri, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert, RasterTri};
 use crate::entities::player::Player;
 use crate::world::manager::ChunkManager;
 use crate::entities::mobs::MobManager;
@@ -78,6 +78,10 @@ class Renderer {
     skyColG : i32,
     skyColB : i32,
     lcurve : i64,     // 16 f64s: lightFalloff^(15-level), the brightness curve
+    triBuf : RasterTri[], // world-face triangle queue: the world pass projects/
+                          // lights/clips into here once, then worker threads
+                          // rasterise it in parallel column bands (tiled render)
+    triN : i32,           // number of queued triangles this frame
     mobLight : f64,   // ambient light factor of the mob currently being drawn
                       // (sky×daylight + block at its cell) so mobs darken at
                       // night / in caves instead of being lit 24/7
@@ -95,6 +99,8 @@ class Renderer {
     constructor() {
         this.hw = config::halfW;
         this.mobLight = 1.0;
+        this.triBuf = malloc<RasterTri>(config::triQueueCap);
+        this.triN = 0;
         this.mips = 0;
         // Per-mip-level offset/size tables for the anisotropic sampler.
         this.mipOff = allocBytes((config::mipLevels as i64) * 4);
@@ -739,16 +745,26 @@ class Renderer {
             v = v + 1;
         }
 
-        // Fan-triangulate the clipped polygon from vertex 0, passing each
-        // vertex's interpolated light colour (Gouraud smooth lighting).
+        // Fan-triangulate the clipped polygon from vertex 0 and QUEUE each
+        // triangle (with its Gouraud per-vertex colours) — the parallel band
+        // rasteriser fills them later. The heavy per-face lighting above is thus
+        // done once, not once per worker.
+        let wf : i32 = 0;
+        if (isWaterFace) {
+            wf = 1;
+        }
         let t : i32 = 1;
         while (t < n - 1) {
-            rasterTriTex(pixels, zbuf, w, h,
-                RasterVert { sx: getF64(this.csx, 0), sy: getF64(this.csy, 0), iz: getF64(this.ciz, 0), u: getF64(this.cbu, 0), v: getF64(this.cbv, 0), tr: getF64(this.cbr, 0), tg: getF64(this.cbg, 0), tb: getF64(this.cbb, 0) },
-                RasterVert { sx: getF64(this.csx, t), sy: getF64(this.csy, t), iz: getF64(this.ciz, t), u: getF64(this.cbu, t), v: getF64(this.cbv, t), tr: getF64(this.cbr, t), tg: getF64(this.cbg, t), tb: getF64(this.cbb, t) },
-                RasterVert { sx: getF64(this.csx, t + 1), sy: getF64(this.csy, t + 1), iz: getF64(this.ciz, t + 1), u: getF64(this.cbu, t + 1), v: getF64(this.cbv, t + 1), tr: getF64(this.cbr, t + 1), tg: getF64(this.cbg, t + 1), tb: getF64(this.cbb, t + 1) },
-                this.mips, tile, this.mipOff, this.mipSz,
-                isWaterFace, this.skyColR, this.skyColG, this.skyColB);
+            if (this.triN < config::triQueueCap) {
+                this.triBuf[this.triN] = RasterTri {
+                    a: RasterVert { sx: getF64(this.csx, 0), sy: getF64(this.csy, 0), iz: getF64(this.ciz, 0), u: getF64(this.cbu, 0), v: getF64(this.cbv, 0), tr: getF64(this.cbr, 0), tg: getF64(this.cbg, 0), tb: getF64(this.cbb, 0) },
+                    b: RasterVert { sx: getF64(this.csx, t), sy: getF64(this.csy, t), iz: getF64(this.ciz, t), u: getF64(this.cbu, t), v: getF64(this.cbv, t), tr: getF64(this.cbr, t), tg: getF64(this.cbg, t), tb: getF64(this.cbb, t) },
+                    c: RasterVert { sx: getF64(this.csx, t + 1), sy: getF64(this.csy, t + 1), iz: getF64(this.ciz, t + 1), u: getF64(this.cbu, t + 1), v: getF64(this.cbv, t + 1), tr: getF64(this.cbr, t + 1), tg: getF64(this.cbg, t + 1), tb: getF64(this.cbb, t + 1) },
+                    tile: tile,
+                    wrap: wf
+                };
+                this.triN = this.triN + 1;
+            }
             t = t + 1;
         }
     }
@@ -1364,6 +1380,10 @@ class Renderer {
             this.drawSkyGradient(p, pixels, w, h);
             this.drawCelestial(p, pixels, w, h);
         }
+        // World pass — single thread: project / light / clip every visible face
+        // into the triangle queue (this.triBuf / triN). Then the queue is
+        // rasterised in parallel column bands below.
+        this.triN = 0;
         let slots : i32 = config::span * config::span;
         let slot : i32 = 0;
         while (slot < slots) {
@@ -1377,6 +1397,45 @@ class Renderer {
                 }
             }
             slot = slot + 1;
+        }
+        // Tiled rasterise: worker threads each fill a disjoint column band while
+        // the main thread fills band 0 — no two threads touch the same z-buffer
+        // pixel. Explicit handles (the one-shot Task checker dislikes joining an
+        // array in a loop), so 1 / 2 / 4 bands.
+        let nT : i32 = config::rasterTiles;
+        if (nT >= 4) {
+            let bw : i32 = (w + 3) / 4;
+            let ta : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw, bw * 2);
+            let tb : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw * 2, bw * 3);
+            let tc : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw * 3, w);
+            this.rasterizeBand(pixels, zbuf, w, h, 0, bw);
+            let da : i32 = ta.join();
+            let db : i32 = tb.join();
+            let dc : i32 = tc.join();
+        } else if (nT == 2) {
+            let bw : i32 = (w + 1) / 2;
+            let ta : Task<i32> = spawn rasterTilesJob(this, pixels, zbuf, w, h, bw, w);
+            this.rasterizeBand(pixels, zbuf, w, h, 0, bw);
+            let da : i32 = ta.join();
+        } else {
+            this.rasterizeBand(pixels, zbuf, w, h, 0, w);
+        }
+    }
+
+    /**
+     * Rasterise the queued world triangles whose pixels fall in the column band
+     * [bx0, bx1). Each band is disjoint, so threads never touch the same z-buffer
+     * pixel. Called by the main thread and the rasterTilesJob worker.
+     */
+    fn rasterizeBand(pixels : i64, zbuf : i64, w : i32, h : i32, bx0 : i32, bx1 : i32) : void {
+        let i : i32 = 0;
+        while (i < this.triN) {
+            let tri : RasterTri = this.triBuf[i];
+            let wrap : bool = tri.wrap != 0;
+            rasterTriTex(pixels, zbuf, w, h, tri.a, tri.b, tri.c,
+                this.mips, tri.tile, this.mipOff, this.mipSz,
+                wrap, this.skyColR, this.skyColG, this.skyColB, bx0, bx1);
+            i = i + 1;
         }
     }
 
@@ -1614,12 +1673,12 @@ class Renderer {
                 RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB);
+                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB, 0, w);
             rasterTriTex(pixels, zbuf, w, h,
                 RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB);
+                this.mips, tile, this.mipOff, this.mipSz, false, this.skyColR, this.skyColG, this.skyColB, 0, w);
         } else {
             let col : i32 = scaleRgb(tintIf(hurt, color), bright);
             rasterTri(pixels, zbuf, w, h, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
@@ -2147,6 +2206,12 @@ fn godRaysJob(r : Renderer, p : Player, pixels : i64, zbuf : i64, w : i32, h : i
 /** Worker job: atmospheric sky for one row band (see drawSkyGradient). */
 fn skyGradientJob(r : Renderer, p : Player, pixels : i64, w : i32, h : i32, y0 : i32, y1 : i32) : i32 {
     r.drawSkyGradientRows(p, pixels, w, h, y0, y1);
+    return 0;
+}
+
+/** Worker job: rasterise the world triangle queue into one column band. */
+fn rasterTilesJob(r : Renderer, pixels : i64, zbuf : i64, w : i32, h : i32, bx0 : i32, bx1 : i32) : i32 {
+    r.rasterizeBand(pixels, zbuf, w, h, bx0, bx1);
     return 0;
 }
 

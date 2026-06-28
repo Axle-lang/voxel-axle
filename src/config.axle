@@ -48,6 +48,7 @@ use crate::configs::render::{
     skyHaloR, skyHaloG, skyHaloB, skyHaloStrength, skyCoreThresh, skyCoreStrength,
     godRaysOn, godRaySamples, godRayDecay, godRayWeight, godRayDensity,
     bloomOn, bloomThreshold, bloomStrength, bloomRadius, bloomIters, postThreads,
+    triQueueCap, rasterTiles,
 };
 
 use crate::configs::blocks::{ Block };
