@@ -384,6 +384,48 @@ class ChunkManager {
         return isCollidable(this.worldGet(wx, wy, wz));
     }
 
+    /**
+     * Collision test for one cell against a body whose feet are at `py`: full
+     * blocks always collide; a thin SnowLayer collides only while the feet are
+     * below its partial top (wy + snowDepth) — so you stand ON the snow at its
+     * real height instead of inside a phantom full cube. Everything else (air,
+     * water) is non-colliding.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @param py  the body's foot height
+     * @return whether the cell blocks the body at `py`
+     */
+    fn collideCell(wx : i32, wy : i32, wz : i32, py : f64) : bool {
+        let b : Block = this.worldGet(wx, wy, wz);
+        if (isCollidable(b)) {
+            return true;
+        }
+        if (b == Block::SnowLayer) {
+            return py < (wy as f64) + snowDepth(wx as f64, wz as f64);
+        }
+        return false;
+    }
+
+    /**
+     * Top surface height of one cell for standing on: full blocks → wy+1, a thin
+     * SnowLayer → wy + snowDepth (its partial top), nothing → a very low value.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @return the support height, or -1e6 if the cell is not standable
+     */
+    fn supportHeight(wx : i32, wy : i32, wz : i32) : f64 {
+        let b : Block = this.worldGet(wx, wy, wz);
+        if (isCollidable(b)) {
+            return (wy + 1) as f64;
+        }
+        if (b == Block::SnowLayer) {
+            return (wy as f64) + snowDepth(wx as f64, wz as f64);
+        }
+        return 0.0 - 1000000.0;
+    }
+
     // ── Streaming ───────────────────────────────────────────────
 
     /**
@@ -644,6 +686,23 @@ class ChunkManager {
     }
 
     /**
+     * Should a snow layer of depth `myd` emit a side wall toward the neighbour
+     * cell (local nlx/nly/nlz, world column nwx/nwz)? Yes against air or a
+     * strictly LOWER snow layer (fills the exposed step); no against a full block
+     * or an equal/higher snow layer (avoids an internal z-fighting grid).
+     */
+    fn snowSideOpen(slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myd : f64) : bool {
+        let nb : Block = this.getVox(slot, nlx, nly, nlz);
+        if (nb == Block::Air) {
+            return true;
+        }
+        if (nb == Block::SnowLayer) {
+            return snowDepth(nwx as f64, nwz as f64) < myd - 0.001;
+        }
+        return false;
+    }
+
+    /**
      * Dust a freshly-stamped tree's canopy with a thin snow cap: over each
      * column of the tree footprint, drop a single Snow block onto the topmost
      * leaf (into the air above it). One block per column → a light dusting that
@@ -674,14 +733,21 @@ class ChunkManager {
                             if (y + 1 < config::worldHeight && this.getVox(slot, lx, y + 1, lz) == Block::Air) {
                                 let wx : i32 = cx0 + lx;
                                 let wz : i32 = cz0 + lz;
-                                let frac : f64 = snowDepth(wx as f64, wz as f64);
-                                if (frac > 0.0) {
-                                    let sb : Block = Block::SnowLayer;
-                                    if (frac >= 0.95) {
-                                        sb = Block::Snow;
+                                // Only cap columns whose own ground biome is cold,
+                                // so the canopy snow matches the ground snow (no
+                                // snow on a tree overhanging warm, bare ground).
+                                let ch : i32 = this.colHeightWorld(wx, wz);
+                                let cb : BiomeId = biomeAt(temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), ch);
+                                if (this.coldBiome(cb)) {
+                                    let frac : f64 = snowDepth(wx as f64, wz as f64);
+                                    if (frac > 0.0) {
+                                        let sb : Block = Block::SnowLayer;
+                                        if (frac >= 0.95) {
+                                            sb = Block::Snow;
+                                        }
+                                        this.setVoxLocal(slot, lx, y + 1, lz, sb);
+                                        this.bumpFY(slot, y + 1);
                                     }
-                                    this.setVoxLocal(slot, lx, y + 1, lz, sb);
-                                    this.bumpFY(slot, y + 1);
                                 }
                             }
                             done = true;
@@ -1195,22 +1261,24 @@ class ChunkManager {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
                             }
                         } else if (isSnowLayer(id)) {
-                            // Thin snow: a top face (rendered at a partial,
-                            // noise-varied height) plus side walls only where it
-                            // borders air, so a snow field's outer edge shows but
-                            // internal seams and sides hidden by taller neighbours
-                            // are culled. It never hides the block it rests on.
+                            // Thin snow at a partial, noise-varied height. Emit the
+                            // top, and a side wall toward a neighbour that is air OR
+                            // a LOWER snow layer (so the exposed step between two
+                            // different depths is filled — no see-through to the
+                            // grass). Equal/higher snow and full blocks cull, so a
+                            // flat field has no internal z-fighting grid.
                             this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
-                            if (this.getVox(slot, lx + 1, ly, lz) == air) {
+                            let myd : f64 = snowDepth(wx as f64, wz as f64);
+                            if (this.snowSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myd)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
                             }
-                            if (this.getVox(slot, lx - 1, ly, lz) == air) {
+                            if (this.snowSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myd)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
                             }
-                            if (this.getVox(slot, lx, ly, lz + 1) == air) {
+                            if (this.snowSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myd)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
                             }
-                            if (this.getVox(slot, lx, ly, lz - 1) == air) {
+                            if (this.snowSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myd)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
                             }
                         } else {

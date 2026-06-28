@@ -216,13 +216,21 @@ fn humidity(wx : f64, wz : f64) : f64 {
  */
 fn snowDepth(wx : f64, wz : f64) : f64 {
     let n : f64 = fbm(wx * config::snowScale + 71.0, wz * config::snowScale - 53.0, config::seedI + 1212, 3);
-    if (n < 0.12) {
+    // Patchy bare ground (low noise) and the odd full block (high noise); the
+    // middle band quantises into 6 discrete levels (1/8 .. 6/8 of a block) so
+    // the depth visibly steps from spot to spot like Minecraft's snow layers.
+    if (n < 0.30) {
         return 0.0;
     }
-    if (n > 0.93) {
+    if (n > 0.95) {
         return 1.0;
     }
-    return 0.18 + (n - 0.12) / 0.81 * 0.57;
+    let t : f64 = (n - 0.30) / 0.65;            // 0..1 across the layered band
+    let lvl : i32 = 1 + (Math::floorToInt(t * 6.0) as i32);   // 1..6
+    if (lvl > 6) {
+        lvl = 6;
+    }
+    return (lvl as f64) * 0.125;                 // 0.125 .. 0.75
 }
 
 /**
