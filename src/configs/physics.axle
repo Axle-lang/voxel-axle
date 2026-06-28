@@ -30,6 +30,11 @@ const flySprintSpeed : f64 = 0.52;  // creative fly + Ctrl
 const flyVertSpeed : f64 = 0.30;    // creative up/down
 const eyeHeight : f64 = 1.62;
 const stepHeight : f64 = 1.05;
+// Max downward drop the body glides over while grounded (step-down assist): a
+// partial-block / snow-level descent eases smoothly instead of a micro
+// free-fall. Kept above the tallest snow layer (0.75) and below a full block
+// (1.0) so real ledges still fall normally.
+const stepDownAssist : f64 = 0.8;
 // Auto-step raises the body instantly (collision is exact); the camera's
 // step-up offset shrinks by this factor each tick so the rise looks smooth
 // instead of snapping. Lower = quicker catch-up.

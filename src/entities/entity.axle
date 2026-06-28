@@ -81,53 +81,19 @@ class Entity {
     /**
      * Does the body AABB at (px, py, pz) overlap any collidable voxel?
      * The body is a `radius`-wide column `height` tall with feet at py.
-     * Each block is tested individually, so the world is a real voxel
-     * field — you stand on leaves, walk through canopy gaps, and can't
-     * pass into any solid block.
-     * @param world  chunk manager queried for solid voxels
+     * Each block is tested against its REAL per-type box (collideFloorCell):
+     * a full block fills its cube, a thin SnowLayer is solid only up to its
+     * partial top. So a low layer is a real obstacle of its true height in
+     * EVERY axis (you can't pass through it sideways) — yet short enough to be
+     * auto-stepped, never a wall. You stand on leaves, walk through canopy
+     * gaps, and can't pass into any solid block.
+     * @param world  chunk manager queried for collidable voxels
      * @param px     candidate body-centre X
      * @param py     candidate foot height
      * @param pz     candidate body-centre Z
-     * @return true if any voxel under the body footprint is solid
+     * @return true if any voxel under the body footprint blocks the body box
      */
     fn collidesAt(world : ChunkManager, px : f64, py : f64, pz : f64) : bool {
-        let r : f64 = this.radius;
-        let eps : f64 = 0.0001;
-        let x0 : i32 = Math::floorToInt(px - r) as i32;
-        let x1 : i32 = Math::floorToInt(px + r - eps) as i32;
-        let z0 : i32 = Math::floorToInt(pz - r) as i32;
-        let z1 : i32 = Math::floorToInt(pz + r - eps) as i32;
-        let y0 : i32 = Math::floorToInt(py) as i32;
-        let y1 : i32 = Math::floorToInt(py + this.height - eps) as i32;
-        let y : i32 = y0;
-        while (y <= y1) {
-            let x : i32 = x0;
-            while (x <= x1) {
-                let z : i32 = z0;
-                while (z <= z1) {
-                    if (world.solidAt(x, y, z)) {
-                        return true;
-                    }
-                    z = z + 1;
-                }
-                x = x + 1;
-            }
-            y = y + 1;
-        }
-        return false;
-    }
-
-    /**
-     * Like `collidesAt` but honours each block's REAL height (a thin snow layer
-     * is solid only up to its partial top). Used only for the downward / landing
-     * test, so a low layer is a floor you rest on — never a horizontal wall.
-     * @param world  chunk manager
-     * @param px     candidate body-centre X
-     * @param py     candidate foot height
-     * @param pz     candidate body-centre Z
-     * @return true if a cell under the footprint blocks the feet at `py`
-     */
-    fn collidesFloor(world : ChunkManager, px : f64, py : f64, pz : f64) : bool {
         let r : f64 = this.radius;
         let eps : f64 = 0.0001;
         let x0 : i32 = Math::floorToInt(px - r) as i32;
@@ -209,6 +175,21 @@ class Entity {
         let nx : f64 = this.pos.x + dx;
         if (!this.collidesAt(world, nx, this.pos.y, this.pos.z)) {
             this.pos.x = nx;
+            // Step-down assist: while grounded, glue the feet to a slightly lower
+            // support (≤ stepDownAssist, i.e. a partial-block / snow-level drop)
+            // and ease the camera with a negative stepUp — so leaving a thin snow
+            // layer glides down instead of a saccading micro free-fall. A real
+            // full-block ledge (> stepDownAssist) is left to fall normally.
+            if (this.onGround == 1 && !this.inWater) {
+                let dTop : f64 = this.supportTop(world, nx, this.pos.z,
+                    Math::floorToInt(this.pos.y - config::stepDownAssist) as i32,
+                    Math::floorToInt(this.pos.y) as i32);
+                let descent : f64 = this.pos.y - dTop;
+                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= config::stepDownAssist) {
+                    this.stepUp = this.stepUp + (dTop - this.pos.y);
+                    this.pos.y = dTop;
+                }
+            }
             return;
         }
         if (this.onGround == 1 || this.inWater) {
@@ -239,6 +220,18 @@ class Entity {
         let nz : f64 = this.pos.z + dz;
         if (!this.collidesAt(world, this.pos.x, this.pos.y, nz)) {
             this.pos.z = nz;
+            // Step-down assist (see moveX): glide down a partial-block drop while
+            // grounded instead of a saccading micro free-fall off thin snow.
+            if (this.onGround == 1 && !this.inWater) {
+                let dTop : f64 = this.supportTop(world, this.pos.x, nz,
+                    Math::floorToInt(this.pos.y - config::stepDownAssist) as i32,
+                    Math::floorToInt(this.pos.y) as i32);
+                let descent : f64 = this.pos.y - dTop;
+                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= config::stepDownAssist) {
+                    this.stepUp = this.stepUp + (dTop - this.pos.y);
+                    this.pos.y = dTop;
+                }
+            }
             return;
         }
         if (this.onGround == 1 || this.inWater) {
@@ -287,9 +280,9 @@ class Entity {
         }
         let ny : f64 = this.pos.y + this.velY;
         if (this.velY <= 0.0) {
-            // Landing uses the REAL per-block floor (a thin snow layer is a low
+            // Landing uses the REAL per-block box (a thin snow layer is a low
             // floor, not a full cube): you rest on the snow at its true height.
-            if (this.collidesFloor(world, this.pos.x, ny, this.pos.z)) {
+            if (this.collidesAt(world, this.pos.x, ny, this.pos.z)) {
                 let top : f64 = this.supportTop(world, this.pos.x, this.pos.z,
                     Math::floorToInt(ny) as i32, Math::floorToInt(this.pos.y) as i32);
                 // Rising a little onto a higher floor (stepping up onto snow / a
@@ -348,8 +341,10 @@ class Entity {
      * @param dz     signed Z displacement intent for this step
      */
     fn tick(world : ChunkManager, dx : f64, dz : f64) : void {
+        // stepUp eases both up-steps (positive) and step-down assists (negative),
+        // so snap to zero by magnitude, not sign.
         this.stepUp = this.stepUp * config::stepSmoothDecay;
-        if (this.stepUp < 0.02) {
+        if (this.stepUp < 0.02 && this.stepUp > 0.0 - 0.02) {
             this.stepUp = 0.0;
         }
         this.inWater = this.bodyInWater(world);

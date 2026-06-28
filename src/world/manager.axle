@@ -19,7 +19,7 @@
 use sdl_platform::{allocBytes, readU8, writeU8};
 use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI, snowDepth};
 use crate::world::biomes::registry::{biomeAt, Biomes};
-use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves, isSnowLayer};
+use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves, isPartialShape, hasCollisionBox};
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
@@ -385,37 +385,58 @@ class ChunkManager {
     }
 
     /**
-     * VERTICAL (floor) collision for one cell against feet at `py` — the engine's
-     * per-type block height. Full blocks are solid the whole cube; a thin
-     * SnowLayer is solid only up to its real partial top (wy + snowDepth), so you
-     * rest ON the snow at its true height instead of inside a phantom full cube.
-     * Used only by the gravity / landing path, never for horizontal blocking, so
-     * a low layer is a floor — never a wall.
+     * REAL per-type collision box for one cell against the body at foot height
+     * `py`. Full blocks are solid the whole cube; a thin SnowLayer is solid only
+     * up to its real partial top (wy + snowDepth), so the body's box meets the
+     * snow at its true height instead of a phantom full cube. Used for ALL axes
+     * (horizontal blocking, landing, ceiling): a low layer is a real obstacle of
+     * its true height — short enough to be auto-stepped, so never a wall.
+     * @param wx  the world x coordinate
+     * @param wy  the world y coordinate
+     * @param wz  the world z coordinate
+     * @param py  the body's foot height being tested
+     * @return true if the cell's real box blocks the body at `py`
      */
     fn collideFloorCell(wx : i32, wy : i32, wz : i32, py : f64) : bool {
-        let b : Block = this.worldGet(wx, wy, wz);
-        if (isCollidable(b)) {
-            return true;
+        if (!hasCollisionBox(this.worldGet(wx, wy, wz))) {
+            return false;
         }
-        if (b == Block::SnowLayer) {
-            return py < (wy as f64) + snowDepth(wx as f64, wz as f64);
-        }
-        return false;
+        return py < (wy as f64) + this.blockBoxHeight(wx, wy, wz);
     }
 
     /**
      * Real standable top height of one cell: full blocks → wy+1, a thin SnowLayer
      * → wy + snowDepth (its partial top), nothing → a very low value.
+     * @param wx  the world x coordinate
+     * @param wy  the world y coordinate
+     * @param wz  the world z coordinate
+     * @return the standable top Y of the cell, or a very low value if none
      */
     fn supportHeight(wx : i32, wy : i32, wz : i32) : f64 {
-        let b : Block = this.worldGet(wx, wy, wz);
-        if (isCollidable(b)) {
-            return (wy + 1) as f64;
+        if (!hasCollisionBox(this.worldGet(wx, wy, wz))) {
+            return 0.0 - 1000000.0;
         }
-        if (b == Block::SnowLayer) {
-            return (wy as f64) + snowDepth(wx as f64, wz as f64);
-        }
-        return 0.0 - 1000000.0;
+        return (wy as f64) + this.blockBoxHeight(wx, wy, wz);
+    }
+
+    /**
+     * THE single authority for a block's real box HEIGHT (its vertical extent
+     * within the cell): a full block is 1.0, a thin SnowLayer its noise-varied
+     * `snowDepth` (e.g. 1/6). Every system — collision (collideFloorCell /
+     * supportHeight), meshing, the look-ray picker and the selection wireframe —
+     * reads height from here, so the box, the visual and the hitbox always agree.
+     * Adding a new partial block (a slab, a carpet) = one new `match` arm here
+     * (plus listing it in `isPartialShape`); nothing else hard-codes a height.
+     * @param wx  the world x coordinate
+     * @param wy  the world y coordinate
+     * @param wz  the world z coordinate
+     * @return the cell box's real height in Y (1.0 full, snowDepth for snow)
+     */
+    fn blockBoxHeight(wx : i32, wy : i32, wz : i32) : f64 {
+        return match this.worldGet(wx, wy, wz) {
+            Block::SnowLayer => snowDepth(wx as f64, wz as f64),
+            _ => 1.0,
+        };
     }
 
     // ── Streaming ───────────────────────────────────────────────
@@ -678,20 +699,28 @@ class ChunkManager {
     }
 
     /**
-     * Should a snow layer of depth `myd` emit a side wall toward the neighbour
-     * cell (local nlx/nly/nlz, world column nwx/nwz)? Yes against air or a
-     * strictly LOWER snow layer (fills the exposed step); no against a full block
-     * or an equal/higher snow layer (avoids an internal z-fighting grid).
+     * Should a partial block of height `myH` emit a side wall toward the
+     * neighbour cell (local nlx/nly/nlz, world column nwx/nwz)? Yes against air
+     * or a strictly LOWER partial block (fills the exposed step); no against a
+     * full block or an equal/higher partial (avoids an internal z-fighting grid).
+     * @param slot  the chunk slot
+     * @param nlx   neighbour local x
+     * @param nly   neighbour local/world y
+     * @param nlz   neighbour local z
+     * @param nwx   neighbour world x (for its box height)
+     * @param nwz   neighbour world z (for its box height)
+     * @param myH   this block's box height
+     * @return whether to emit the side wall toward the neighbour
      */
-    fn snowSideOpen(slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myd : f64) : bool {
+    fn partialSideOpen(slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myH : f64) : bool {
         let nb : Block = this.getVox(slot, nlx, nly, nlz);
         if (nb == Block::Air) {
             return true;
         }
-        if (nb == Block::SnowLayer) {
-            return snowDepth(nwx as f64, nwz as f64) < myd - 0.001;
+        if (!isPartialShape(nb)) {
+            return false;
         }
-        return false;
+        return this.blockBoxHeight(nwx, nly, nwz) < myH - 0.001;
     }
 
     /**
@@ -1252,25 +1281,26 @@ class ChunkManager {
                             if (this.getVox(slot, lx, ly, lz - 1) == air) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
                             }
-                        } else if (isSnowLayer(id)) {
-                            // Thin snow at a partial, noise-varied height. Emit the
-                            // top, and a side wall toward a neighbour that is air OR
-                            // a LOWER snow layer (so the exposed step between two
-                            // different depths is filled — no see-through to the
-                            // grass). Equal/higher snow and full blocks cull, so a
-                            // flat field has no internal z-fighting grid.
+                        } else if (isPartialShape(id)) {
+                            // A partial, floor-resting block (thin snow today, slabs
+                            // later) at its real height. Emit the top, and a side
+                            // wall toward a neighbour that is air OR a LOWER partial
+                            // block (so the exposed step between two heights is
+                            // filled — no see-through to the ground). Equal/higher
+                            // partials and full blocks cull, so a flat field has no
+                            // internal z-fighting grid.
                             this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
-                            let myd : f64 = snowDepth(wx as f64, wz as f64);
-                            if (this.snowSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myd)) {
+                            let myH : f64 = this.blockBoxHeight(wx, ly, wz);
+                            if (this.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
                             }
-                            if (this.snowSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myd)) {
+                            if (this.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
                             }
-                            if (this.snowSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myd)) {
+                            if (this.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
                             }
-                            if (this.snowSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myd)) {
+                            if (this.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
                             }
                         } else {
@@ -1287,7 +1317,13 @@ class ChunkManager {
                             if (isTransparent(this.getVox(slot, lx - 1, ly, lz))) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
                             }
-                            if (isTransparent(this.getVox(slot, lx, ly + 1, lz))) {
+                            // A partial block above (snow, a slab) is transparent
+                            // but COVERS this top from view, so skip it — otherwise
+                            // the ground peeks through under the partial block's
+                            // floating top sheet when seen edge-on, and that block
+                            // seems to lose height.
+                            let above : Block = this.getVox(slot, lx, ly + 1, lz);
+                            if (isTransparent(above) && !isPartialShape(above)) {
                                 this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
                             }
                             if (isTransparent(this.getVox(slot, lx, ly - 1, lz))) {

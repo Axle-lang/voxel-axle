@@ -485,7 +485,8 @@ fn main() : void {
             renderer.bloomPass(pixels, w, h);
             if (!paused) {
                 if (picker.hit == 1) {
-                    renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz);
+                    renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
+                        man.blockBoxHeight(picker.bx, picker.by, picker.bz));
                 }
                 drawHud(pixels, w, h, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
                 renderer.crosshair(pixels, w, h);

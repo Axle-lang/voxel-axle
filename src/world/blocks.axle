@@ -34,6 +34,34 @@ fn isSnowLayer(id : Block) : bool {
 }
 
 /**
+ * A block whose collision/visual box is SHORTER than a full cube but still
+ * rests on the cell floor and fills the whole XZ footprint (a thin snow layer
+ * today; bottom slabs later). Its real height comes from
+ * `ChunkManager.blockBoxHeight`. The general "partial block" category every
+ * system (physics, mesher, picker, selection) branches on instead of naming a
+ * concrete block — add a block id here and to `blockBoxHeight` and it Just Works.
+ * @param id  the block
+ * @return whether the block has a partial, floor-resting box
+ */
+fn isPartialShape(id : Block) : bool {
+    return match id {
+        Block::SnowLayer => true,
+        _ => false,
+    };
+}
+
+/**
+ * Does the block carry a physical collision box you stand on / against? Every
+ * solid except torches (air and water have no box). Its HEIGHT (full cube vs a
+ * partial slab/snow) is read separately from `blockBoxHeight`.
+ * @param id  the block
+ * @return whether the block has a collision box
+ */
+fn hasCollisionBox(id : Block) : bool {
+    return isSolid(id) && id != Block::Torch;
+}
+
+/**
  * True for any water — the still source and the flowing levels. Used by
  * physics (swim / buoyancy) and the renderer (water shading / ripple).
  * @param id  the block

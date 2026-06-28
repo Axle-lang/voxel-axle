@@ -113,16 +113,136 @@ class Picker {
                 tMaxZ = tMaxZ + tDeltaZ;
             }
             if (man.solidTarget(x, y, z)) {
-                this.hit = 1;
-                this.bx = x;
-                this.by = y;
-                this.bz = z;
-                this.px = prevx;
-                this.py = prevy;
-                this.pz = prevz;
+                let boxH : f64 = man.blockBoxHeight(x, y, z);
+                if (boxH >= 1.0) {
+                    // Full cube: the DDA's step-from cell IS the place cell.
+                    this.hit = 1;
+                    this.bx = x;
+                    this.by = y;
+                    this.bz = z;
+                    this.px = prevx;
+                    this.py = prevy;
+                    this.pz = prevz;
+                } else {
+                    // Partial block (snow today, slabs later): a hit only when the
+                    // ray pierces the REAL short box — not the phantom full cube —
+                    // and the place cell is derived from the FACE actually struck,
+                    // not the coarse DDA step-from cell (which for a thin box is
+                    // usually a side cell, so the block popped out sideways).
+                    let face : i32 = rayCellBoxFace(ox, oy, oz, dx, dy, dz, x, y, z, boxH, config::reachDist);
+                    if (face != 0) {
+                        this.hit = 1;
+                        this.bx = x;
+                        this.by = y;
+                        this.bz = z;
+                        this.px = x;
+                        this.py = y;
+                        this.pz = z;
+                        match face {
+                            1 => { this.px = x + 1; }
+                            2 => { this.px = x - 1; }
+                            3 => { this.py = y + 1; }
+                            4 => { this.py = y - 1; }
+                            5 => { this.pz = z + 1; }
+                            _ => { this.pz = z - 1; }
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+/**
+ * Ray vs the REAL box of cell (cx,cy,cz): full in X/Z, `boxHeight` tall in Y (a
+ * thin snow layer sits on the bottom of its cell, box [cy, cy+boxHeight]). A
+ * standard slab test, clamped to the look interval [0, reach]: the running
+ * [tEntry, tExit] interval is narrowed by each axis pair of planes, and a hit
+ * survives only if it stays non-empty. Returns the FACE the ray enters through
+ * (the axis that set tEntry, signed by the ray direction) so the picker can both
+ * target a partial block only when the look-ray pierces its short box AND place
+ * against the real face hit — not the coarse DDA cell it stepped in from (which,
+ * for a thin box, is usually a side cell, popping the placed block sideways).
+ * @param originX     ray origin X (the eye)
+ * @param originY     ray origin Y (the eye)
+ * @param originZ     ray origin Z (the eye)
+ * @param dirX        ray direction X (look vector, need not be normalised)
+ * @param dirY        ray direction Y
+ * @param dirZ        ray direction Z
+ * @param cx          cell X (box spans [cx, cx+1])
+ * @param cy          cell Y (box spans [cy, cy+boxHeight])
+ * @param cz          cell Z (box spans [cz, cz+1])
+ * @param boxHeight   the box's real height in Y (1.0 full, snowDepth for snow)
+ * @param reach       max ray distance to consider a hit (in direction units)
+ * @return 0 if missed, else the entered face's outward normal: 1=+X 2=-X 3=+Y
+ *         4=-Y 5=+Z 6=-Z (defaults to +Y when the origin is inside the box)
+ */
+fn rayCellBoxFace(originX : f64, originY : f64, originZ : f64,
+    dirX : f64, dirY : f64, dirZ : f64,
+    cx : i32, cy : i32, cz : i32, boxHeight : f64, reach : f64) : i32 {
+    let boxMinX : f64 = cx as f64;
+    let boxMaxX : f64 = boxMinX + 1.0;
+    let boxMinY : f64 = cy as f64;
+    let boxMaxY : f64 = boxMinY + boxHeight;
+    let boxMinZ : f64 = cz as f64;
+    let boxMaxZ : f64 = boxMinZ + 1.0;
+    let tEntry : f64 = 0.0;
+    let tExit : f64 = reach;
+    let entryAxis : i32 = 0 - 1;   // 0=X 1=Y 2=Z; -1 = origin already inside
+    // X slab
+    if (dirX != 0.0) {
+        let invDirX : f64 = 1.0 / dirX;
+        let tAtMinX : f64 = (boxMinX - originX) * invDirX;
+        let tAtMaxX : f64 = (boxMaxX - originX) * invDirX;
+        let tNearX : f64 = tAtMinX;
+        let tFarX : f64 = tAtMaxX;
+        if (tAtMinX > tAtMaxX) { tNearX = tAtMaxX; tFarX = tAtMinX; }
+        if (tNearX > tEntry) { tEntry = tNearX; entryAxis = 0; }
+        if (tFarX < tExit) { tExit = tFarX; }
+    } else {
+        if (originX < boxMinX || originX > boxMaxX) { return 0; }
+    }
+    // Y slab
+    if (dirY != 0.0) {
+        let invDirY : f64 = 1.0 / dirY;
+        let tAtMinY : f64 = (boxMinY - originY) * invDirY;
+        let tAtMaxY : f64 = (boxMaxY - originY) * invDirY;
+        let tNearY : f64 = tAtMinY;
+        let tFarY : f64 = tAtMaxY;
+        if (tAtMinY > tAtMaxY) { tNearY = tAtMaxY; tFarY = tAtMinY; }
+        if (tNearY > tEntry) { tEntry = tNearY; entryAxis = 1; }
+        if (tFarY < tExit) { tExit = tFarY; }
+    } else {
+        if (originY < boxMinY || originY > boxMaxY) { return 0; }
+    }
+    // Z slab
+    if (dirZ != 0.0) {
+        let invDirZ : f64 = 1.0 / dirZ;
+        let tAtMinZ : f64 = (boxMinZ - originZ) * invDirZ;
+        let tAtMaxZ : f64 = (boxMaxZ - originZ) * invDirZ;
+        let tNearZ : f64 = tAtMinZ;
+        let tFarZ : f64 = tAtMaxZ;
+        if (tAtMinZ > tAtMaxZ) { tNearZ = tAtMaxZ; tFarZ = tAtMinZ; }
+        if (tNearZ > tEntry) { tEntry = tNearZ; entryAxis = 2; }
+        if (tFarZ < tExit) { tExit = tFarZ; }
+    } else {
+        if (originZ < boxMinZ || originZ > boxMaxZ) { return 0; }
+    }
+    if (tExit < tEntry) { return 0; }
+    // Outward normal of the entry face = opposite the ray direction on that axis.
+    if (entryAxis == 0) {
+        if (dirX < 0.0) { return 1; }
+        return 2;
+    }
+    if (entryAxis == 2) {
+        if (dirZ < 0.0) { return 5; }
+        return 6;
+    }
+    if (entryAxis == 1) {
+        if (dirY < 0.0) { return 3; }
+        return 4;
+    }
+    return 3;   // origin inside the box → treat as a top hit
 }
 
 /**
