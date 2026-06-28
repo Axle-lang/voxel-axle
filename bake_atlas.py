@@ -22,7 +22,7 @@ PACK = Path(r"C:\Users\users\AppData\Roaming\.minecraft\resourcepacks"
             r"\Default HD 128x Demo 1.8.2.4\assets\minecraft\textures\block")
 BLOCK_OUT = ROOT / "assets" / "textures" / "block"
 TEX = ROOT / "assets" / "textures" / "entity"
-TILE = 64
+TILE = 128
 
 # ── Per-biome / per-species tint colours (greyscale source → this hue) ──
 T_PLAINS = (124, 189, 107)
