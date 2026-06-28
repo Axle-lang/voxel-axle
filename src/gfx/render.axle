@@ -76,6 +76,12 @@ class Renderer {
     skyColG : i32,
     skyColB : i32,
     lcurve : i64,     // 16 f64s: lightFalloff^(15-level), the brightness curve
+    blR : i64,        // bloom: half-res bright buffers (R/G/B) + blur scratch (bt*)
+    blG : i64,
+    blB : i64,
+    btR : i64,
+    btG : i64,
+    btB : i64,
 
     /**
      * Build a Renderer: allocate the projection / clipping scratch buffers,
@@ -104,6 +110,15 @@ class Renderer {
             setF64(this.lcurve, li, pc);
             li = li + 1;
         }
+        // Bloom half-res buffers, sized for the max framebuffer (≤1280×400 →
+        // half-res ≤640×200). Six f64 channels (bright RGB + blur scratch).
+        let blMax : i64 = 640 * 200;
+        this.blR = allocBytes(blMax * 8);
+        this.blG = allocBytes(blMax * 8);
+        this.blB = allocBytes(blMax * 8);
+        this.btR = allocBytes(blMax * 8);
+        this.btG = allocBytes(blMax * 8);
+        this.btB = allocBytes(blMax * 8);
         this.coff = malloc<i32>(72);
         this.uvu = malloc<i32>(24);
         this.uvv = malloc<i32>(24);
@@ -1085,6 +1100,166 @@ class Renderer {
                 x = x + 1;
             }
             y = y + 1;
+        }
+    }
+
+    /**
+     * Bloom: bright pixels (luminance above bloomThreshold) bleed a soft glow.
+     * Extracted and averaged into a half-resolution buffer, blurred separably a
+     * few times, then added back over the full frame — so the sun, halo,
+     * god-rays, water glints and snow get a warm honeyed glow. Midtones below the
+     * threshold are untouched. Call after the sky/world/god-rays, before the HUD.
+     * @param pixels  framebuffer
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     */
+    fn bloomPass(pixels : i64, w : i32, h : i32) : void {
+        if (!config::bloomOn) {
+            return;
+        }
+        let dw : i32 = (w + 1) / 2;
+        let dh : i32 = (h + 1) / 2;
+        let thr : f64 = config::bloomThreshold;
+        // 1) Bright extraction + 2× downsample into blR/blG/blB.
+        let dy : i32 = 0;
+        while (dy < dh) {
+            let sy0 : i32 = dy * 2;
+            let dx : i32 = 0;
+            while (dx < dw) {
+                let sx0 : i32 = dx * 2;
+                let ar : f64 = 0.0;
+                let ag : f64 = 0.0;
+                let ab : f64 = 0.0;
+                let jy : i32 = 0;
+                while (jy < 2) {
+                    let yy : i32 = sy0 + jy;
+                    if (yy < h) {
+                        let jx : i32 = 0;
+                        while (jx < 2) {
+                            let xx : i32 = sx0 + jx;
+                            if (xx < w) {
+                                let c : i32 = readI32(pixels, ((yy * w + xx) as i64) * 4);
+                                let r : f64 = ((c >> 16) & 0xFF) as f64;
+                                let g : f64 = ((c >> 8) & 0xFF) as f64;
+                                let b : f64 = (c & 0xFF) as f64;
+                                let lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
+                                if (lum > thr) {
+                                    let f : f64 = (lum - thr) / lum;
+                                    ar = ar + r * f;
+                                    ag = ag + g * f;
+                                    ab = ab + b * f;
+                                }
+                            }
+                            jx = jx + 1;
+                        }
+                    }
+                    jy = jy + 1;
+                }
+                let di : i32 = dy * dw + dx;
+                setF64(this.blR, di, ar * 0.25);
+                setF64(this.blG, di, ag * 0.25);
+                setF64(this.blB, di, ab * 0.25);
+                dx = dx + 1;
+            }
+            dy = dy + 1;
+        }
+        // 2) Separable box blur (bloomIters passes: horizontal then vertical).
+        let rad : i32 = config::bloomRadius;
+        let invK : f64 = 1.0 / ((2 * rad + 1) as f64);
+        let it : i32 = 0;
+        while (it < config::bloomIters) {
+            // Horizontal blR -> btR.
+            let y : i32 = 0;
+            while (y < dh) {
+                let rb : i32 = y * dw;
+                let x : i32 = 0;
+                while (x < dw) {
+                    let sr : f64 = 0.0;
+                    let sg : f64 = 0.0;
+                    let sb : f64 = 0.0;
+                    let k : i32 = 0 - rad;
+                    while (k <= rad) {
+                        let xx : i32 = x + k;
+                        if (xx < 0) {
+                            xx = 0;
+                        }
+                        if (xx > dw - 1) {
+                            xx = dw - 1;
+                        }
+                        sr = sr + getF64(this.blR, rb + xx);
+                        sg = sg + getF64(this.blG, rb + xx);
+                        sb = sb + getF64(this.blB, rb + xx);
+                        k = k + 1;
+                    }
+                    setF64(this.btR, rb + x, sr * invK);
+                    setF64(this.btG, rb + x, sg * invK);
+                    setF64(this.btB, rb + x, sb * invK);
+                    x = x + 1;
+                }
+                y = y + 1;
+            }
+            // Vertical btR -> blR.
+            let x2 : i32 = 0;
+            while (x2 < dw) {
+                let y2 : i32 = 0;
+                while (y2 < dh) {
+                    let sr : f64 = 0.0;
+                    let sg : f64 = 0.0;
+                    let sb : f64 = 0.0;
+                    let k : i32 = 0 - rad;
+                    while (k <= rad) {
+                        let yy : i32 = y2 + k;
+                        if (yy < 0) {
+                            yy = 0;
+                        }
+                        if (yy > dh - 1) {
+                            yy = dh - 1;
+                        }
+                        sr = sr + getF64(this.btR, yy * dw + x2);
+                        sg = sg + getF64(this.btG, yy * dw + x2);
+                        sb = sb + getF64(this.btB, yy * dw + x2);
+                        k = k + 1;
+                    }
+                    setF64(this.blR, y2 * dw + x2, sr * invK);
+                    setF64(this.blG, y2 * dw + x2, sg * invK);
+                    setF64(this.blB, y2 * dw + x2, sb * invK);
+                    y2 = y2 + 1;
+                }
+                x2 = x2 + 1;
+            }
+            it = it + 1;
+        }
+        // 3) Composite: add the upsampled glow over the full frame.
+        let st : f64 = config::bloomStrength;
+        let py : i32 = 0;
+        while (py < h) {
+            let row : i32 = py * w;
+            let drow : i32 = (py / 2) * dw;
+            let px : i32 = 0;
+            while (px < w) {
+                let di : i32 = drow + px / 2;
+                let addr : f64 = getF64(this.blR, di) * st;
+                let addg : f64 = getF64(this.blG, di) * st;
+                let addb : f64 = getF64(this.blB, di) * st;
+                if (addr > 0.5 || addg > 0.5 || addb > 0.5) {
+                    let c : i32 = readI32(pixels, (row + px) as i64 * 4);
+                    let r : i32 = ((c >> 16) & 0xFF) + (Math::floorToInt(addr) as i32);
+                    let g : i32 = ((c >> 8) & 0xFF) + (Math::floorToInt(addg) as i32);
+                    let b : i32 = (c & 0xFF) + (Math::floorToInt(addb) as i32);
+                    if (r > 255) {
+                        r = 255;
+                    }
+                    if (g > 255) {
+                        g = 255;
+                    }
+                    if (b > 255) {
+                        b = 255;
+                    }
+                    putPixel(pixels, row + px, (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF));
+                }
+                px = px + 1;
+            }
+            py = py + 1;
         }
     }
 

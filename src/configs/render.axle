@@ -45,3 +45,13 @@ const godRaySamples : i32 = 24;     // steps per pixel toward the sun
 const godRayDecay : f64 = 0.92;     // per-step attenuation of the accumulated shaft
 const godRayWeight : f64 = 0.55;    // overall shaft brightness (exposure)
 const godRayDensity : f64 = 0.92;   // fraction of the pixel→sun distance the march spans
+
+// ── Bloom (soft glow on bright pixels) ──────────────────────
+// Bright areas (sun, halo, god-rays, water glints, snow) bleed a soft warm glow.
+// Extracted above a luminance threshold at half resolution, blurred, and added
+// back — gives the image a honeyed, sunlit feel without touching midtones.
+const bloomOn : bool = true;
+const bloomThreshold : f64 = 168.0;  // luminance (0..255) above which a pixel blooms
+const bloomStrength : f64 = 0.85;    // how strongly the blurred glow is added back
+const bloomRadius : i32 = 5;         // half-res blur radius (larger = wider glow)
+const bloomIters : i32 = 2;          // separable blur passes (smoother glow)

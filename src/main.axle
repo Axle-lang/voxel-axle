@@ -460,6 +460,8 @@ fn main() : void {
             } else {
                 renderer.godRays(player, pixels, zbuf, w, h);
             }
+            // Soft warm glow on bright pixels (sun, halo, shafts, water, snow).
+            renderer.bloomPass(pixels, w, h);
             if (!paused) {
                 if (picker.hit == 1) {
                     renderer.drawSelection(player, pixels, zbuf, w, h, picker.bx, picker.by, picker.bz);
