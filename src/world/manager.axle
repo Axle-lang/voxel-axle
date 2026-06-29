@@ -19,11 +19,12 @@
 use sdl_platform::{allocBytes, readU8, writeU8};
 use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI, snowDepth};
 use crate::world::biomes::registry::{biomeAt, Biomes};
-use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isLeaves, isPartialShape, hasCollisionBox};
+use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isPartialShape, hasCollisionBox, isLeaves};
+use crate::world::voxstore::VoxStore;
+use crate::world::treegen::{ stampTree };
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
-use crate::config::{ TreeKind };
 use crate::config::{ FaceDir };
 
 class ChunkManager {
@@ -85,8 +86,7 @@ class ChunkManager {
     rqn : i32,
     hmap : i32[],
     ctop : i32[],
-    vox : Block[],
-    maxFY : i32[],
+    store : VoxStore,   // raw voxel storage (block field + face-Y watermark + voxIdx)
     reg : Biomes,
 
     /**
@@ -157,8 +157,7 @@ class ChunkManager {
         this.rqn = 0;
         this.hmap = malloc<i32>(slots * hSide * hSide);
         this.ctop = malloc<i32>(slots * s * s);
-        this.vox = malloc<Block>(slots * hSide * hSide * config::worldHeight);
-        this.maxFY = malloc<i32>(slots);
+        this.store = new VoxStore(slots);
         let i : i32 = 0;
         while (i < slots) {
             this.loaded[i] = 0;
@@ -230,11 +229,7 @@ class ChunkManager {
      * @return the flat array index
      */
     fn voxIdx(slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        let hSide : i32 = config::chunkSize + 2;
-        let px : i32 = lx + 1;
-        let pz : i32 = lz + 1;
-        return slot * (hSide * hSide * config::worldHeight)
-            + (pz * hSide + px) * config::worldHeight + ly;
+        return this.store.voxIdx(slot, lx, ly, lz);
     }
 
     /**
@@ -246,13 +241,7 @@ class ChunkManager {
      * @return the block id
      */
     fn getVox(slot : i32, lx : i32, ly : i32, lz : i32) : Block {
-        if (ly < 0) {
-            return Block::Stone;
-        }
-        if (ly >= config::worldHeight) {
-            return Block::Air;
-        }
-        return this.vox[this.voxIdx(slot, lx, ly, lz)];
+        return this.store.getVox(slot, lx, ly, lz);
     }
 
     /**
@@ -264,7 +253,7 @@ class ChunkManager {
      * @param id    the block id to write
      */
     fn setVoxLocal(slot : i32, lx : i32, ly : i32, lz : i32, own id : Block) : void {
-        this.vox[this.voxIdx(slot, lx, ly, lz)] = id;
+        this.store.setVoxLocal(slot, lx, ly, lz, id);
     }
 
     /**
@@ -277,15 +266,7 @@ class ChunkManager {
      * @param id    the block id to write
      */
     fn setVoxClip(slot : i32, lx : i32, ly : i32, lz : i32, id : Block) : void {
-        let s : i32 = config::chunkSize;
-        if (lx < 0 - 1 || lx > s || lz < 0 - 1 || lz > s) {
-            return;
-        }
-        if (ly < 0 || ly >= config::worldHeight) {
-            return;
-        }
-        let v : Block = id;
-        this.setVoxLocal(slot, lx, ly, lz, v);
+        this.store.setVoxClip(slot, lx, ly, lz, id);
     }
 
     /**
@@ -294,9 +275,7 @@ class ChunkManager {
      * @param y     the candidate Y
      */
     fn bumpFY(slot : i32, y : i32) : void {
-        if (y > this.maxFY[slot]) {
-            this.maxFY[slot] = y;
-        }
+        this.store.bumpFY(slot, y);
     }
 
     // ── World queries (unchanged interfaces) ────────────────────
@@ -502,7 +481,12 @@ class ChunkManager {
         return built;
     }
 
-    /** Flag a chunk for (re)mesh if it's currently loaded at (cx, cz). */
+    /**
+     * Flag a chunk for (re)mesh, but only if it is currently loaded at (cx, cz)
+     * — used to re-bake a neighbour's shared border faces after an edit / load.
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
     fn markDirtyAt(cx : i32, cz : i32) : void {
         let slot : i32 = this.slotFor(cx, cz);
         if (this.loaded[slot] == 1 && this.cxs[slot] == cx && this.czs[slot] == cz) {
@@ -594,7 +578,7 @@ class ChunkManager {
      */
     fn genVoxels(slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = config::chunkSize;
-        this.maxFY[slot] = 0;
+        this.store.maxFY[slot] = 0;
         let lz : i32 = 0 - 1;
         while (lz <= s) {
             let lx : i32 = 0 - 1;
@@ -680,8 +664,12 @@ class ChunkManager {
                     let thr : f64 = this.reg.treeThreshold(biome);
                     thr = thr + (1.0 - thr) * config::treeThin;
                     if (treeHash(wx as f64, wz as f64) > thr) {
-                        this.stampTree(this.reg.treeKind(biome), this.reg.treeHeight(biome), slot, olx, h, olz);
-                        // Cold biomes: dust the canopy with a thin snow cap.
+                        // Carving lives in treegen.axle (a leaf module): pass the
+                        // slot's voxel field + face-Y watermark by reference so the
+                        // stamper writes straight into this slot — no import cycle.
+                        stampTree(this.store, this.reg.treeKind(biome), this.reg.treeHeight(biome), slot, olx, h, olz);
+                        // Cold biomes: dust the canopy with a thin snow cap (kept
+                        // here — it needs the heightmap + biome registry).
                         if (this.coldBiome(biome)) {
                             this.snowCapTree(slot, olx, olz, h, this.reg.treeHeight(biome), cx * s, cz * s);
                         }
@@ -724,15 +712,62 @@ class ChunkManager {
     }
 
     /**
-     * Dust a freshly-stamped tree's canopy with a thin snow cap: over each
-     * column of the tree footprint, drop a single Snow block onto the topmost
-     * leaf (into the air above it). One block per column → a light dusting that
-     * follows the canopy silhouette, not a solid slab.
+     * Deep stone, occasionally an ore — deterministic 3D scatter by depth.
+     * Common ores (coal/iron) appear at most depths; rare ones (diamond/
+     * emerald) only deep. Returns bStone when nothing rolls. Called only
+     * for the deep stone band, so surface/filler are never replaced.
+     * @param wx  the world x coordinate
+     * @param wy  the world y coordinate
+     * @param wz  the world z coordinate
+     * @return the block id (ore or stone)
+     */
+    fn oreAt(wx : i32, wy : i32, wz : i32) : Block {
+        let r : f64 = hashI(wx * 7 + wy * 131, wz * 13 + wy * 977, config::seedI + 9171);
+        if (wy < 14) {
+            if (r > 0.9930) {
+                return Block::DiamondOre;
+            }
+            if (r > 0.9870) {
+                return Block::EmeraldOre;
+            }
+            if (r > 0.9790) {
+                return Block::RedstoneOre;
+            }
+            if (r > 0.9680) {
+                return Block::GoldOre;
+            }
+        }
+        if (wy < 36 && r > 0.9700) {
+            return Block::LapisOre;
+        }
+        if (r > 0.9550) {
+            return Block::IronOre;
+        }
+        if (r > 0.9150) {
+            return Block::CoalOre;
+        }
+        return Block::Stone;
+    }
+
+    // Tree / mushroom shape carving (stampTree, leafLayer, stampTrunk, the
+    // per-species canopies) lives in treegen.axle as free LEAF functions writing
+    // straight into a slot's voxel field; stampTrees (above) delegates to them.
+    // snowCapTree stays here because it needs the heightmap (colHeightWorld) and
+    // the biome registry (coldBiome / biomeAt) — manager-only state.
+
+    /**
+     * Dust a freshly-stamped tree's canopy with a thin snow cap: over each column
+     * of the tree footprint, drop a single snow block onto the topmost leaf (into
+     * the air above it). One block per column → a light dusting that follows the
+     * canopy silhouette, not a solid slab. Only columns whose own ground biome is
+     * cold are capped, so the canopy snow matches the ground snow.
      * @param slot    the slot index
      * @param olx     the tree origin local x
      * @param olz     the tree origin local z
      * @param baseY   the trunk base Y
      * @param height  the trunk height
+     * @param cx0     the chunk's world-x origin (cx * chunkSize)
+     * @param cz0     the chunk's world-z origin (cz * chunkSize)
      */
     fn snowCapTree(slot : i32, olx : i32, olz : i32, baseY : i32, height : i32, cx0 : i32, cz0 : i32) : void {
         let s : i32 = config::chunkSize;
@@ -780,243 +815,6 @@ class ChunkManager {
             }
             dz = dz + 1;
         }
-    }
-
-    /**
-     * Deep stone, occasionally an ore — deterministic 3D scatter by depth.
-     * Common ores (coal/iron) appear at most depths; rare ones (diamond/
-     * emerald) only deep. Returns bStone when nothing rolls. Called only
-     * for the deep stone band, so surface/filler are never replaced.
-     * @param wx  the world x coordinate
-     * @param wy  the world y coordinate
-     * @param wz  the world z coordinate
-     * @return the block id (ore or stone)
-     */
-    fn oreAt(wx : i32, wy : i32, wz : i32) : Block {
-        let r : f64 = hashI(wx * 7 + wy * 131, wz * 13 + wy * 977, config::seedI + 9171);
-        if (wy < 14) {
-            if (r > 0.9930) {
-                return Block::DiamondOre;
-            }
-            if (r > 0.9870) {
-                return Block::EmeraldOre;
-            }
-            if (r > 0.9790) {
-                return Block::RedstoneOre;
-            }
-            if (r > 0.9680) {
-                return Block::GoldOre;
-            }
-        }
-        if (wy < 36 && r > 0.9700) {
-            return Block::LapisOre;
-        }
-        if (r > 0.9550) {
-            return Block::IronOre;
-        }
-        if (r > 0.9150) {
-            return Block::CoalOre;
-        }
-        return Block::Stone;
-    }
-
-    /**
-     * A leaf voxel of `leafId`, only into air (never carving terrain).
-     * @param slot    the slot index
-     * @param lx      the local x coordinate
-     * @param ly      the local y coordinate
-     * @param lz      the local z coordinate
-     * @param leafId  the leaf block id
-     */
-    fn stampLeafId(slot : i32, lx : i32, ly : i32, lz : i32, leafId : Block) : void {
-        let s : i32 = config::chunkSize;
-        if (lx < 0 - 1 || lx > s || lz < 0 - 1 || lz > s) {
-            return;
-        }
-        if (ly < 0 || ly >= config::worldHeight) {
-            return;
-        }
-        if (this.getVox(slot, lx, ly, lz) == Block::Air) {
-            let v : Block = leafId;
-            this.setVoxLocal(slot, lx, ly, lz, v);
-        }
-    }
-
-    /**
-     * A solid square leaf layer of half-size `rad` centred on (cx,cy,cz).
-     * @param slot    the slot index
-     * @param cx      the layer centre x coordinate
-     * @param cy      the layer y coordinate
-     * @param cz      the layer centre z coordinate
-     * @param rad     the half-size of the square
-     * @param leafId  the leaf block id
-     */
-    fn leafLayer(slot : i32, cx : i32, cy : i32, cz : i32, rad : i32, leafId : Block) : void {
-        let dz : i32 = 0 - rad;
-        while (dz <= rad) {
-            let dx : i32 = 0 - rad;
-            while (dx <= rad) {
-                this.stampLeafId(slot, cx + dx, cy, cz + dz, leafId);
-                dx = dx + 1;
-            }
-            dz = dz + 1;
-        }
-    }
-
-    /**
-     * Stamp a vertical trunk of `height` blocks and bump the face Y mark.
-     * @param slot    the slot index
-     * @param olx     the trunk origin x coordinate
-     * @param baseY   the trunk base Y
-     * @param olz     the trunk origin z coordinate
-     * @param height  the trunk height
-     * @param woodId  the wood block id
-     */
-    fn stampTrunk(slot : i32, olx : i32, baseY : i32, olz : i32, height : i32, woodId : Block) : void {
-        let t : i32 = 0;
-        while (t < height) {
-            this.setVoxClip(slot, olx, baseY + t, olz, woodId);
-            t = t + 1;
-        }
-        this.bumpFY(slot, baseY + height + 1);
-    }
-
-    /**
-     * Stamp a tree of `kind` (config::tree*) with origin column (olx, olz),
-     * trunk base `baseY` and trunk `height` (the biome's `treeHt`). Leaves
-     * first, then the trunk overwrites its column. Shapes are fixed (no RNG)
-     * so the two chunks sharing a border tree stamp it identically.
-     * @param kind    the tree kind id
-     * @param height  the trunk height (from the biome)
-     * @param slot    the slot index
-     * @param olx     the tree origin x coordinate
-     * @param baseY   the trunk base Y
-     * @param olz     the tree origin z coordinate
-     */
-    fn stampTree(kind : TreeKind, height : i32, slot : i32, olx : i32, baseY : i32, olz : i32) : void {
-        match kind {
-            TreeKind::None => {
-                return;
-            }
-            TreeKind::Cactus => {
-                let c : i32 = 0;
-                while (c < height) {
-                    this.setVoxClip(slot, olx, baseY + c, olz, Block::Cactus);
-                    c = c + 1;
-                }
-                this.bumpFY(slot, baseY + height);
-            }
-            TreeKind::Spruce => {
-                this.stampSpruce(slot, olx, baseY, olz, height);
-            }
-            TreeKind::Acacia => {
-                this.stampAcacia(slot, olx, baseY, olz, height);
-            }
-            TreeKind::Bamboo => {
-                // A tall, thin bamboo stalk.
-                let t : i32 = 0;
-                while (t < height) {
-                    this.setVoxClip(slot, olx, baseY + t, olz, Block::Bamboo);
-                    t = t + 1;
-                }
-                this.bumpFY(slot, baseY + height);
-            }
-            TreeKind::RedMushroom => {
-                this.stampMushroom(slot, olx, baseY, olz, height, Block::RedMushroom);
-            }
-            TreeKind::BrownMushroom => {
-                this.stampMushroom(slot, olx, baseY, olz, height, Block::BrownMushroom);
-            }
-            // Oak / birch / jungle / cherry: a bushy round canopy; they differ
-            // only in wood / leaf species (the trunk height comes from the biome).
-            _ => {
-                let wood : Block = match kind {
-                    TreeKind::Birch => Block::WoodBirch,
-                    TreeKind::Jungle => Block::WoodJungle,
-                    TreeKind::Cherry => Block::CherryLog,
-                    _ => Block::Wood,
-                };
-                let leaf : Block = match kind {
-                    TreeKind::Birch => Block::LeavesBirch,
-                    TreeKind::Jungle => Block::LeavesJungle,
-                    TreeKind::Cherry => Block::CherryLeaves,
-                    _ => Block::Leaves,
-                };
-                this.stampBushy(slot, olx, baseY, olz, height, wood, leaf);
-            }
-        }
-    }
-
-    /**
-     * Giant mushroom: a pale stem topped by a flat round cap of `capId`.
-     * @param slot    the slot index
-     * @param olx     the origin x coordinate
-     * @param baseY   the stem base Y
-     * @param olz     the origin z coordinate
-     * @param height  the stem height
-     * @param capId   the cap block id (red / brown mushroom block)
-     */
-    fn stampMushroom(slot : i32, olx : i32, baseY : i32, olz : i32, height : i32, capId : Block) : void {
-        let cy : i32 = baseY + height;
-        this.leafLayer(slot, olx, cy, olz, 1, capId);
-        this.stampLeafId(slot, olx, cy + 1, olz, capId);
-        this.stampTrunk(slot, olx, baseY, olz, height, Block::MushroomStem);
-    }
-
-    /**
-     * Round canopy (oak/birch/jungle): two wide rings, a narrow ring and a
-     * small crown atop the trunk.
-     * @param slot    the slot index
-     * @param olx     the tree origin x coordinate
-     * @param baseY   the trunk base Y
-     * @param olz     the tree origin z coordinate
-     * @param height  the trunk height
-     * @param wood    the wood block id
-     * @param leaf    the leaf block id
-     */
-    fn stampBushy(slot : i32, olx : i32, baseY : i32, olz : i32, height : i32, wood : Block, leaf : Block) : void {
-        let cy : i32 = baseY + height;
-        this.leafLayer(slot, olx, cy - 2, olz, 2, leaf);
-        this.leafLayer(slot, olx, cy - 1, olz, 2, leaf);
-        this.leafLayer(slot, olx, cy, olz, 1, leaf);
-        this.stampLeafId(slot, olx, cy + 1, olz, leaf);
-        this.stampLeafId(slot, olx + 1, cy + 1, olz, leaf);
-        this.stampLeafId(slot, olx - 1, cy + 1, olz, leaf);
-        this.stampLeafId(slot, olx, cy + 1, olz + 1, leaf);
-        this.stampLeafId(slot, olx, cy + 1, olz - 1, leaf);
-        this.stampTrunk(slot, olx, baseY, olz, height, wood);
-    }
-
-    /**
-     * Conical spruce: shrinking square rings up a tall trunk, with a tip.
-     * @param slot    the slot index
-     * @param olx     the tree origin x coordinate
-     * @param baseY   the trunk base Y
-     * @param olz     the tree origin z coordinate
-     * @param height  the trunk height
-     */
-    fn stampSpruce(slot : i32, olx : i32, baseY : i32, olz : i32, height : i32) : void {
-        let cy : i32 = baseY + height;
-        this.leafLayer(slot, olx, cy - 3, olz, 2, Block::LeavesSpruce);
-        this.leafLayer(slot, olx, cy - 2, olz, 1, Block::LeavesSpruce);
-        this.leafLayer(slot, olx, cy - 1, olz, 1, Block::LeavesSpruce);
-        this.stampLeafId(slot, olx, cy, olz, Block::LeavesSpruce);
-        this.stampTrunk(slot, olx, baseY, olz, height, Block::WoodSpruce);
-    }
-
-    /**
-     * Flat-topped acacia: a tall trunk and a wide thin canopy.
-     * @param slot    the slot index
-     * @param olx     the tree origin x coordinate
-     * @param baseY   the trunk base Y
-     * @param olz     the tree origin z coordinate
-     * @param height  the trunk height
-     */
-    fn stampAcacia(slot : i32, olx : i32, baseY : i32, olz : i32, height : i32) : void {
-        let cy : i32 = baseY + height;
-        this.leafLayer(slot, olx, cy, olz, 2, Block::LeavesAcacia);
-        this.leafLayer(slot, olx, cy + 1, olz, 1, Block::LeavesAcacia);
-        this.stampTrunk(slot, olx, baseY, olz, height, Block::WoodAcacia);
     }
 
     // ── Meshing ─────────────────────────────────────────────────
@@ -1244,7 +1042,7 @@ class ChunkManager {
         this.fcount[slot] = 0;
         this.tcount[slot] = 0;
         let s : i32 = config::chunkSize;
-        let top : i32 = this.maxFY[slot];
+        let top : i32 = this.store.maxFY[slot];
         let air : Block = Block::Air;
         let lz : i32 = 0;
         while (lz < s) {
@@ -1394,6 +1192,10 @@ class ChunkManager {
 
     /**
      * Block-light level (0..15) at a world voxel; 0 if unloaded / out of range.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @return the block-light level 0..15
      */
     fn blGetW(wx : i32, wy : i32, wz : i32) : i32 {
         if (wy < 0 || wy >= config::worldHeight) {
@@ -1409,7 +1211,14 @@ class ChunkManager {
         return readU8(this.light, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
-    /** Set block light at a world voxel (owner chunk) and flag it for re-mesh. */
+    /**
+     * Set block light at a world voxel (owner chunk) and flag it for re-mesh
+     * if the value actually changed.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @param v   the new block-light level 0..15
+     */
     fn blSetW(wx : i32, wy : i32, wz : i32, v : i32) : void {
         if (wy < 0 || wy >= config::worldHeight) {
             return;
@@ -1428,7 +1237,13 @@ class ChunkManager {
         }
     }
 
-    /** Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
+    /**
+     * Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @return the sky-light level 0..15
+     */
     fn skGetW(wx : i32, wy : i32, wz : i32) : i32 {
         if (wy < 0 || wy >= config::worldHeight) {
             return 0;
@@ -1443,7 +1258,14 @@ class ChunkManager {
         return readU8(this.skylight, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
-    /** Set sky light at a world voxel (owner chunk) and flag it for re-mesh. */
+    /**
+     * Set sky light at a world voxel (owner chunk) and flag it for re-mesh
+     * if the value actually changed.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @param v   the new sky-light level 0..15
+     */
     fn skSetW(wx : i32, wy : i32, wz : i32, v : i32) : void {
         if (wy < 0 || wy >= config::worldHeight) {
             return;
@@ -1494,7 +1316,14 @@ class ChunkManager {
         }
     }
 
-    /** Seed sky light for every column of a freshly generated chunk. */
+    /**
+     * Seed sky light for a freshly generated chunk: set each column's vertical
+     * exposure, then flood the sideways gradient so overhung / roofed spots fade
+     * in instead of leaving a hard black patch.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
     fn seedSky(slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = config::chunkSize;
         let lz : i32 = 0;
@@ -1510,7 +1339,7 @@ class ChunkManager {
         // the active band, so roofed / overhung spots (under a canopy, a cliff,
         // a cave mouth) fade in like an edit would — no hard black patch.
         this.lqn = 0;
-        let top : i32 = this.maxFY[slot] + 1;
+        let top : i32 = this.store.maxFY[slot] + 1;
         if (top > config::worldHeight - 1) {
             top = config::worldHeight - 1;
         }
@@ -1532,7 +1361,15 @@ class ChunkManager {
         this.skFloodAdd();
     }
 
-    /** Spread sky light into a neighbour (−1 per block) when brighter there. */
+    /**
+     * Spread sky light into one neighbour, losing one level per block, when it
+     * would be brighter there (and the neighbour isn't opaque). Pushes the
+     * brightened neighbour so the flood continues from it.
+     * @param nx  neighbour world x
+     * @param ny  neighbour world y
+     * @param nz  neighbour world z
+     * @param lv  this cell's sky-light level (neighbour gets lv-1)
+     */
     fn skTrySpread(nx : i32, ny : i32, nz : i32, lv : i32) : void {
         if (isOpaque(this.worldGet(nx, ny, nz))) {
             return;
@@ -1567,7 +1404,15 @@ class ChunkManager {
         }
     }
 
-    /** One sky-removal neighbour step: darken dimmer cells, re-add from brighter. */
+    /**
+     * One sky-removal neighbour step: a neighbour dimmer than the removed level
+     * is itself cleared and queued for further removal; an equal/brighter
+     * neighbour is a surviving source and is queued onto the add-stack to refill.
+     * @param nx   neighbour world x
+     * @param ny   neighbour world y
+     * @param nz   neighbour world z
+     * @param lvl  the level being removed from the parent cell
+     */
     fn skTryRemove(nx : i32, ny : i32, nz : i32, lvl : i32) : void {
         let nl : i32 = this.skGetW(nx, ny, nz);
         if (nl != 0) {
@@ -1597,7 +1442,13 @@ class ChunkManager {
         }
     }
 
-    /** Push a cell onto the light add-stack (dropped if full). */
+    /**
+     * Push a cell onto the (shared block/sky) light add-stack; dropped if the
+     * stack is at capacity, which keeps the flood bounded.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     */
     fn lpush(wx : i32, wy : i32, wz : i32) : void {
         if (this.lqn >= config::lightQueueCap) {
             return;
@@ -1608,7 +1459,14 @@ class ChunkManager {
         this.lqn = this.lqn + 1;
     }
 
-    /** Push a cell + its old level onto the light removal-stack. */
+    /**
+     * Push a cell plus its old level onto the light removal-stack; dropped if
+     * the stack is at capacity.
+     * @param wx   world x
+     * @param wy   world y
+     * @param wz   world z
+     * @param lvl  the cell's old (pre-removal) light level
+     */
     fn rpush(wx : i32, wy : i32, wz : i32, lvl : i32) : void {
         if (this.rqn >= config::lightQueueCap) {
             return;
@@ -1620,7 +1478,15 @@ class ChunkManager {
         this.rqn = this.rqn + 1;
     }
 
-    /** Spread light into a neighbour when it would be brighter there. */
+    /**
+     * Spread block light into one neighbour, losing one level per block, when it
+     * would be brighter there (and the neighbour isn't opaque). Pushes the
+     * brightened neighbour so the flood continues from it.
+     * @param nx  neighbour world x
+     * @param ny  neighbour world y
+     * @param nz  neighbour world z
+     * @param lv  this cell's block-light level (neighbour gets lv-1)
+     */
     fn tryAdd(nx : i32, ny : i32, nz : i32, lv : i32) : void {
         if (isOpaque(this.worldGet(nx, ny, nz))) {
             return;
@@ -1650,7 +1516,16 @@ class ChunkManager {
         }
     }
 
-    /** One removal neighbour step: darken dimmer cells, re-add from brighter. */
+    /**
+     * One block-light removal neighbour step: a neighbour dimmer than the
+     * removed level is itself cleared and queued for further removal; an
+     * equal/brighter neighbour is a surviving source and is queued onto the
+     * add-stack to refill.
+     * @param nx   neighbour world x
+     * @param ny   neighbour world y
+     * @param nz   neighbour world z
+     * @param lvl  the level being removed from the parent cell
+     */
     fn tryRemove(nx : i32, ny : i32, nz : i32, lvl : i32) : void {
         let nl : i32 = this.blGetW(nx, ny, nz);
         if (nl != 0) {
@@ -1794,7 +1669,12 @@ class ChunkManager {
         this.flushLightMesh();
     }
 
-    /** Zero a slot's block-light region (a freshly generated chunk is dark). */
+    /**
+     * Reset a slot's per-voxel light maps for a freshly (re)generated chunk:
+     * block + sky light to 0 (dark), sun visibility + sky access to full, the
+     * colour-bounce tint to neutral, and flag the slot for a sky-AO bake.
+     * @param slot  the slot index
+     */
     fn clearLight(slot : i32) : void {
         let hSide : i32 = config::chunkSize + 2;
         let n : i32 = hSide * hSide * config::worldHeight;
@@ -1960,7 +1840,7 @@ class ChunkManager {
      */
     fn computeChunkSun(slot : i32, cx : i32, cz : i32, sx : f64, sy : f64, sz : f64, ceil : i32) : void {
         let s : i32 = config::chunkSize;
-        let top : i32 = this.maxFY[slot] + 1;
+        let top : i32 = this.store.maxFY[slot] + 1;
         if (top > config::worldHeight - 1) {
             top = config::worldHeight - 1;
         }
@@ -2010,8 +1890,8 @@ class ChunkManager {
         let ceil : i32 = 0;
         let j : i32 = 0;
         while (j < slots) {
-            if (this.loaded[j] == 1 && this.maxFY[j] > ceil) {
-                ceil = this.maxFY[j];
+            if (this.loaded[j] == 1 && this.store.maxFY[j] > ceil) {
+                ceil = this.store.maxFY[j];
             }
             j = j + 1;
         }
@@ -2037,6 +1917,10 @@ class ChunkManager {
      * Sky access 0..255 at a world voxel: 255 = fully open to the sky, lower =
      * occluded by surrounding terrain (valleys, overhangs, under canopy). Out of
      * range / unloaded reads fully open so it never wrongly darkens a face.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @return the sky access 0 (occluded) .. 255 (fully open)
      */
     fn skyaccessGet(wx : i32, wy : i32, wz : i32) : i32 {
         if (wy < 0 || wy >= config::worldHeight) {
@@ -2058,6 +1942,16 @@ class ChunkManager {
      * given by the tangent offsets t1/t2). Symmetric in the corner, so coplanar
      * faces sharing a corner get the SAME value — the cast shadow interpolates
      * smoothly across faces instead of stepping block by block. Returns 0..255.
+     * @param bx   the corner's own air cell x
+     * @param by   the corner's own air cell y
+     * @param bz   the corner's own air cell z
+     * @param t1x  first in-plane tangent offset x
+     * @param t1y  first in-plane tangent offset y
+     * @param t1z  first in-plane tangent offset z
+     * @param t2x  second in-plane tangent offset x
+     * @param t2y  second in-plane tangent offset y
+     * @param t2z  second in-plane tangent offset z
+     * @return the averaged soft sun visibility 0..255
      */
     fn sunSoftCorner(bx : i32, by : i32, bz : i32,
         t1x : i32, t1y : i32, t1z : i32, t2x : i32, t2y : i32, t2z : i32) : i32 {
@@ -2071,6 +1965,9 @@ class ChunkManager {
     /**
      * Encode a bounce tint channel: normalised colour ratio `ratio` (1.0 = grey),
      * blended toward neutral by `occ`, stored as a byte where 128 = ×1.0.
+     * @param ratio  the channel's colour ratio (1.0 = neutral grey)
+     * @param occ    occlusion weight 0..1 (how strongly to apply the tint)
+     * @return the packed byte (clamped 0..255, 128 = ×1.0)
      */
     fn bounceByte(ratio : f64, occ : f64) : i32 {
         let f : f64 = 1.0 + (ratio - 1.0) * occ;
@@ -2087,6 +1984,10 @@ class ChunkManager {
     /**
      * Packed one-bounce coloured tint (r<<16|g<<8|b, each 128 = ×1.0) at a world
      * voxel; neutral grey (0x808080) out of range / unloaded.
+     * @param wx  world x
+     * @param wy  world y
+     * @param wz  world z
+     * @return the packed bounce tint (0xRRGGBB, each channel 128 = ×1.0)
      */
     fn bounceGet(wx : i32, wy : i32, wz : i32) : i32 {
         if (wy < 0 || wy >= config::worldHeight) {
@@ -2108,6 +2009,14 @@ class ChunkManager {
      * terrain ceiling or runs the full skyAOReach unobstructed), else the packed
      * albedo of the opaque voxel it hits. The caller derives sky access from the
      * escapes and the coloured bounce from the hit albedos.
+     * @param wx    origin air cell x
+     * @param wy    origin air cell y
+     * @param wz    origin air cell z
+     * @param dx    ray direction x (unit)
+     * @param dy    ray direction y (unit)
+     * @param dz    ray direction z (unit)
+     * @param ceil  tallest terrain Y over loaded chunks (escape shortcut)
+     * @return -1 if the ray escapes to the sky, else the packed albedo it hit
      */
     fn skyHemiHit(wx : i32, wy : i32, wz : i32, dx : f64, dy : f64, dz : f64, ceil : i32) : i32 {
         let ox : f64 = (wx as f64) + 0.5;
@@ -2145,7 +2054,7 @@ class ChunkManager {
     fn computeChunkSkyAO(slot : i32, cx : i32, cz : i32, ceil : i32) : void {
         let s : i32 = config::chunkSize;
         let m : i32 = config::skyAOSamples;
-        let top : i32 = this.maxFY[slot] + 1;
+        let top : i32 = this.store.maxFY[slot] + 1;
         if (top > config::worldHeight - 1) {
             top = config::worldHeight - 1;
         }
@@ -2218,8 +2127,8 @@ class ChunkManager {
         let ceil : i32 = 0;
         let j : i32 = 0;
         while (j < slots) {
-            if (this.loaded[j] == 1 && this.maxFY[j] > ceil) {
-                ceil = this.maxFY[j];
+            if (this.loaded[j] == 1 && this.store.maxFY[j] > ceil) {
+                ceil = this.store.maxFY[j];
             }
             j = j + 1;
         }

@@ -1,0 +1,110 @@
+// voxstore — the raw voxel storage of the chunk ring.
+//
+// A LEAF mini-manager (imports only `config`) holding the padded per-slot voxel
+// field and the per-slot highest-face Y watermark, plus the master per-voxel
+// INDEX LAYOUT (`voxIdx`). That layout is shared: the manager's per-voxel byte
+// light volumes (block / sky / sun / sky-access / bounce) index with the very
+// same `voxIdx`, so it lives here as the single authority.
+//
+// Because this is a leaf, both `manager.axle` (which composes a VoxStore) and
+// `treegen.axle` (which carves trees straight into one) depend on it one-way —
+// no import cycle. Axle arrays (`Block[]`/`i32[]`) are references, so writes
+// through a VoxStore handed to a free function mutate the owning ring in place.
+
+use crate::config;
+use crate::config::{ Block };
+
+class VoxStore {
+    vox : Block[],   // padded block field: slots × (chunkSize+2)² × worldHeight
+    maxFY : i32[],   // per-slot highest-face Y watermark (bounds the mesh/light scan)
+
+    /**
+     * Allocate the padded voxel field and the per-slot face-Y watermark.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        let hSide : i32 = config::chunkSize + 2;
+        this.vox = malloc<Block>(slots * hSide * hSide * config::worldHeight);
+        this.maxFY = malloc<i32>(slots);
+    }
+
+    /**
+     * Flat index of a padded local voxel. The inner dimension is Y; a one-voxel
+     * skirt (+1) on x/z mirrors the neighbour chunks' edge columns.
+     * @param slot  the slot index
+     * @param lx    the local x coordinate (skirt range [-1, chunkSize])
+     * @param ly    the local y coordinate
+     * @param lz    the local z coordinate (skirt range [-1, chunkSize])
+     * @return the flat offset into `vox` (and into the light byte volumes)
+     */
+    fn voxIdx(slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
+        let hSide : i32 = config::chunkSize + 2;
+        let px : i32 = lx + 1;
+        let pz : i32 = lz + 1;
+        return slot * (hSide * hSide * config::worldHeight)
+            + (pz * hSide + px) * config::worldHeight + ly;
+    }
+
+    /**
+     * Read a padded local voxel: bedrock (Stone) below y=0, Air at/above the
+     * world top, the stored block otherwise.
+     * @param slot  the slot index
+     * @param lx    the local x coordinate
+     * @param ly    the local y coordinate
+     * @param lz    the local z coordinate
+     * @return the block id at that cell
+     */
+    fn getVox(slot : i32, lx : i32, ly : i32, lz : i32) : Block {
+        if (ly < 0) {
+            return Block::Stone;
+        }
+        if (ly >= config::worldHeight) {
+            return Block::Air;
+        }
+        return this.vox[this.voxIdx(slot, lx, ly, lz)];
+    }
+
+    /**
+     * Write block `id` at a padded local voxel (no bounds check).
+     * @param slot  the slot index
+     * @param lx    the local x coordinate
+     * @param ly    the local y coordinate
+     * @param lz    the local z coordinate
+     * @param id    the block id to write
+     */
+    fn setVoxLocal(slot : i32, lx : i32, ly : i32, lz : i32, own id : Block) : void {
+        this.vox[this.voxIdx(slot, lx, ly, lz)] = id;
+    }
+
+    /**
+     * Write `id` only if (lx, ly, lz) is inside this slot's padded volume — used
+     * when stamping trees whose origin sits just outside the chunk.
+     * @param slot  the slot index
+     * @param lx    the local x coordinate
+     * @param ly    the local y coordinate
+     * @param lz    the local z coordinate
+     * @param id    the block id to write
+     */
+    fn setVoxClip(slot : i32, lx : i32, ly : i32, lz : i32, id : Block) : void {
+        let s : i32 = config::chunkSize;
+        if (lx < 0 - 1 || lx > s || lz < 0 - 1 || lz > s) {
+            return;
+        }
+        if (ly < 0 || ly >= config::worldHeight) {
+            return;
+        }
+        let v : Block = id;
+        this.setVoxLocal(slot, lx, ly, lz, v);
+    }
+
+    /**
+     * Raise the slot's highest-face Y watermark to include `y`.
+     * @param slot  the slot index
+     * @param y     the candidate Y
+     */
+    fn bumpFY(slot : i32, y : i32) : void {
+        if (y > this.maxFY[slot]) {
+            this.maxFY[slot] = y;
+        }
+    }
+}

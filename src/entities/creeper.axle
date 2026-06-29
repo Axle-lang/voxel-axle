@@ -27,6 +27,7 @@ class Creeper extends Mob {
      * @param world   the chunk manager the creeper moves through
      * @param player  the player to home in on
      * @param sfx     the audio manager for the charge / blast sounds
+     * @param sim     the block-update sim woken around the blast crater
      */
     fn step(world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
         if (this.hurtTimer > 0) {
@@ -94,6 +95,7 @@ class Creeper extends Mob {
      * crater of broken blocks, then mark the creeper for removal.
      * @param world   the chunk manager whose blocks are cratered
      * @param player  the player to damage by the blast
+     * @param sim     the block-update sim woken (fluid / falling) around each broken cell
      */
     fn explode(world : ChunkManager, player : Player, sim : BlockSim) : void {
         let dx : f64 = player.pos.x - this.pos.x;

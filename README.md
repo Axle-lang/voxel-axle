@@ -111,8 +111,11 @@ sit next to the produced binary (in `target/`).
 The code is built as a small object hierarchy on top of a data-oriented
 chunk world. Living things share one physics implementation through
 inheritance; the world, renderer and HUD are plain engine modules. Hot
-geometry is bundled in value `struct`s (`Vec3`, `FrameBuf`, `RasterVert`)
-instead of long argument lists.
+geometry and call-sites are bundled in value `struct`s (`Vec3`, `FrameBuf`,
+`RasterVert`, `RasterTri`, `MipAtlas`, `Rgb`, `Band`) instead of long argument
+lists. The two largest classes delegate to focused leaf mini-managers —
+`ChunkManager` keeps its raw storage in a `VoxStore` and carves trees through the
+leaf `treegen`; the `Renderer` runs its soft-glow pass through a `Bloom` module.
 
 ```
                  ┌────────────┐
@@ -152,8 +155,13 @@ src/
     blocks.axle          block table: id → tile / colour / predicates,
                          blockBoxHeight category helpers
     biome.axle  biomes/  climate → biome; one module per biome + a registry
-    manager.axle         ChunkManager: streamed voxel chunks, meshing, the
-                         block + sky LIGHT engine (own thread), break/place
+    voxstore.axle        VoxStore (leaf): the padded voxel field + face-Y
+                         watermark + the shared voxIdx layout
+    treegen.axle         tree / mushroom stamper (leaf): carves canopies into
+                         a VoxStore — no dependency back on ChunkManager
+    manager.axle         ChunkManager: streamed voxel chunks (over a VoxStore),
+                         meshing, the block + sky LIGHT engine (own thread),
+                         break/place
     blocksim.axle        block updates: falling sand/gravel, water flow
   entities/
     entity.axle          Entity base: gravity, voxel AABB collision, damage
@@ -168,9 +176,13 @@ src/
   gfx/
     color.axle  font.axle   colour math + bitmap text
     raster.axle          triangle rasteriser + z-buffer (textured + flat),
-                         mip-chain + anisotropic sampling
+                         mip-chain + anisotropic sampling; the RasterTri /
+                         MipAtlas / Rgb / Band geometry structs
+    bloom.axle           Bloom (leaf): bright-extract → blur → composite glow,
+                         owns its half-res buffers + worker jobs
     render.axle          project + cull + shade world; lighting, soft shadows,
-                         god-rays, bloom, sky; mobs; selection box (threaded)
+                         god-rays, sky; mobs; selection box (threaded); runs
+                         bloom through the Bloom module
     health·hotbar·hud·menu   heart row, inventory bar, HUD, pause menu
 ```
 
