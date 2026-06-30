@@ -1,0 +1,99 @@
+// lightstore — the per-voxel LIGHT data of the chunk ring, split out of
+// ChunkManager.
+//
+// A LEAF mini-manager (imports only `sdl_platform` + `config`) holding the
+// per-voxel byte light volumes — block light, sky light, soft sun visibility,
+// hemispherical sky access and the one-bounce coloured tint — all indexed by the
+// shared `VoxStore.voxIdx` layout, plus the block-light flood stacks, the sky-AO
+// hemisphere ray table and the per-slot light/sky-AO dirty + sweep cursors.
+//
+// `ChunkManager` composes one (`this.lights`) and runs the light engine over it.
+// This mirrors how the manager already composes a `VoxStore` (`this.store`):
+// the background light thread reaches both through the same manager reference,
+// so there is no new sharing — the data simply has a focused home.
+
+use sdl_platform::{allocBytes, setF64};
+use crate::config;
+
+/** An integer voxel coordinate — one entry of the block-light flood (add) stack. */
+struct IVec3 {
+    x : i32,
+    y : i32,
+    z : i32,
+}
+
+/** One entry of the block-light removal stack: a voxel + its old light level. */
+struct LightRemoval {
+    x : i32,
+    y : i32,
+    z : i32,
+    lvl : i32,
+}
+
+class LightStore {
+    light : i64,     // per-voxel block light 0..15 (byte array, voxIdx layout)
+    skylight : i64,  // per-voxel sky light 0..15 (open-to-sky exposure)
+    sunlit : i64,    // per-voxel SOFT sun visibility 0..255: 255 = full sun,
+                     // 0 = full cast shadow, between = penumbra. Swept by the
+                     // shadow refresh as the sun moves.
+    skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (ambient
+                     // occlusion / GI): fraction of upper-hemisphere rays that
+                     // escape to the sky. Static — baked once per chunk.
+    bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
+    bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
+    bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
+    hemiX : i64,     // M precomputed upper-hemisphere ray directions (sky-AO)
+    hemiY : i64,
+    hemiZ : i64,
+    sunCursor : i32,    // round-robin slot index for the throttled shadow refresh
+    skyAOcursor : i32,  // round-robin slot index for the throttled sky-AO bake
+    skyAOdirty : i32[], // per-slot "sky-access needs (re)baking" flag
+    ldirty : i32[],     // per-slot "light changed → re-mesh" flag
+    lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
+    lqn : i32,           // its depth
+    rq : LightRemoval[], // block-light removal stack — voxel + its old level
+    rqn : i32,           // its depth
+
+    /**
+     * Allocate the per-voxel light volumes (block / sky / sun / sky-access /
+     * bounce), the flood stacks, the per-slot dirty flags and the precomputed
+     * sky-AO hemisphere ray table.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        let hSide : i32 = config::chunkSize + 2;
+        let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64);
+        this.light = allocBytes(vol);
+        this.skylight = allocBytes(vol);
+        this.sunlit = allocBytes(vol);
+        this.skyaccess = allocBytes(vol);
+        this.bnR = allocBytes(vol);
+        this.bnG = allocBytes(vol);
+        this.bnB = allocBytes(vol);
+        this.sunCursor = 0;
+        this.skyAOcursor = 0;
+        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
+        // for the sky-access bake.
+        let m : i32 = config::skyAOSamples;
+        this.hemiX = allocBytes((m as i64) * 8);
+        this.hemiY = allocBytes((m as i64) * 8);
+        this.hemiZ = allocBytes((m as i64) * 8);
+        let hi : i32 = 0;
+        while (hi < m) {
+            let yy : f64 = ((hi as f64) + 0.5) / (m as f64);   // 0..1 toward up
+            let rr : f64 = Math::sqrt(1.0 - yy * yy);
+            let th : f64 = (hi as f64) * 2.399963;             // golden angle
+            setF64(this.hemiX, hi, rr * Math::cos(th));
+            setF64(this.hemiY, hi, yy);
+            setF64(this.hemiZ, hi, rr * Math::sin(th));
+            hi = hi + 1;
+        }
+        this.skyAOdirty = malloc<i32>(slots);
+        this.ldirty = malloc<i32>(slots);
+        let lcap : i32 = config::lightQueueCap;
+        this.lq = malloc<IVec3>(lcap);
+        this.lqn = 0;
+        this.rq = malloc<LightRemoval>(lcap);
+        this.rqn = 0;
+    }
+}

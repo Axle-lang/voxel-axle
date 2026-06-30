@@ -21,6 +21,7 @@ use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI,
 use crate::world::biomes::registry::{biomeAt, Biomes};
 use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isPartialShape, hasCollisionBox, isLeaves};
 use crate::world::voxstore::VoxStore;
+use crate::world::lightstore::{ LightStore, IVec3, LightRemoval };
 use crate::world::treegen::{ stampTree };
 use crate::config;
 use crate::config::{ Block };
@@ -40,8 +41,6 @@ class ChunkManager {
     ty : i32[],      // torch world y
     tz : i32[],      // torch world z
     tcount : i32[],  // torch count per slot
-    light : i64,     // per-voxel block light 0..15 (byte array, voxIdx layout)
-    skylight : i64,  // per-voxel sky light 0..15 (open-to-sky exposure)
     flight : i64,    // per-face SMOOTH light: 4 bytes/face, one per corner, each
                      // packing (sky << 4) | block — averaged over the air cells
                      // touching that corner (Minecraft-style smooth lighting)
@@ -51,39 +50,13 @@ class ChunkManager {
     lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz).
                      // MUST mirror Renderer.fillTable so baked corner k aligns
                      // with the renderer's corner k.
-    sunlit : i64,    // per-voxel SOFT sun visibility 0..255: 255 = full sun,
-                     // 0 = full cast shadow, between = penumbra. Refreshed by
-                     // casting a small fan of rays over the sun's disc
-                     // (stepSunShadows → sunRaySoft); read at render to soften
-                     // shadowed sky-lit faces. Sweeps as the sun moves.
-    sunCursor : i32, // round-robin slot index for the throttled shadow refresh
     curDayTime : f64,       // latest time-of-day, published by the main loop each
                             // frame for the background light thread to read
     lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
-    skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (ambient
-                     // occlusion / one-bounce-free GI): fraction of upper-
-                     // hemisphere rays that escape to the sky. Static (doesn't
-                     // move with the sun) — baked once per chunk on load/edit.
-                     // Read at render to darken ambient in valleys / under canopy.
-    skyAOdirty : i32[], // per-slot "sky-access needs (re)baking" flag
-    skyAOcursor : i32,  // round-robin slot index for the throttled sky-AO bake
-    hemiX : i64,     // M precomputed upper-hemisphere ray directions (sky-AO)
-    hemiY : i64,
-    hemiZ : i64,
-    bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
-    bnG : i64,       // 128 = neutral 1.0): the sky-AO rays that hit a surface
-    bnB : i64,       // sample its albedo, so ambient bleeds the nearby colour
-                     // (green under canopy, warm by sand). Baked with sky-AO.
-    ldirty : i32[],  // per-slot "light changed → re-mesh" flag
-    lqx : i32[],     // block-light flood stack (add)
-    lqy : i32[],
-    lqz : i32[],
-    lqn : i32,
-    rqx : i32[],     // block-light removal stack
-    rqy : i32[],
-    rqz : i32[],
-    rql : i32[],     // removed cell's old level
-    rqn : i32,
+    lights : LightStore, // per-voxel light volumes + flood stacks + sky-AO table
+                         // (block / sky / sun / sky-access / bounce). The light
+                         // engine below reads and writes it, just as `store`
+                         // holds the voxels — both reached by the light thread.
     hmap : i32[],
     ctop : i32[],
     store : VoxStore,   // raw voxel storage (block field + face-Y watermark + voxIdx)
@@ -111,50 +84,15 @@ class ChunkManager {
         this.ty = malloc<i32>(slots * config::maxTorchesPerChunk);
         this.tz = malloc<i32>(slots * config::maxTorchesPerChunk);
         this.tcount = malloc<i32>(slots);
-        this.light = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
-        this.skylight = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
-        this.sunlit = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
-        this.sunCursor = 0;
         this.curDayTime = config::dayStart;
         this.lightRunning = new AtomicBoolean(true);
-        this.skyaccess = allocBytes((slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64));
-        this.skyAOdirty = malloc<i32>(slots);
-        this.skyAOcursor = 0;
-        let volB : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64);
-        this.bnR = allocBytes(volB);
-        this.bnG = allocBytes(volB);
-        this.bnB = allocBytes(volB);
-        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
-        // for the sky-access bake.
-        let m : i32 = config::skyAOSamples;
-        this.hemiX = allocBytes((m as i64) * 8);
-        this.hemiY = allocBytes((m as i64) * 8);
-        this.hemiZ = allocBytes((m as i64) * 8);
-        let hi : i32 = 0;
-        while (hi < m) {
-            let yy : f64 = ((hi as f64) + 0.5) / (m as f64);   // 0..1 toward up
-            let rr : f64 = Math::sqrt(1.0 - yy * yy);
-            let th : f64 = (hi as f64) * 2.399963;             // golden angle
-            setF64(this.hemiX, hi, rr * Math::cos(th));
-            setF64(this.hemiY, hi, yy);
-            setF64(this.hemiZ, hi, rr * Math::sin(th));
-            hi = hi + 1;
-        }
+        // The per-voxel light volumes + flood stacks + sky-AO hemisphere table
+        // now live together in their own leaf.
+        this.lights = new LightStore(slots);
         this.flight = allocBytes((faceCap as i64) * 4);
         this.fao = allocBytes((faceCap as i64) * 4);
         this.lcoff = malloc<i32>(72);
         this.fillLightTable();
-        this.ldirty = malloc<i32>(slots);
-        let lcap : i32 = config::lightQueueCap;
-        this.lqx = malloc<i32>(lcap);
-        this.lqy = malloc<i32>(lcap);
-        this.lqz = malloc<i32>(lcap);
-        this.lqn = 0;
-        this.rqx = malloc<i32>(lcap);
-        this.rqy = malloc<i32>(lcap);
-        this.rqz = malloc<i32>(lcap);
-        this.rql = malloc<i32>(lcap);
-        this.rqn = 0;
         this.hmap = malloc<i32>(slots * hSide * hSide);
         this.ctop = malloc<i32>(slots * s * s);
         this.store = new VoxStore(slots);
@@ -490,7 +428,7 @@ class ChunkManager {
     fn markDirtyAt(cx : i32, cz : i32) : void {
         let slot : i32 = this.slotFor(cx, cz);
         if (this.loaded[slot] == 1 && this.cxs[slot] == cx && this.czs[slot] == cz) {
-            this.ldirty[slot] = 1;
+            this.lights.ldirty[slot] = 1;
         }
     }
 
@@ -512,7 +450,7 @@ class ChunkManager {
         // neighbour is generated, so border faces bake real neighbour light
         // instead of 0 (black seams). Flag this chunk and its 4 horizontal
         // neighbours so their shared faces re-bake against the new chunk.
-        this.ldirty[slot] = 1;
+        this.lights.ldirty[slot] = 1;
         this.markDirtyAt(cx + 1, cz);
         this.markDirtyAt(cx - 1, cz);
         this.markDirtyAt(cx, cz + 1);
@@ -782,39 +720,59 @@ class ChunkManager {
                 let lx : i32 = olx + dx;
                 let lz : i32 = olz + dz;
                 if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
-                    let y : i32 = topSearch;
-                    let done : bool = false;
-                    while (y > baseY && !done) {
-                        if (isLeaves(this.getVox(slot, lx, y, lz))) {
-                            if (y + 1 < config::worldHeight && this.getVox(slot, lx, y + 1, lz) == Block::Air) {
-                                let wx : i32 = cx0 + lx;
-                                let wz : i32 = cz0 + lz;
-                                // Only cap columns whose own ground biome is cold,
-                                // so the canopy snow matches the ground snow (no
-                                // snow on a tree overhanging warm, bare ground).
-                                let ch : i32 = this.colHeightWorld(wx, wz);
-                                let cb : BiomeId = biomeAt(temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), ch);
-                                if (this.coldBiome(cb)) {
-                                    let frac : f64 = snowDepth(wx as f64, wz as f64);
-                                    if (frac > 0.0) {
-                                        let sb : Block = Block::SnowLayer;
-                                        if (frac >= 0.95) {
-                                            sb = Block::Snow;
-                                        }
-                                        this.setVoxLocal(slot, lx, y + 1, lz, sb);
-                                        this.bumpFY(slot, y + 1);
-                                    }
-                                }
-                            }
-                            done = true;
-                        }
-                        y = y - 1;
-                    }
+                    this.snowCapColumn(slot, lx, lz, baseY, topSearch, cx0, cz0);
                 }
                 dx = dx + 1;
             }
             dz = dz + 1;
         }
+    }
+
+    /**
+     * Dust one column of the tree footprint: find its topmost leaf and, if the
+     * cell above is open and the column's own ground biome is cold, drop a single
+     * snow block there. Guard-returns keep it flat (one block per column → a light
+     * dusting that follows the canopy, not a slab).
+     * @param slot       the slot index
+     * @param lx         local x of the column
+     * @param lz         local z of the column
+     * @param baseY      the trunk base Y (search floor)
+     * @param topSearch  the top of the leaf search (clamped to the world top)
+     * @param cx0        the chunk's world-x origin (cx * chunkSize)
+     * @param cz0        the chunk's world-z origin (cz * chunkSize)
+     */
+    fn snowCapColumn(slot : i32, lx : i32, lz : i32, baseY : i32, topSearch : i32, cx0 : i32, cz0 : i32) : void {
+        // Walk down to the topmost leaf of this column.
+        let y : i32 = topSearch;
+        while (y > baseY && !isLeaves(this.getVox(slot, lx, y, lz))) {
+            y = y - 1;
+        }
+        if (y <= baseY) {
+            return;   // no leaf in this column
+        }
+        // The leaf needs open air directly above to hold the snow.
+        if (y + 1 >= config::worldHeight || this.getVox(slot, lx, y + 1, lz) != Block::Air) {
+            return;
+        }
+        // Only cap columns whose own ground biome is cold, so the canopy snow
+        // matches the ground snow (no snow on a tree over warm, bare ground).
+        let wx : i32 = cx0 + lx;
+        let wz : i32 = cz0 + lz;
+        let ch : i32 = this.colHeightWorld(wx, wz);
+        let cb : BiomeId = biomeAt(temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), ch);
+        if (!this.coldBiome(cb)) {
+            return;
+        }
+        let frac : f64 = snowDepth(wx as f64, wz as f64);
+        if (frac <= 0.0) {
+            return;
+        }
+        let sb : Block = Block::SnowLayer;
+        if (frac >= 0.95) {
+            sb = Block::Snow;
+        }
+        this.setVoxLocal(slot, lx, y + 1, lz, sb);
+        this.bumpFY(slot, y + 1);
     }
 
     // ── Meshing ─────────────────────────────────────────────────
@@ -904,22 +862,17 @@ class ChunkManager {
      * @param di  the face direction (0..5)
      */
     fn bakeFaceCorners(i : i32, wx : i32, wy : i32, wz : i32, di : i32) : void {
-        // Normal offset to the air cell this face looks into.
+        // Normal offset to the air cell this face looks into (di = dir 0..5).
         let nox : i32 = 0;
         let noy : i32 = 0;
         let noz : i32 = 0;
-        if (di == 0) {
-            nox = 1;
-        } else if (di == 1) {
-            nox = 0 - 1;
-        } else if (di == 2) {
-            noy = 1;
-        } else if (di == 3) {
-            noy = 0 - 1;
-        } else if (di == 4) {
-            noz = 1;
-        } else {
-            noz = 0 - 1;
+        match di {
+            0 => { nox = 1; }
+            1 => { nox = 0 - 1; }
+            2 => { noy = 1; }
+            3 => { noy = 0 - 1; }
+            4 => { noz = 1; }
+            _ => { noz = 0 - 1; }
         }
         let nbx : i32 = wx + nox;
         let nby : i32 = wy + noy;
@@ -940,15 +893,19 @@ class ChunkManager {
             let t2x : i32 = 0;
             let t2y : i32 = 0;
             let t2z : i32 = 0;
-            if (naxis == 0) {
-                t1y = sy;
-                t2z = sz;
-            } else if (naxis == 1) {
-                t1x = sx;
-                t2z = sz;
-            } else {
-                t1x = sx;
-                t2y = sy;
+            match naxis {
+                0 => {
+                    t1y = sy;
+                    t2z = sz;
+                }
+                1 => {
+                    t1x = sx;
+                    t2z = sz;
+                }
+                _ => {
+                    t1x = sx;
+                    t2y = sy;
+                }
             }
             // The 4 cells meeting at this corner, all in the nb layer.
             let c1x : i32 = nbx + t1x;
@@ -1054,86 +1011,10 @@ class ChunkManager {
                 let ly : i32 = 0;
                 while (ly <= top) {
                     let id : Block = this.getVox(slot, lx, ly, lz);
-                    if (id != air) {
-                        if (id == Block::Torch) {
-                            // Torches emit no cube faces; a thin post is drawn
-                            // separately (renderTorches). Just record the spot.
-                            this.addTorch(slot, wx, ly, wz);
-                        } else if (isWater(id)) {
-                            // Water: top surface, plus side walls only where it
-                            // borders air (shores, dug pits) — so a body of
-                            // water looks contained and you see its surface and
-                            // edges. Water against water/solid emits nothing.
-                            if (this.getVox(slot, lx, ly + 1, lz) == air) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
-                            }
-                            if (this.getVox(slot, lx + 1, ly, lz) == air) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
-                            }
-                            if (this.getVox(slot, lx - 1, ly, lz) == air) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
-                            }
-                            if (this.getVox(slot, lx, ly, lz + 1) == air) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
-                            }
-                            if (this.getVox(slot, lx, ly, lz - 1) == air) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
-                            }
-                        } else if (isPartialShape(id)) {
-                            // A partial, floor-resting block (thin snow today, slabs
-                            // later) at its real height. Emit the top, and a side
-                            // wall toward a neighbour that is air OR a LOWER partial
-                            // block (so the exposed step between two heights is
-                            // filled — no see-through to the ground). Equal/higher
-                            // partials and full blocks cull, so a flat field has no
-                            // internal z-fighting grid.
-                            this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
-                            let myH : f64 = this.blockBoxHeight(wx, ly, wz);
-                            if (this.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
-                            }
-                            if (this.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
-                            }
-                            if (this.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
-                            }
-                            if (this.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
-                            }
-                        } else {
-                            // A solid block shows a face wherever its neighbour
-                            // is TRANSPARENT — air or water — so submerged
-                            // terrain (lakebed, walls) is visible through the
-                            // water instead of vanishing.
-                            if (isCollidable(id)) {
-                                coll = ly + 1;
-                            }
-                            if (isTransparent(this.getVox(slot, lx + 1, ly, lz))) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
-                            }
-                            if (isTransparent(this.getVox(slot, lx - 1, ly, lz))) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
-                            }
-                            // A partial block above (snow, a slab) is transparent
-                            // but COVERS this top from view, so skip it — otherwise
-                            // the ground peeks through under the partial block's
-                            // floating top sheet when seen edge-on, and that block
-                            // seems to lose height.
-                            let above : Block = this.getVox(slot, lx, ly + 1, lz);
-                            if (isTransparent(above) && !isPartialShape(above)) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
-                            }
-                            if (isTransparent(this.getVox(slot, lx, ly - 1, lz))) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::Bottom, tileFor(id, FaceDir::Bottom));
-                            }
-                            if (isTransparent(this.getVox(slot, lx, ly, lz + 1))) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
-                            }
-                            if (isTransparent(this.getVox(slot, lx, ly, lz - 1))) {
-                                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
-                            }
-                        }
+                    // Non-air voxel: emit its faces; a collidable solid raises the
+                    // column's collision top. The per-category work is in meshVoxel.
+                    if (id != air && this.meshVoxel(slot, lx, ly, lz, wx, wz, id)) {
+                        coll = ly + 1;
                     }
                     ly = ly + 1;
                 }
@@ -1142,6 +1023,100 @@ class ChunkManager {
             }
             lz = lz + 1;
         }
+    }
+
+    /**
+     * Emit the mesh faces for one non-air voxel: a torch records a post (no cube
+     * faces), water shows its surface + the side walls bordering air, a partial
+     * block its raised top + the step walls toward lower neighbours, and a solid
+     * block a face wherever its neighbour is transparent. Split out of buildMesh
+     * to keep that triple loop shallow.
+     * @param slot  the slot index
+     * @param lx    local x
+     * @param ly    local y
+     * @param lz    local z
+     * @param wx    world x
+     * @param wz    world z
+     * @param id    the voxel's block id (already known to be non-air)
+     * @return true if the voxel is collidable (so the caller raises the column top)
+     */
+    fn meshVoxel(slot : i32, lx : i32, ly : i32, lz : i32, wx : i32, wz : i32, id : Block) : bool {
+        let air : Block = Block::Air;
+        if (id == Block::Torch) {
+            // Torches emit no cube faces; a thin post is drawn separately
+            // (renderTorches). Just record the spot.
+            this.addTorch(slot, wx, ly, wz);
+            return false;
+        }
+        if (isWater(id)) {
+            // Water: top surface, plus side walls only where it borders air
+            // (shores, dug pits) — so a body of water looks contained and you see
+            // its surface and edges. Water against water/solid emits nothing.
+            if (this.getVox(slot, lx, ly + 1, lz) == air) {
+                this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
+            }
+            if (this.getVox(slot, lx + 1, ly, lz) == air) {
+                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            }
+            if (this.getVox(slot, lx - 1, ly, lz) == air) {
+                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            }
+            if (this.getVox(slot, lx, ly, lz + 1) == air) {
+                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            }
+            if (this.getVox(slot, lx, ly, lz - 1) == air) {
+                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            }
+            return false;
+        }
+        if (isPartialShape(id)) {
+            // A partial, floor-resting block (thin snow today, slabs later) at its
+            // real height. Emit the top, and a side wall toward a neighbour that
+            // is air OR a LOWER partial block (so the exposed step between two
+            // heights is filled — no see-through to the ground). Equal/higher
+            // partials and full blocks cull, so a flat field has no z-fighting grid.
+            this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
+            let myH : f64 = this.blockBoxHeight(wx, ly, wz);
+            if (this.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
+                this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            }
+            if (this.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
+                this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            }
+            if (this.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
+                this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            }
+            if (this.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
+                this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            }
+            return false;
+        }
+        // A solid block shows a face wherever its neighbour is TRANSPARENT — air
+        // or water — so submerged terrain (lakebed, walls) stays visible through
+        // the water instead of vanishing.
+        if (isTransparent(this.getVox(slot, lx + 1, ly, lz))) {
+            this.addFace(slot, wx, ly, wz, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+        }
+        if (isTransparent(this.getVox(slot, lx - 1, ly, lz))) {
+            this.addFace(slot, wx, ly, wz, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+        }
+        // A partial block above (snow, a slab) is transparent but COVERS this top
+        // from view, so skip it — otherwise the ground peeks through under the
+        // partial block's floating top sheet when seen edge-on.
+        let above : Block = this.getVox(slot, lx, ly + 1, lz);
+        if (isTransparent(above) && !isPartialShape(above)) {
+            this.addFace(slot, wx, ly, wz, FaceDir::Top, tileFor(id, FaceDir::Top));
+        }
+        if (isTransparent(this.getVox(slot, lx, ly - 1, lz))) {
+            this.addFace(slot, wx, ly, wz, FaceDir::Bottom, tileFor(id, FaceDir::Bottom));
+        }
+        if (isTransparent(this.getVox(slot, lx, ly, lz + 1))) {
+            this.addFace(slot, wx, ly, wz, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+        }
+        if (isTransparent(this.getVox(slot, lx, ly, lz - 1))) {
+            this.addFace(slot, wx, ly, wz, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+        }
+        return isCollidable(id);
     }
 
     // ── Editing (dig / place) ───────────────────────────────────
@@ -1208,7 +1183,7 @@ class ChunkManager {
         if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
             return 0;
         }
-        return readU8(this.light, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return readU8(this.lights.light, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
     /**
@@ -1231,9 +1206,9 @@ class ChunkManager {
             return;
         }
         let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
-        if (readU8(this.light, off) != v) {
-            writeU8(this.light, off, v);
-            this.ldirty[slot] = 1;
+        if (readU8(this.lights.light, off) != v) {
+            writeU8(this.lights.light, off, v);
+            this.lights.ldirty[slot] = 1;
         }
     }
 
@@ -1255,7 +1230,7 @@ class ChunkManager {
         if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
             return 0;
         }
-        return readU8(this.skylight, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return readU8(this.lights.skylight, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
     /**
@@ -1278,9 +1253,9 @@ class ChunkManager {
             return;
         }
         let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
-        if (readU8(this.skylight, off) != v) {
-            writeU8(this.skylight, off, v);
-            this.ldirty[slot] = 1;
+        if (readU8(this.lights.skylight, off) != v) {
+            writeU8(this.lights.skylight, off, v);
+            this.lights.ldirty[slot] = 1;
         }
     }
 
@@ -1308,9 +1283,9 @@ class ChunkManager {
                 lit = 0;
             }
             let off : i64 = this.voxIdx(slot, lx, y, lz) as i64;
-            if (readU8(this.skylight, off) != lit) {
-                writeU8(this.skylight, off, lit);
-                this.ldirty[slot] = 1;
+            if (readU8(this.lights.skylight, off) != lit) {
+                writeU8(this.lights.skylight, off, lit);
+                this.lights.ldirty[slot] = 1;
             }
             y = y - 1;
         }
@@ -1338,7 +1313,7 @@ class ChunkManager {
         // Sideways gradient at generation: flood sky from the fully lit cells in
         // the active band, so roofed / overhung spots (under a canopy, a cliff,
         // a cave mouth) fade in like an edit would — no hard black patch.
-        this.lqn = 0;
+        this.lights.lqn = 0;
         let top : i32 = this.store.maxFY[slot] + 1;
         if (top > config::worldHeight - 1) {
             top = config::worldHeight - 1;
@@ -1349,7 +1324,7 @@ class ChunkManager {
             while (bx < s) {
                 let by : i32 = 0;
                 while (by <= top) {
-                    if (readU8(this.skylight, this.voxIdx(slot, bx, by, bz) as i64) == 15) {
+                    if (readU8(this.lights.skylight, this.voxIdx(slot, bx, by, bz) as i64) == 15) {
                         this.lpush(cx * s + bx, by, cz * s + bz);
                     }
                     by = by + 1;
@@ -1387,11 +1362,12 @@ class ChunkManager {
      * skyColumn; this fills the horizontal falloff.)
      */
     fn skFloodAdd() : void {
-        while (this.lqn > 0) {
-            this.lqn = this.lqn - 1;
-            let x : i32 = this.lqx[this.lqn];
-            let y : i32 = this.lqy[this.lqn];
-            let z : i32 = this.lqz[this.lqn];
+        while (this.lights.lqn > 0) {
+            this.lights.lqn = this.lights.lqn - 1;
+            let e : IVec3 = this.lights.lq[this.lights.lqn];
+            let x : i32 = e.x;
+            let y : i32 = e.y;
+            let z : i32 = e.z;
             let lv : i32 = this.skGetW(x, y, z);
             if (lv > 1) {
                 this.skTrySpread(x + 1, y, z, lv);
@@ -1427,12 +1403,13 @@ class ChunkManager {
 
     /** Flood the removal stack as SKY light, feeding the add-stack from sources. */
     fn skFloodRemove() : void {
-        while (this.rqn > 0) {
-            this.rqn = this.rqn - 1;
-            let x : i32 = this.rqx[this.rqn];
-            let y : i32 = this.rqy[this.rqn];
-            let z : i32 = this.rqz[this.rqn];
-            let lvl : i32 = this.rql[this.rqn];
+        while (this.lights.rqn > 0) {
+            this.lights.rqn = this.lights.rqn - 1;
+            let e : LightRemoval = this.lights.rq[this.lights.rqn];
+            let x : i32 = e.x;
+            let y : i32 = e.y;
+            let z : i32 = e.z;
+            let lvl : i32 = e.lvl;
             this.skTryRemove(x + 1, y, z, lvl);
             this.skTryRemove(x - 1, y, z, lvl);
             this.skTryRemove(x, y + 1, z, lvl);
@@ -1450,13 +1427,11 @@ class ChunkManager {
      * @param wz  world z
      */
     fn lpush(wx : i32, wy : i32, wz : i32) : void {
-        if (this.lqn >= config::lightQueueCap) {
+        if (this.lights.lqn >= config::lightQueueCap) {
             return;
         }
-        this.lqx[this.lqn] = wx;
-        this.lqy[this.lqn] = wy;
-        this.lqz[this.lqn] = wz;
-        this.lqn = this.lqn + 1;
+        this.lights.lq[this.lights.lqn] = IVec3 { x: wx, y: wy, z: wz };
+        this.lights.lqn = this.lights.lqn + 1;
     }
 
     /**
@@ -1468,14 +1443,11 @@ class ChunkManager {
      * @param lvl  the cell's old (pre-removal) light level
      */
     fn rpush(wx : i32, wy : i32, wz : i32, lvl : i32) : void {
-        if (this.rqn >= config::lightQueueCap) {
+        if (this.lights.rqn >= config::lightQueueCap) {
             return;
         }
-        this.rqx[this.rqn] = wx;
-        this.rqy[this.rqn] = wy;
-        this.rqz[this.rqn] = wz;
-        this.rql[this.rqn] = lvl;
-        this.rqn = this.rqn + 1;
+        this.lights.rq[this.lights.rqn] = LightRemoval { x: wx, y: wy, z: wz, lvl: lvl };
+        this.lights.rqn = this.lights.rqn + 1;
     }
 
     /**
@@ -1499,11 +1471,12 @@ class ChunkManager {
 
     /** Flood the light add-stack to completion (bounded by the stack cap). */
     fn floodAdd() : void {
-        while (this.lqn > 0) {
-            this.lqn = this.lqn - 1;
-            let x : i32 = this.lqx[this.lqn];
-            let y : i32 = this.lqy[this.lqn];
-            let z : i32 = this.lqz[this.lqn];
+        while (this.lights.lqn > 0) {
+            this.lights.lqn = this.lights.lqn - 1;
+            let e : IVec3 = this.lights.lq[this.lights.lqn];
+            let x : i32 = e.x;
+            let y : i32 = e.y;
+            let z : i32 = e.z;
             let lv : i32 = this.blGetW(x, y, z);
             if (lv > 1) {
                 this.tryAdd(x + 1, y, z, lv);
@@ -1540,12 +1513,13 @@ class ChunkManager {
 
     /** Flood the removal stack, feeding the add-stack from brighter neighbours. */
     fn floodRemove() : void {
-        while (this.rqn > 0) {
-            this.rqn = this.rqn - 1;
-            let x : i32 = this.rqx[this.rqn];
-            let y : i32 = this.rqy[this.rqn];
-            let z : i32 = this.rqz[this.rqn];
-            let lvl : i32 = this.rql[this.rqn];
+        while (this.lights.rqn > 0) {
+            this.lights.rqn = this.lights.rqn - 1;
+            let e : LightRemoval = this.lights.rq[this.lights.rqn];
+            let x : i32 = e.x;
+            let y : i32 = e.y;
+            let z : i32 = e.z;
+            let lvl : i32 = e.lvl;
             this.tryRemove(x + 1, y, z, lvl);
             this.tryRemove(x - 1, y, z, lvl);
             this.tryRemove(x, y + 1, z, lvl);
@@ -1560,11 +1534,11 @@ class ChunkManager {
         let slots : i32 = config::span * config::span;
         let i : i32 = 0;
         while (i < slots) {
-            if (this.ldirty[i] == 1) {
-                this.ldirty[i] = 0;
+            if (this.lights.ldirty[i] == 1) {
+                this.lights.ldirty[i] = 0;
                 if (this.loaded[i] == 1) {
                     this.buildMesh(i, this.cxs[i], this.czs[i]);
-                    this.skyAOdirty[i] = 1;   // geometry/light changed → re-bake sky access
+                    this.lights.skyAOdirty[i] = 1;   // geometry/light changed → re-bake sky access
                 }
             }
             i = i + 1;
@@ -1583,8 +1557,8 @@ class ChunkManager {
      * @param wz  world z
      */
     fn lightUpdate(wx : i32, wy : i32, wz : i32) : void {
-        this.lqn = 0;
-        this.rqn = 0;
+        this.lights.lqn = 0;
+        this.lights.rqn = 0;
         // 1. Remove the light currently at the cell and everything it fed.
         let cur : i32 = this.blGetW(wx, wy, wz);
         this.blSetW(wx, wy, wz, 0);
@@ -1608,8 +1582,8 @@ class ChunkManager {
         // REMOVAL where a cell darkened (a hole got sealed) and an ADD where it
         // brightened (a hole opened) — then flood both, so sky light recedes as
         // well as fills, and the sideways gradient updates either way.
-        this.lqn = 0;
-        this.rqn = 0;
+        this.lights.lqn = 0;
+        this.lights.rqn = 0;
         let scx : i32 = this.floorDiv(wx, config::chunkSize);
         let scz : i32 = this.floorDiv(wz, config::chunkSize);
         let sslot : i32 = this.slotFor(scx, scz);
@@ -1623,14 +1597,14 @@ class ChunkManager {
                     lit = 0;
                 }
                 let coff : i64 = this.voxIdx(sslot, slx, cy, slz) as i64;
-                let oldv : i32 = readU8(this.skylight, coff);
+                let oldv : i32 = readU8(this.lights.skylight, coff);
                 if (oldv > lit) {
-                    writeU8(this.skylight, coff, lit);
-                    this.ldirty[sslot] = 1;
+                    writeU8(this.lights.skylight, coff, lit);
+                    this.lights.ldirty[sslot] = 1;
                     this.rpush(wx, cy, wz, oldv);
                 } else if (lit > oldv) {
-                    writeU8(this.skylight, coff, lit);
-                    this.ldirty[sslot] = 1;
+                    writeU8(this.lights.skylight, coff, lit);
+                    this.lights.ldirty[sslot] = 1;
                     this.lpush(wx, cy, wz);
                 }
                 cy = cy - 1;
@@ -1681,16 +1655,16 @@ class ChunkManager {
         let base : i64 = (slot as i64) * (n as i64);
         let i : i32 = 0;
         while (i < n) {
-            writeU8(this.light, base + (i as i64), 0);
-            writeU8(this.skylight, base + (i as i64), 0);
-            writeU8(this.sunlit, base + (i as i64), 255);  // fully lit until the soft-shadow pass refines it (0..255)
-            writeU8(this.skyaccess, base + (i as i64), 255);  // full sky access until the AO bake refines it
-            writeU8(this.bnR, base + (i as i64), 128);  // neutral (1.0) bounce tint until baked
-            writeU8(this.bnG, base + (i as i64), 128);
-            writeU8(this.bnB, base + (i as i64), 128);
+            writeU8(this.lights.light, base + (i as i64), 0);
+            writeU8(this.lights.skylight, base + (i as i64), 0);
+            writeU8(this.lights.sunlit, base + (i as i64), 255);  // fully lit until the soft-shadow pass refines it (0..255)
+            writeU8(this.lights.skyaccess, base + (i as i64), 255);  // full sky access until the AO bake refines it
+            writeU8(this.lights.bnR, base + (i as i64), 128);  // neutral (1.0) bounce tint until baked
+            writeU8(this.lights.bnG, base + (i as i64), 128);
+            writeU8(this.lights.bnB, base + (i as i64), 128);
             i = i + 1;
         }
-        this.skyAOdirty[slot] = 1;  // a freshly (re)generated chunk needs a sky-AO bake
+        this.lights.skyAOdirty[slot] = 1;  // a freshly (re)generated chunk needs a sky-AO bake
     }
 
     // ── Directional sun shadows ─────────────────────────────────
@@ -1715,7 +1689,7 @@ class ChunkManager {
         if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
             return 255;
         }
-        return readU8(this.sunlit, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return readU8(this.lights.sunlit, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
     /**
@@ -1851,8 +1825,8 @@ class ChunkManager {
                 let y : i32 = 0;
                 while (y <= top) {
                     let off : i64 = this.voxIdx(slot, lx, y, lz) as i64;
-                    if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.skylight, off) > 0) {
-                        writeU8(this.sunlit, off, this.sunRaySoft(cx * s + lx, y, cz * s + lz, sx, sy, sz, ceil));
+                    if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.lights.skylight, off) > 0) {
+                        writeU8(this.lights.sunlit, off, this.sunRaySoft(cx * s + lx, y, cz * s + lz, sx, sy, sz, ceil));
                     }
                     y = y + 1;
                 }
@@ -1898,10 +1872,10 @@ class ChunkManager {
         let done : i32 = 0;
         let guard : i32 = 0;
         while (done < budget && guard < slots) {
-            let slot : i32 = this.sunCursor;
-            this.sunCursor = this.sunCursor + 1;
-            if (this.sunCursor >= slots) {
-                this.sunCursor = 0;
+            let slot : i32 = this.lights.sunCursor;
+            this.lights.sunCursor = this.lights.sunCursor + 1;
+            if (this.lights.sunCursor >= slots) {
+                this.lights.sunCursor = 0;
             }
             guard = guard + 1;
             if (this.loaded[slot] == 1) {
@@ -1933,7 +1907,7 @@ class ChunkManager {
         if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
             return 255;
         }
-        return readU8(this.skyaccess, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return readU8(this.lights.skyaccess, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
     }
 
     /**
@@ -2001,7 +1975,7 @@ class ChunkManager {
             return 0x808080;
         }
         let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
-        return (readU8(this.bnR, off) << 16) | (readU8(this.bnG, off) << 8) | readU8(this.bnB, off);
+        return (readU8(this.lights.bnR, off) << 16) | (readU8(this.lights.bnG, off) << 8) | readU8(this.lights.bnB, off);
     }
 
     /**
@@ -2065,7 +2039,7 @@ class ChunkManager {
                 let y : i32 = 0;
                 while (y <= top) {
                     let off : i64 = this.voxIdx(slot, lx, y, lz) as i64;
-                    if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.skylight, off) > 0) {
+                    if (this.getVox(slot, lx, y, lz) == Block::Air && readU8(this.lights.skylight, off) > 0) {
                         let wx : i32 = cx * s + lx;
                         let wz : i32 = cz * s + lz;
                         let esc : i32 = 0;
@@ -2075,7 +2049,7 @@ class ChunkManager {
                         let ab : i32 = 0;
                         let r : i32 = 0;
                         while (r < m) {
-                            let hit : i32 = this.skyHemiHit(wx, y, wz, getF64(this.hemiX, r), getF64(this.hemiY, r), getF64(this.hemiZ, r), ceil);
+                            let hit : i32 = this.skyHemiHit(wx, y, wz, getF64(this.lights.hemiX, r), getF64(this.lights.hemiY, r), getF64(this.lights.hemiZ, r), ceil);
                             if (hit < 0) {
                                 esc = esc + 1;
                             } else {
@@ -2086,7 +2060,7 @@ class ChunkManager {
                             }
                             r = r + 1;
                         }
-                        writeU8(this.skyaccess, off, (esc * 255) / m);
+                        writeU8(this.lights.skyaccess, off, (esc * 255) / m);
                         // One-bounce coloured tint: average hit albedo, normalised
                         // to luminance 1 (hue only — brightness is the sky-AO's
                         // job), blended toward neutral by how occluded the cell is.
@@ -2099,13 +2073,13 @@ class ChunkManager {
                                 lum = 1.0;
                             }
                             let occ : f64 = (hits as f64) / (m as f64) * config::bounceStrength;
-                            writeU8(this.bnR, off, this.bounceByte(avr / lum, occ));
-                            writeU8(this.bnG, off, this.bounceByte(avg / lum, occ));
-                            writeU8(this.bnB, off, this.bounceByte(avb / lum, occ));
+                            writeU8(this.lights.bnR, off, this.bounceByte(avr / lum, occ));
+                            writeU8(this.lights.bnG, off, this.bounceByte(avg / lum, occ));
+                            writeU8(this.lights.bnB, off, this.bounceByte(avb / lum, occ));
                         } else {
-                            writeU8(this.bnR, off, 128);
-                            writeU8(this.bnG, off, 128);
-                            writeU8(this.bnB, off, 128);
+                            writeU8(this.lights.bnR, off, 128);
+                            writeU8(this.lights.bnG, off, 128);
+                            writeU8(this.lights.bnB, off, 128);
                         }
                     }
                     y = y + 1;
@@ -2135,15 +2109,15 @@ class ChunkManager {
         let done : i32 = 0;
         let guard : i32 = 0;
         while (done < budget && guard < slots) {
-            let slot : i32 = this.skyAOcursor;
-            this.skyAOcursor = this.skyAOcursor + 1;
-            if (this.skyAOcursor >= slots) {
-                this.skyAOcursor = 0;
+            let slot : i32 = this.lights.skyAOcursor;
+            this.lights.skyAOcursor = this.lights.skyAOcursor + 1;
+            if (this.lights.skyAOcursor >= slots) {
+                this.lights.skyAOcursor = 0;
             }
             guard = guard + 1;
-            if (this.loaded[slot] == 1 && this.skyAOdirty[slot] == 1) {
+            if (this.loaded[slot] == 1 && this.lights.skyAOdirty[slot] == 1) {
                 this.computeChunkSkyAO(slot, this.cxs[slot], this.czs[slot], ceil);
-                this.skyAOdirty[slot] = 0;
+                this.lights.skyAOdirty[slot] = 0;
                 done = done + 1;
             }
         }
