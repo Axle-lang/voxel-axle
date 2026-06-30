@@ -43,21 +43,39 @@ sun glow with god-rays and a graded atmospheric sky.*
 
 ## Prerequisites
 
-You need two things: the **Axle compiler** (v0.2.11 or newer) and the
-**SDL2** library.
+You need three things: this repo **with its submodule**, the **Axle compiler**
+(v0.2.22 or newer) and the **SDL2** library.
 
-### 1. Install the Axle compiler (v0.2.11+)
+### 0. Clone the repo and its SDL2 platform submodule
 
-This project must be built with Axle **v0.2.11 or newer**. Check what you
+The SDL2 + libc platform layer (window, renderer, audio mixer, raw memory, file
+IO) lives in the **`vendor/sdl_platform` git submodule** — its `src/` compiles
+together with ours (`use sdl_platform::…`). It is **not** vendored in-tree, so a
+clone without the submodule leaves `vendor/sdl_platform` empty and the build
+fails immediately with unresolved `sdl_platform` imports.
+
+```bash
+# fresh clone — pull the submodule at the same time
+git clone --recurse-submodules <repo-url>
+
+# already cloned without it? initialise it after the fact
+git submodule update --init --recursive
+```
+
+Later, to pull upstream platform-layer changes: `git submodule update --remote`.
+
+### 1. Install the Axle compiler (v0.2.22+)
+
+This project must be built with Axle **v0.2.22 or newer**. Check what you
 have:
 
 ```bash
-axle --version      # must print 0.2.11 or higher
+axle --version      # must print 0.2.22 or higher
 ```
 
 If it's missing or older:
 
-- **Windows** — install the Windows x64 `.msi` from the `v0.2.11` (or
+- **Windows** — install the Windows x64 `.msi` from the `v0.2.22` (or
   newer) release; it installs `axle.exe` to `C:\Program Files (x86)\Axle\`
   and onto your `PATH`. Or build from source from the `axle` compiler repo:
   ```powershell
@@ -86,17 +104,19 @@ runtime.
   ```powershell
   vcpkg install sdl2:x64-windows
   ```
-  Then point `axle.toml`'s `[link] paths` at vcpkg's `lib` directory
-  (e.g. `C:/vcpkg/installed/x64-windows/lib`) and copy
-  `SDL2.dll` (from `C:/vcpkg/installed/x64-windows/bin`) into `target/`.
+  Then point `axle.toml`'s `[link] paths` at both vcpkg's **`lib`** (holds
+  `SDL2.lib`, linked against) and **`bin`** (holds `SDL2.dll`) directories —
+  e.g. `C:/vcpkg/installed/x64-windows/lib` and `…/bin`. Listing `bin` makes
+  `axle build` auto-copy `SDL2.dll` next to the binary in `target/` on every
+  build, so there is no manual DLL copy step.
 - **Linux** — `sudo apt install libsdl2-dev` (then set `[link] paths` to the
   system lib dir if needed).
 - **macOS** — `brew install sdl2`.
 
 ## Build & run
 
-From this directory, with `axle --version` reporting 0.2.11+ and SDL2
-installed:
+From this directory, with the `vendor/sdl_platform` submodule initialised,
+`axle --version` reporting 0.2.22+ and SDL2 installed:
 
 ```bash
 axle run            # compile + run
@@ -111,11 +131,28 @@ sit next to the produced binary (in `target/`).
 The code is built as a small object hierarchy on top of a data-oriented
 chunk world. Living things share one physics implementation through
 inheritance; the world, renderer and HUD are plain engine modules. Hot
-geometry and call-sites are bundled in value `struct`s (`Vec3`, `FrameBuf`,
-`RasterVert`, `RasterTri`, `MipAtlas`, `Rgb`, `Band`) instead of long argument
-lists. The two largest classes delegate to focused leaf mini-managers —
-`ChunkManager` keeps its raw storage in a `VoxStore` and carves trees through the
-leaf `treegen`; the `Renderer` runs its soft-glow pass through a `Bloom` module.
+geometry and call-sites are bundled in value `struct`s — `Vec3`, `FrameBuf`,
+`RasterVert`, `RasterTri`, `MipAtlas`, `Rgb`, `Band`, the sky's `DayState` /
+`Disc` / `SunScreen`, the mob pass's `MobScene` / `Material` / `BoxPlacement`,
+and the light flood's `IVec3` / `LightRemoval` — instead of long scalar argument
+lists.
+
+The two largest classes are kept thin by delegating to focused **leaf
+mini-managers**. A leaf depends only *downward* (on `config`, or another leaf)
+and never back on its owner, so there is never an import cycle; mutation flows
+because Axle arrays / handles are references:
+
+- `ChunkManager` keeps its raw blocks in a `VoxStore`, its whole per-voxel
+  **light field** — block / sky / sun / sky-access / colour-bounce volumes plus
+  the flood stacks and the sky-AO ray table — in a `LightStore`, and carves
+  trees through the free-function leaf `treegen`. The background light thread
+  reaches both `store` and `lights` through the manager, so the storage simply
+  has a focused home.
+- the `Renderer` draws the day/night **sky** through `sky` (a value `DayState`
+  is passed by value into the threaded gradient job — never a shared object),
+  the **mob** box-models through a `MobView`, the **selection** outline through a
+  `Selection`, and its soft-glow pass through a `Bloom`. Each owns its own
+  scratch buffers, so the core renderer no longer carries them.
 
 ```
                  ┌────────────┐
@@ -132,6 +169,27 @@ leaf `treegen`; the `Renderer` runs its soft-glow pass through a `Bloom` module.
    └──────────┘                    └─────────┘
 ```
 
+The two big classes are thin shells that **compose** leaf mini-managers — each
+leaf owns its own storage / scratch and depends only *downward* (`config` or
+another leaf), never back on its owner, so there is no import cycle:
+
+```
+   ChunkManager  (world, streamed chunks)        Renderer  (gfx, software raster)
+     ├─ VoxStore     raw padded voxel field        ├─ sky         day/night + atmospheric sky
+     ├─ LightStore   light volumes (block/sky/      │              (DayState passed BY VALUE into
+     │               sun/access/bounce) + flood     │               the threaded gradient job)
+     │               stacks + sky-AO ray table      ├─ MobView     mob box-models + own projection
+     ├─ treegen      tree / mushroom stamping       │              scratch (torches reuse drawQuad)
+     │               (free fns over a VoxStore)     ├─ Selection   targeted-block wireframe
+     └─ light engine on its OWN THREAD,             └─ Bloom       soft-glow post-pass + half-res
+        reading store + lights through the mgr                     buffers + worker jobs
+```
+
+Every voxel / world coordinate is a value vector, not loose scalars: **`IVec3`**
+for integer cells (`worldGet`, `getVox`, the light & physics accessors, the
+flood / ray casters, `setVoxel` / `breakAt` / `placeAt`) and **`Vec3`** for
+float positions and directions — both defined once in `vec3.axle`.
+
 ### Source layout
 
 Modules are grouped into folders by role. Within the package, a `use`
@@ -139,6 +197,9 @@ that crosses folders is written from the source root with a `crate::`
 prefix (like Rust); same-folder siblings can be imported by bare name.
 
 ```
+vendor/sdl_platform/     the SDL2 + libc platform layer — a git SUBMODULE whose
+                         src/ compiles with ours (window, renderer, audio mixer,
+                         raw memory, file IO, atlas load); `use sdl_platform::…`
 src/
   main.axle              thin entry: window + buffers + worker threads, then
                          the input → simulate → render loop (paced by the clock)
@@ -146,9 +207,8 @@ src/
   configs/               screen, render, atlas, light, time, water, noise,
                          world, biomes, blocks, trees, physics, mobs, gameplay,
                          health, hud, audio, face — change the feel here
-  input.axle  mathx.axle  vec3.axle   keyboard axes, math helpers, Vec3 struct
+  input.axle  mathx.axle  vec3.axle   keyboard axes, math helpers, Vec3 / IVec3
   clock.axle             FrameClock: holds the loop to config::tickHz
-  platform/ (mem · sdl · file)   libc/framebuffer helpers, SDL2 FFI, atlas load
   world/
     noise.axle           value noise + fbm; continentalness / erosion /
                          peaks-valleys terrain, climate, snow depth
@@ -157,11 +217,14 @@ src/
     biome.axle  biomes/  climate → biome; one module per biome + a registry
     voxstore.axle        VoxStore (leaf): the padded voxel field + face-Y
                          watermark + the shared voxIdx layout
+    lightstore.axle      LightStore (leaf): the per-voxel light volumes (block /
+                         sky / sun / sky-access / bounce) + flood stacks (IVec3 /
+                         LightRemoval entries) + the sky-AO hemisphere ray table
     treegen.axle         tree / mushroom stamper (leaf): carves canopies into
                          a VoxStore — no dependency back on ChunkManager
     manager.axle         ChunkManager: streamed voxel chunks (over a VoxStore),
-                         meshing, the block + sky LIGHT engine (own thread),
-                         break/place
+                         meshing, the block + sky LIGHT engine (own thread, over
+                         a LightStore), break/place
     blocksim.axle        block updates: falling sand/gravel, water flow
   entities/
     entity.axle          Entity base: gravity, voxel AABB collision, damage
@@ -180,9 +243,18 @@ src/
                          MipAtlas / Rgb / Band geometry structs
     bloom.axle           Bloom (leaf): bright-extract → blur → composite glow,
                          owns its half-res buffers + worker jobs
-    render.axle          project + cull + shade world; lighting, soft shadows,
-                         god-rays, sky; mobs; selection box (threaded); runs
-                         bloom through the Bloom module
+    sky.axle             day/night cycle + atmospheric sky (leaf): computes the
+                         DayState, paints the sky gradient + sun halo + sun/moon
+                         discs; DayState crosses the threaded gradient job BY VALUE
+    mobview.axle         MobView (leaf): the mob box-model renderer — oriented
+                         boxes, per-face project / cull / raster, per-mob light;
+                         owns its projection scratch (torches reuse its drawQuad)
+    selection.axle       Selection (leaf): the soft, depth-tested targeted-block
+                         wireframe; owns its 8-corner projection scratch
+    render.axle          the core world pass: project + near-clip + shade every
+                         visible face into a triangle queue, rasterised in
+                         parallel column bands; god-rays + underwater post; then
+                         delegates sky / mobs / selection / bloom to their leaves
     health·hotbar·hud·menu   heart row, inventory bar, HUD, pause menu
 ```
 
@@ -280,7 +352,7 @@ flat-colour mobs. Re-run `python bake_mobs.py` after editing the entity PNGs.
 - **New biome**: a module under `world/biomes/` + an entry in the registry,
   with its climate band, surface/filler and tree density.
 - **New animal**: a new `Entity` subclass (copy an existing one), a spawn
-  case in `mobs`, and a draw case in `render`.
+  case in `mobs`, and a `draw*` case in `gfx/mobview`.
 - **Editing the world** (dig / place): `ChunkManager.breakAt` / `placeAt`
   rewrite the chunk's voxel field (and neighbour skirts) and re-`buildMesh`
   the affected slots; the look-ray `Picker` (`game/ray.axle`) picks the
@@ -297,6 +369,6 @@ flat-colour mobs. Re-run `python bake_mobs.py` after editing the entity PNGs.
 - The loop runs a **fixed timestep** (`config::tickHz`, default 60): the
   simulation advances by real elapsed time (catching up after a slow frame),
   so movement/jump speed is independent of the frame rate, and the frame
-  clock (`platform::clock`) caps the CPU instead of relying on v-sync.
+  clock (`clock.axle`) caps the CPU instead of relying on v-sync.
 - `axle.toml`'s lib path is machine-specific; DLL + `atlas.raw` deployment
   next to the binary is manual.
