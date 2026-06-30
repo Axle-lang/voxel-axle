@@ -1,0 +1,507 @@
+// mobview — the mob box-model renderer, split out of Renderer.
+//
+// Mobs (and torches) are drawn as little stacks of shaded, atlas-textured
+// cuboids sharing the world z-buffer. That machinery — the oriented-box corner
+// math, the per-face project + backface-cull + raster, the per-mob ambient
+// light — is cohesive and lives here in an owned `MobView` (the Renderer holds
+// one, like it holds a `Bloom`). MobView keeps its OWN projection scratch and
+// oriented-box corner buffers, so it never reaches back into the Renderer — a
+// one-way dependency (render → mobview), no import cycle.
+//
+// Per frame the Renderer hands in a `MobScene` value (atlas + fog colour + the
+// day/night state + the projection half-width); MobView never stores frame
+// state beyond the per-mob `mobLight`. The block torches reuse `drawQuad`
+// directly, so it is the one public quad primitive.
+
+use sdl_platform::{allocBytes, getF64, setF64, rgb};
+use crate::gfx::color::{scaleRgb, tintIf};
+use crate::gfx::sky::{ DayState };
+use crate::gfx::raster::{rasterTriTex, rasterTri, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band};
+use crate::vec3::{ Vec3, vec3 };
+use crate::entities::player::Player;
+use crate::entities::mob::Mob;
+use crate::entities::mobs::MobManager;
+use crate::world::manager::ChunkManager;
+use crate::config;
+
+/**
+ * The per-frame context for the mob pass: the atlas mip chain, the distance-fog
+ * colour, the day/night state (sun direction + daylight for shading) and the
+ * projection half-width. Bundled so each draw helper takes one `scene` instead
+ * of threading four loose values through every call.
+ */
+struct MobScene {
+    atlas : MipAtlas,
+    fog : Rgb,
+    ds : DayState,
+    hw : f64,
+}
+
+/** One box face's surface: flat fill colour, atlas tile (<0 = flat), hurt tint. */
+struct Material {
+    color : i32,
+    tile : i32,
+    hurt : bool,
+}
+
+/**
+ * One body part placed in the mob's own frame: `ctr` is the box centre as
+ * (right, up-above-feet, forward) and `half` its half-extents along the same
+ * axes. Replaces the six loose mr/my/mf/hr/hy/hf scalars drawObox used to take.
+ */
+struct BoxPlacement {
+    ctr : Vec3,
+    half : Vec3,
+}
+
+class MobView {
+    csx : i64,        // projected screen x / y / inverse depth (4 quad corners)
+    csy : i64,
+    ciz : i64,
+    cvis : i32[],     // per-corner near-plane visibility (1 = in front)
+    obx : i64,        // oriented-box world corners (8 per body part)
+    oby : i64,
+    obz : i64,
+    mobLight : f64,   // ambient factor of the mob currently being drawn
+
+    /** Allocate the quad projection scratch and the oriented-box corner buffers. */
+    constructor() {
+        this.csx = allocBytes(8 * 8);
+        this.csy = allocBytes(8 * 8);
+        this.ciz = allocBytes(8 * 8);
+        this.cvis = malloc<i32>(4);
+        this.obx = allocBytes(8 * 8);
+        this.oby = allocBytes(8 * 8);
+        this.obz = allocBytes(8 * 8);
+        this.mobLight = 1.0;
+    }
+
+    /**
+     * Project one world point into screen + inverse depth at slot k (mob-local
+     * mirror of Renderer.projectPoint; mobs keep their own scratch so the pass
+     * is independent of the world face buffers).
+     * @param p   player providing the eye position and orientation
+     * @param wx  world x of the point
+     * @param wy  world y of the point
+     * @param wz  world z of the point
+     * @param hw  half the render width (horizontal projection centre)
+     * @param k   scratch slot index to store the result in
+     */
+    fn project(p : Player, wx : f64, wy : f64, wz : f64, hw : f64, k : i32) : void {
+        let dx : f64 = wx - p.eye.x;
+        let dy : f64 = wy - p.eye.y;
+        let dz : f64 = wz - p.eye.z;
+        let rx : f64 = dx * p.cosy + dz * p.siny;
+        let rz : f64 = (0.0 - dx) * p.siny + dz * p.cosy;
+        let ry2 : f64 = dy * p.cosp - rz * p.sinp;
+        let rz2 : f64 = dy * p.sinp + rz * p.cosp;
+        if (rz2 < config::nearPlane) {
+            this.cvis[k] = 0;
+            return;
+        }
+        setF64(this.csx, k, hw + config::focal * rx / rz2);
+        setF64(this.csy, k, config::halfH - config::focal * ry2 / rz2);
+        setF64(this.ciz, k, 1.0 / rz2);
+        this.cvis[k] = 1;
+    }
+
+    /**
+     * Mob Lambert term for a face normal, lifted by ambient — same shape as the
+     * world shadeN but kept local so mobview has no back-reference to Renderer.
+     * @param nx  normal x
+     * @param ny  normal y
+     * @param nz  normal z
+     * @param ds  the day/night state (sun direction)
+     * @return brightness factor in [ambient, 1]
+     */
+    fn shadeMob(nx : f64, ny : f64, nz : f64, ds : DayState) : f64 {
+        let ndl : f64 = nx * ds.sunX + ny * ds.sunY + nz * ds.sunZ;
+        if (ndl < 0.0) {
+            ndl = 0.0;
+        }
+        return config::ambient + (1.0 - config::ambient) * ndl;
+    }
+
+    /**
+     * One face of a mob box: project 4 corners, backface-cull against the eye,
+     * then fill atlas-textured (or flat-shaded). `mat.hurt` tints the face red
+     * for the damage flash. Public because the block torches reuse it.
+     * @param p      player providing the eye position and orientation
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param a      world-space corner a
+     * @param b      world-space corner b
+     * @param c      world-space corner c
+     * @param d      world-space corner d
+     * @param n      face normal (for backface cull + Lambert shading)
+     * @param mat    the face surface (colour / tile / hurt)
+     * @param scene  the per-frame mob context (atlas, fog, day-state, hw)
+     */
+    fn drawQuad(p : Player, fb : FrameBuf, a : Vec3, b : Vec3, c : Vec3, d : Vec3, n : Vec3, mat : Material, scene : MobScene) : void {
+        let mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
+        let my : f64 = (a.y + b.y + c.y + d.y) * 0.25;
+        let mz : f64 = (a.z + b.z + c.z + d.z) * 0.25;
+        if ((p.eye.x - mx) * n.x + (p.eye.y - my) * n.y + (p.eye.z - mz) * n.z <= 0.0) {
+            return;
+        }
+        this.project(p, a.x, a.y, a.z, scene.hw, 0);
+        this.project(p, b.x, b.y, b.z, scene.hw, 1);
+        this.project(p, c.x, c.y, c.z, scene.hw, 2);
+        this.project(p, d.x, d.y, d.z, scene.hw, 3);
+        if (this.cvis[0] == 0 || this.cvis[1] == 0 || this.cvis[2] == 0 || this.cvis[3] == 0) {
+            return;
+        }
+        // Mobs are little multi-box models: the full terrain light contrast
+        // (0.5..1.0) makes every box edge read as a hard seam. Compress it
+        // toward bright so adjacent faces blend and the model looks rounded
+        // rather than crated.
+        let bright : f64 = (0.80 + 0.20 * this.shadeMob(n.x, n.y, n.z, scene.ds)) * this.mobLight;
+        let sx0 : f64 = getF64(this.csx, 0);
+        let sy0 : f64 = getF64(this.csy, 0);
+        let iz0 : f64 = getF64(this.ciz, 0);
+        let sx1 : f64 = getF64(this.csx, 1);
+        let sy1 : f64 = getF64(this.csy, 1);
+        let iz1 : f64 = getF64(this.ciz, 1);
+        let sx2 : f64 = getF64(this.csx, 2);
+        let sy2 : f64 = getF64(this.csy, 2);
+        let iz2 : f64 = getF64(this.ciz, 2);
+        let sx3 : f64 = getF64(this.csx, 3);
+        let sy3 : f64 = getF64(this.csy, 3);
+        let iz3 : f64 = getF64(this.ciz, 3);
+        if (config::useMobTextures && mat.tile >= 0) {
+            // A struck mob glows red: lift the red multiplier, damp green/blue.
+            let tr : f64 = bright;
+            let tg : f64 = bright;
+            let tb : f64 = bright;
+            if (mat.hurt) {
+                tr = bright + 0.6;
+                tg = bright * 0.4;
+                tb = bright * 0.4;
+            }
+            let band : Band = Band { x0: 0, x1: fb.w };
+            rasterTriTex(fb, RasterTri {
+                a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                b: RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                c: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.fog, band);
+            rasterTriTex(fb, RasterTri {
+                a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
+                b: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                c: RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.fog, band);
+        } else {
+            let col : i32 = scaleRgb(tintIf(mat.hurt, mat.color), bright);
+            rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
+            rasterTri(fb, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
+        }
+    }
+
+    /**
+     * One face of an oriented box: the 4 vertices are corner indices into the
+     * `ob*` world-corner buffers filled by drawObox.
+     * @param p      player providing the eye position and orientation
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param i0     corner index for vertex 0
+     * @param i1     corner index for vertex 1
+     * @param i2     corner index for vertex 2
+     * @param i3     corner index for vertex 3
+     * @param n      face normal (backface cull + Lambert shading)
+     * @param mat    the face surface (colour / tile / hurt)
+     * @param scene  the per-frame mob context
+     */
+    fn oquad(p : Player, fb : FrameBuf, i0 : i32, i1 : i32, i2 : i32, i3 : i32, n : Vec3, mat : Material, scene : MobScene) : void {
+        this.drawQuad(p, fb,
+            vec3(getF64(this.obx, i0), getF64(this.oby, i0), getF64(this.obz, i0)),
+            vec3(getF64(this.obx, i1), getF64(this.oby, i1), getF64(this.obz, i1)),
+            vec3(getF64(this.obx, i2), getF64(this.oby, i2), getF64(this.obz, i2)),
+            vec3(getF64(this.obx, i3), getF64(this.oby, i3), getF64(this.obz, i3)),
+            n, mat, scene);
+    }
+
+    /**
+     * Draw one body part as an **oriented** box: the part is positioned in the
+     * mob's own frame (`place.ctr` = right / up-above-feet / forward, half-extents
+     * `place.half`), then the whole box is rotated by the mob's heading, so the
+     * head/body/legs turn together as a rigid model. The +forward face carries
+     * `faceTile` (the animal's face), the rest `skinTile`. Death collapses the
+     * box (sink + squash + topple along the heading).
+     * @param p         player providing the eye position and orientation
+     * @param m         mob whose frame the box is placed in
+     * @param fb        the render target (framebuffer + z-buffer + size)
+     * @param place     the box centre + half-extents in the mob frame
+     * @param color     flat fill color (used when untextured)
+     * @param skinTile  atlas tile for the non-forward faces
+     * @param faceTile  atlas tile for the +forward face
+     * @param scene     the per-frame mob context
+     */
+    fn drawObox(p : Player, m : Mob, fb : FrameBuf, place : BoxPlacement, color : i32, skinTile : i32, faceTile : i32, scene : MobScene) : void {
+        let fwdx : f64 = Math::cos(m.heading);
+        let fwdz : f64 = Math::sin(m.heading);
+        let rgtx : f64 = Math::sin(m.heading);
+        let rgtz : f64 = 0.0 - Math::cos(m.heading);
+        // Death: topple onto one side like Minecraft — rotate the whole model
+        // up→right about the feet by up to ~90° as the collapse plays out. `lr`,
+        // `lu` are the same rotation applied to every part (so the box stays
+        // rigid); a small lift keeps the resting flank from dipping underground.
+        let pr : f64 = m.deathProgress();
+        let theta : f64 = pr * 1.5707963;
+        let ct : f64 = Math::cos(theta);
+        let st : f64 = Math::sin(theta);
+        let lift : f64 = 0.15 * st;
+        let mr : f64 = place.ctr.x;
+        let my : f64 = place.ctr.y;
+        let mf : f64 = place.ctr.z;
+        let hr : f64 = place.half.x;
+        let hy : f64 = place.half.y;
+        let hf : f64 = place.half.z;
+        let ci : i32 = 0;
+        while (ci < 8) {
+            let sr : f64 = 0.0 - 1.0;
+            if ((ci & 1) != 0) {
+                sr = 1.0;
+            }
+            let su : f64 = 0.0 - 1.0;
+            if ((ci & 2) != 0) {
+                su = 1.0;
+            }
+            let sf : f64 = 0.0 - 1.0;
+            if ((ci & 4) != 0) {
+                sf = 1.0;
+            }
+            let lr0 : f64 = mr + sr * hr;
+            let hun : f64 = my + su * hy;
+            let lf : f64 = mf + sf * hf;
+            let lr : f64 = lr0 * ct + hun * st;
+            let lu : f64 = hun * ct - lr0 * st + lift;
+            setF64(this.obx, ci, m.pos.x + lr * rgtx + lf * fwdx);
+            setF64(this.oby, ci, m.pos.y + lu);
+            setF64(this.obz, ci, m.pos.z + lr * rgtz + lf * fwdz);
+            ci = ci + 1;
+        }
+        let hurt : bool = m.hurtTimer > 0;
+        // The right and up face normals rotate with the topple (forward is the
+        // rotation axis, so forward normals are unchanged), keeping backface
+        // culling correct while the body lies down.
+        let rnx : f64 = ct * rgtx;
+        let rny : f64 = 0.0 - st;
+        let rnz : f64 = ct * rgtz;
+        let unx : f64 = st * rgtx;
+        let uny : f64 = ct;
+        let unz : f64 = st * rgtz;
+        let skin : Material = Material { color: color, tile: skinTile, hurt: hurt };
+        let faceM : Material = Material { color: color, tile: faceTile, hurt: hurt };
+        this.oquad(p, fb, 1, 5, 7, 3, vec3(rnx, rny, rnz), skin, scene);
+        this.oquad(p, fb, 4, 0, 2, 6, vec3(0.0 - rnx, 0.0 - rny, 0.0 - rnz), skin, scene);
+        this.oquad(p, fb, 2, 3, 7, 6, vec3(unx, uny, unz), skin, scene);
+        this.oquad(p, fb, 4, 5, 7, 6, vec3(fwdx, 0.0, fwdz), faceM, scene);
+        this.oquad(p, fb, 1, 0, 2, 3, vec3(0.0 - fwdx, 0.0, 0.0 - fwdz), skin, scene);
+        // Once tipping over, the underside comes into view, so draw it too.
+        if (pr > 0.0) {
+            this.oquad(p, fb, 0, 1, 5, 4, vec3(0.0 - unx, 0.0 - uny, 0.0 - unz), skin, scene);
+        }
+    }
+
+    /**
+     * Draw a chicken as a stack of oriented boxes (legs, body, head, beak, wattle).
+     * @param p      player providing the eye position and orientation
+     * @param m      chicken mob to draw
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context
+     */
+    fn drawChicken(p : Player, m : Mob, fb : FrameBuf, scene : MobScene) : void {
+        let sw : f64 = Math::sin(m.walkPhase) * 0.08;   // forward leg stride
+        let leg : i32 = rgb(232, 150, 40);
+        let body : i32 = rgb(236, 236, 232);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.07, 0.10, sw), half: vec3(0.035, 0.10, 0.04) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.07, 0.10, 0.0 - sw), half: vec3(0.035, 0.10, 0.04) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.27, 0.0), half: vec3(0.15, 0.14, 0.18) }, body, config::tlChickenBody, config::tlChickenBody, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.47, 0.18), half: vec3(0.11, 0.12, 0.10) }, body, config::tlChickenBody, config::tlChickenHead, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.45, 0.30), half: vec3(0.05, 0.04, 0.06) }, rgb(232, 170, 40), 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.58, 0.08), half: vec3(0.05, 0.06, 0.04) }, rgb(200, 40, 40), 0 - 1, 0 - 1, scene);
+    }
+
+    /**
+     * Draw a sheep as a stack of oriented boxes (four legs, woolly body, head).
+     * @param p      player providing the eye position and orientation
+     * @param m      sheep mob to draw
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context
+     */
+    fn drawSheep(p : Player, m : Mob, fb : FrameBuf, scene : MobScene) : void {
+        let sw : f64 = Math::sin(m.walkPhase) * 0.11;
+        let leg : i32 = rgb(54, 46, 40);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.18 + sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.20, 0.16, 0.18 - sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.0 - 0.18 - sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.18 + sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.50, 0.0), half: vec3(0.28, 0.30, 0.40) }, rgb(232, 230, 222), config::tlSheepWool, config::tlSheepWool, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.54, 0.46), half: vec3(0.15, 0.15, 0.14) }, rgb(226, 222, 214), config::tlSheepWool, config::tlSheepHead, scene);
+    }
+
+    /**
+     * Draw a cow as a stack of oriented boxes (four legs, body, head).
+     * @param p      player providing the eye position and orientation
+     * @param m      cow mob to draw
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context
+     */
+    fn drawCow(p : Player, m : Mob, fb : FrameBuf, scene : MobScene) : void {
+        let sw : f64 = Math::sin(m.walkPhase) * 0.12;
+        let leg : i32 = rgb(70, 54, 44);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.26, 0.20, 0.24 + sw), half: vec3(0.09, 0.20, 0.09) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.26, 0.20, 0.24 - sw), half: vec3(0.09, 0.20, 0.09) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.26, 0.20, 0.0 - 0.24 - sw), half: vec3(0.09, 0.20, 0.09) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.26, 0.20, 0.0 - 0.24 + sw), half: vec3(0.09, 0.20, 0.09) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.60, 0.0), half: vec3(0.38, 0.34, 0.50) }, rgb(110, 86, 66), config::tlCowBody, config::tlCowBody, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.64, 0.58), half: vec3(0.18, 0.18, 0.18) }, rgb(110, 86, 66), config::tlCowBody, config::tlCowHead, scene);
+    }
+
+    /**
+     * Draw a pig as a stack of oriented boxes (four legs, body, head, snout).
+     * @param p      player providing the eye position and orientation
+     * @param m      pig mob to draw
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context
+     */
+    fn drawPig(p : Player, m : Mob, fb : FrameBuf, scene : MobScene) : void {
+        let sw : f64 = Math::sin(m.walkPhase) * 0.10;
+        let leg : i32 = rgb(196, 128, 128);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.20 + sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.20, 0.16, 0.20 - sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.0 - 0.20 - sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.20 + sw), half: vec3(0.07, 0.16, 0.07) }, leg, 0 - 1, 0 - 1, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.46, 0.0), half: vec3(0.30, 0.26, 0.42) }, rgb(222, 150, 150), config::tlPigBody, config::tlPigBody, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.50, 0.48), half: vec3(0.18, 0.17, 0.16) }, rgb(226, 156, 156), config::tlPigBody, config::tlPigHead, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.47, 0.64), half: vec3(0.08, 0.07, 0.05) }, rgb(232, 170, 170), 0 - 1, 0 - 1, scene);
+    }
+
+    /**
+     * Creeper: textured from the atlas. Normally the green creeper skin with its
+     * iconic face on the head's forward face; once the fuse is lit it swaps to
+     * the "gilet jaune" charge skin/face, swells to 1.25x and strobes white
+     * (faster as the blast nears). The `color` args are the lighting base.
+     * @param p      player providing the eye position and orientation
+     * @param m      creeper mob to draw
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context
+     */
+    fn drawCreeper(p : Player, m : Mob, fb : FrameBuf, scene : MobScene) : void {
+        let sw : f64 = Math::sin(m.walkPhase) * 0.10;
+        // Calm green vs. charging gilet jaune skin/face tiles + base tints.
+        let skin : i32 = config::tlCreeperSkin;
+        let face : i32 = config::tlCreeperFace;
+        let body : i32 = rgb(58, 140, 58);
+        let leg : i32 = rgb(42, 96, 42);
+        // Legs always wear the plain green skin — the vest only belongs on the
+        // torso, so they never carry the charge tile.
+        let legTile : i32 = config::tlCreeperSkin;
+        // Charging menace: swell the whole model and strobe white. The strobe
+        // accelerates as the fuse runs down; a flash frame paints every part
+        // flat white (tile = -1) so it reads as a bright pulse over the model.
+        let s : f64 = 1.0;
+        let flash : bool = false;
+        if (m.fuse >= 0) {
+            skin = config::tlChargeSkin;
+            face = config::tlChargeFace;
+            body = rgb(228, 196, 40);
+            leg = rgb(170, 140, 28);
+            s = 1.25;
+            let period : i32 = 2 + m.fuse / 40;
+            if ((m.fuse / period) % 4 == 0) {
+                flash = true;
+            }
+        }
+        if (flash) {
+            let wht : i32 = rgb(242, 248, 242);
+            skin = 0 - 1;
+            face = 0 - 1;
+            legTile = 0 - 1;
+            body = wht;
+            leg = wht;
+        }
+        // Four legs (plain skin), the upright body (vest), then the head whose
+        // forward face carries the creeper / meme mug. Every extent and offset
+        // is scaled by `s` so the swell grows from the feet.
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.12 + sw) * s), half: vec3(0.07 * s, 0.13 * s, 0.07 * s) }, leg, legTile, legTile, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.12 * s, 0.13 * s, (0.12 - sw) * s), half: vec3(0.07 * s, 0.13 * s, 0.07 * s) }, leg, legTile, legTile, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.0 - 0.12 - sw) * s), half: vec3(0.07 * s, 0.13 * s, 0.07 * s) }, leg, legTile, legTile, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.12 * s, 0.13 * s, (0.0 - 0.12 + sw) * s), half: vec3(0.07 * s, 0.13 * s, 0.07 * s) }, leg, legTile, legTile, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 0.58 * s, 0.0), half: vec3(0.16 * s, 0.32 * s, 0.11 * s) }, body, skin, skin, scene);
+        this.drawObox(p, m, fb, BoxPlacement { ctr: vec3(0.0, 1.06 * s, 0.0), half: vec3(0.18 * s, 0.18 * s, 0.18 * s) }, body, skin, face, scene);
+    }
+
+    /**
+     * Ambient light factor (0..1) for a mob at world position (mx,my,mz): the
+     * brighter of sky×daylight and block light at its cell, through the same
+     * exponential curve as terrain, so mobs darken at night / underground and
+     * are lit by nearby torches.
+     * @param man       the chunk manager (light maps)
+     * @param mx        mob x
+     * @param my        mob feet y
+     * @param mz        mob z
+     * @param lcurve    the renderer's brightness lookup (lightFalloff^(15-level))
+     * @param daylight  the day factor that scales sky light
+     * @return ambient light factor in [lightMin, 1]
+     */
+    fn mobLightAt(man : ChunkManager, mx : f64, my : f64, mz : f64, lcurve : i64, daylight : f64) : f64 {
+        let wx : i32 = Math::floorToInt(mx) as i32;
+        let wy : i32 = Math::floorToInt(my + 0.5) as i32;
+        let wz : i32 = Math::floorToInt(mz) as i32;
+        let skyF : f64 = getF64(lcurve, man.skGetW(wx, wy, wz)) * daylight;
+        let blkF : f64 = getF64(lcurve, man.blGetW(wx, wy, wz));
+        let cf : f64 = skyF;
+        if (blkF > cf) {
+            cf = blkF;
+        }
+        return config::lightMin + (1.0 - config::lightMin) * cf;
+    }
+
+    /**
+     * Draw every mob of every species, sharing the world's z-buffer (so terrain
+     * correctly occludes animals behind it). Each mob's ambient light factor is
+     * sampled once (mobLight) and applied by drawQuad.
+     * @param man     chunk manager (light maps, for per-mob ambient light)
+     * @param mm      mob manager holding the per-species arrays
+     * @param p       player providing the eye position and orientation
+     * @param fb      the render target (framebuffer + z-buffer + size)
+     * @param scene   the per-frame mob context (atlas, fog, day-state, hw)
+     * @param lcurve  the renderer's brightness lookup table
+     */
+    fn drawAll(man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf, scene : MobScene, lcurve : i64) : void {
+        let day : f64 = scene.ds.daylight;
+        let i : i32 = 0;
+        while (i < mm.chN) {
+            let m : Mob = mm.chickenAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.drawChicken(p, m, fb, scene);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < mm.shN) {
+            let m : Mob = mm.sheepAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.drawSheep(p, m, fb, scene);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < mm.coN) {
+            let m : Mob = mm.cowAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.drawCow(p, m, fb, scene);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < mm.pgN) {
+            let m : Mob = mm.pigAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.drawPig(p, m, fb, scene);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < mm.crN) {
+            let m : Mob = mm.creeperAt(i);
+            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.drawCreeper(p, m, fb, scene);
+            i = i + 1;
+        }
+    }
+}

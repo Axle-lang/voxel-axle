@@ -477,19 +477,19 @@ fn main() : void {
             // Volumetric god-rays from the sun (above water only); then the
             // living-water post-pass (depth fog + moving caustics) under the HUD.
             if (underwater) {
-                renderer.underwaterOverlay(pixels, zbuf, w, h, phase);
+                renderer.underwaterOverlay(fb, phase);
             } else {
-                renderer.godRays(player, pixels, zbuf, w, h);
+                renderer.godRays(player, fb);
             }
             // Soft warm glow on bright pixels (sun, halo, shafts, water, snow).
-            renderer.bloomPass(pixels, w, h);
+            renderer.bloomPass(fb);
             if (!paused) {
                 if (picker.hit == 1) {
                     renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
                         man.blockBoxHeight(picker.bx, picker.by, picker.bz));
                 }
                 drawHud(pixels, w, h, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
-                renderer.crosshair(pixels, w, h);
+                renderer.crosshair(fb);
             } else {
                 drawPauseMenu(pixels, w, h, hover);
             }
