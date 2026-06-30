@@ -16,13 +16,14 @@
 // top, the highest collidable voxel per column) still drives entity
 // physics — both interfaces are unchanged, so nothing downstream moved.
 
-use sdl_platform::{allocBytes, readU8, writeU8};
+use sdl_platform::{allocBytes, readU8, writeU8, getF64};
 use crate::world::noise::{terrainHeight, temperature, humidity, treeHash, hashI, snowDepth};
 use crate::world::biomes::registry::{biomeAt, Biomes};
 use crate::world::blocks::{tileFor, isSolid, isCollidable, isWater, isTransparent, isOpaque, lightEmission, albedoFor, isPartialShape, hasCollisionBox, isLeaves};
 use crate::world::voxstore::VoxStore;
-use crate::world::lightstore::{ LightStore, IVec3, LightRemoval };
+use crate::world::lightstore::{ LightStore, LightRemoval };
 use crate::world::treegen::{ stampTree };
+use crate::vec3::{ IVec3 };
 use crate::config;
 use crate::config::{ Block };
 use crate::config::{ BiomeId };
@@ -192,19 +193,6 @@ class ChunkManager {
      */
     fn setVoxLocal(slot : i32, lx : i32, ly : i32, lz : i32, own id : Block) : void {
         this.store.setVoxLocal(slot, lx, ly, lz, id);
-    }
-
-    /**
-     * Write `id` only if (lx, ly, lz) is inside this slot's padded
-     * volume — used when stamping trees whose origin sits just outside.
-     * @param slot  the slot index
-     * @param lx    the local x coordinate
-     * @param ly    the local y coordinate
-     * @param lz    the local z coordinate
-     * @param id    the block id to write
-     */
-    fn setVoxClip(slot : i32, lx : i32, ly : i32, lz : i32, id : Block) : void {
-        this.store.setVoxClip(slot, lx, ly, lz, id);
     }
 
     /**
@@ -1166,97 +1154,75 @@ class ChunkManager {
     // ── Block light (torches) — a flood-fill engine, walls block light ──
 
     /**
-     * Block-light level (0..15) at a world voxel; 0 if unloaded / out of range.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @return the block-light level 0..15
+     * Light level (0..15) of one channel volume at a world voxel; 0 if unloaded /
+     * out of range. The shared core of blGetW / skGetW — `vol` selects the
+     * block-light or sky-light byte volume.
+     * @param vol  the light byte volume (lights.light or lights.skylight)
+     * @param wx   world x
+     * @param wy   world y
+     * @param wz   world z
+     * @return the level 0..15
      */
+    fn lvGetW(vol : i64, wx : i32, wy : i32, wz : i32) : i32 {
+        if (wy < 0 || wy >= config::worldHeight) {
+            return 0;
+        }
+        let s : i32 = config::chunkSize;
+        let cx : i32 = this.floorDiv(wx, s);
+        let cz : i32 = this.floorDiv(wz, s);
+        let slot : i32 = this.slotFor(cx, cz);
+        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
+            return 0;
+        }
+        return readU8(vol, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+    }
+
+    /**
+     * Set one channel volume's light at a world voxel (owner chunk), flagging the
+     * slot for re-mesh if the value actually changed. Shared core of blSetW /
+     * skSetW.
+     * @param vol  the light byte volume (lights.light or lights.skylight)
+     * @param wx   world x
+     * @param wy   world y
+     * @param wz   world z
+     * @param v    the new level 0..15
+     */
+    fn lvSetW(vol : i64, wx : i32, wy : i32, wz : i32, v : i32) : void {
+        if (wy < 0 || wy >= config::worldHeight) {
+            return;
+        }
+        let s : i32 = config::chunkSize;
+        let cx : i32 = this.floorDiv(wx, s);
+        let cz : i32 = this.floorDiv(wz, s);
+        let slot : i32 = this.slotFor(cx, cz);
+        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
+            return;
+        }
+        let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
+        if (readU8(vol, off) != v) {
+            writeU8(vol, off, v);
+            this.lights.ldirty[slot] = 1;
+        }
+    }
+
+    /** Block-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
     fn blGetW(wx : i32, wy : i32, wz : i32) : i32 {
-        if (wy < 0 || wy >= config::worldHeight) {
-            return 0;
-        }
-        let s : i32 = config::chunkSize;
-        let cx : i32 = this.floorDiv(wx, s);
-        let cz : i32 = this.floorDiv(wz, s);
-        let slot : i32 = this.slotFor(cx, cz);
-        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-            return 0;
-        }
-        return readU8(this.lights.light, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return this.lvGetW(this.lights.light, wx, wy, wz);
     }
 
-    /**
-     * Set block light at a world voxel (owner chunk) and flag it for re-mesh
-     * if the value actually changed.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @param v   the new block-light level 0..15
-     */
+    /** Set block light at a world voxel; flags the slot for re-mesh if changed. */
     fn blSetW(wx : i32, wy : i32, wz : i32, v : i32) : void {
-        if (wy < 0 || wy >= config::worldHeight) {
-            return;
-        }
-        let s : i32 = config::chunkSize;
-        let cx : i32 = this.floorDiv(wx, s);
-        let cz : i32 = this.floorDiv(wz, s);
-        let slot : i32 = this.slotFor(cx, cz);
-        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-            return;
-        }
-        let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
-        if (readU8(this.lights.light, off) != v) {
-            writeU8(this.lights.light, off, v);
-            this.lights.ldirty[slot] = 1;
-        }
+        this.lvSetW(this.lights.light, wx, wy, wz, v);
     }
 
-    /**
-     * Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @return the sky-light level 0..15
-     */
+    /** Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
     fn skGetW(wx : i32, wy : i32, wz : i32) : i32 {
-        if (wy < 0 || wy >= config::worldHeight) {
-            return 0;
-        }
-        let s : i32 = config::chunkSize;
-        let cx : i32 = this.floorDiv(wx, s);
-        let cz : i32 = this.floorDiv(wz, s);
-        let slot : i32 = this.slotFor(cx, cz);
-        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-            return 0;
-        }
-        return readU8(this.lights.skylight, this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64);
+        return this.lvGetW(this.lights.skylight, wx, wy, wz);
     }
 
-    /**
-     * Set sky light at a world voxel (owner chunk) and flag it for re-mesh
-     * if the value actually changed.
-     * @param wx  world x
-     * @param wy  world y
-     * @param wz  world z
-     * @param v   the new sky-light level 0..15
-     */
+    /** Set sky light at a world voxel; flags the slot for re-mesh if changed. */
     fn skSetW(wx : i32, wy : i32, wz : i32, v : i32) : void {
-        if (wy < 0 || wy >= config::worldHeight) {
-            return;
-        }
-        let s : i32 = config::chunkSize;
-        let cx : i32 = this.floorDiv(wx, s);
-        let cz : i32 = this.floorDiv(wz, s);
-        let slot : i32 = this.slotFor(cx, cz);
-        if (this.loaded[slot] == 0 || this.cxs[slot] != cx || this.czs[slot] != cz) {
-            return;
-        }
-        let off : i64 = this.voxIdx(slot, wx - cx * s, wy, wz - cz * s) as i64;
-        if (readU8(this.lights.skylight, off) != v) {
-            writeU8(this.lights.skylight, off, v);
-            this.lights.ldirty[slot] = 1;
-        }
+        this.lvSetW(this.lights.skylight, wx, wy, wz, v);
     }
 
     /**
@@ -1333,67 +1299,68 @@ class ChunkManager {
             }
             bz = bz + 1;
         }
-        this.skFloodAdd();
+        this.floodAddCh(this.lights.skylight);
     }
 
     /**
-     * Spread sky light into one neighbour, losing one level per block, when it
-     * would be brighter there (and the neighbour isn't opaque). Pushes the
-     * brightened neighbour so the flood continues from it.
-     * @param nx  neighbour world x
-     * @param ny  neighbour world y
-     * @param nz  neighbour world z
-     * @param lv  this cell's sky-light level (neighbour gets lv-1)
+     * Spread one channel's light into a neighbour, losing one level per block,
+     * when it would be brighter there (and the neighbour isn't opaque). Pushes
+     * the brightened neighbour so the flood continues. Shared by block + sky —
+     * `vol` selects the channel.
+     * @param vol  the light volume (lights.light or lights.skylight)
+     * @param nx   neighbour world x
+     * @param ny   neighbour world y
+     * @param nz   neighbour world z
+     * @param lv   this cell's level (the neighbour gets lv-1)
      */
-    fn skTrySpread(nx : i32, ny : i32, nz : i32, lv : i32) : void {
+    fn trySpreadCh(vol : i64, nx : i32, ny : i32, nz : i32, lv : i32) : void {
         if (isOpaque(this.worldGet(nx, ny, nz))) {
             return;
         }
-        if (this.skGetW(nx, ny, nz) < lv - 1) {
-            this.skSetW(nx, ny, nz, lv - 1);
+        if (this.lvGetW(vol, nx, ny, nz) < lv - 1) {
+            this.lvSetW(vol, nx, ny, nz, lv - 1);
             this.lpush(nx, ny, nz);
         }
     }
 
     /**
-     * Flood the (shared) add-stack as SKY light — spreads sideways/under
-     * overhangs losing one level per block, so a cave entrance fades from
-     * daylight to dark instead of cutting hard. (Vertical shafts stay full via
-     * skyColumn; this fills the horizontal falloff.)
+     * Flood one channel's add-stack to completion (bounded by the stack cap):
+     * each popped cell spreads to its 6 neighbours. Torch block light and sky
+     * light under overhangs both use this — the add-stack is shared, so a cave
+     * entrance fades from daylight to dark instead of cutting hard.
+     * @param vol  the light volume (lights.light or lights.skylight)
      */
-    fn skFloodAdd() : void {
+    fn floodAddCh(vol : i64) : void {
         while (this.lights.lqn > 0) {
             this.lights.lqn = this.lights.lqn - 1;
             let e : IVec3 = this.lights.lq[this.lights.lqn];
-            let x : i32 = e.x;
-            let y : i32 = e.y;
-            let z : i32 = e.z;
-            let lv : i32 = this.skGetW(x, y, z);
+            let lv : i32 = this.lvGetW(vol, e.x, e.y, e.z);
             if (lv > 1) {
-                this.skTrySpread(x + 1, y, z, lv);
-                this.skTrySpread(x - 1, y, z, lv);
-                this.skTrySpread(x, y + 1, z, lv);
-                this.skTrySpread(x, y - 1, z, lv);
-                this.skTrySpread(x, y, z + 1, lv);
-                this.skTrySpread(x, y, z - 1, lv);
+                this.trySpreadCh(vol, e.x + 1, e.y, e.z, lv);
+                this.trySpreadCh(vol, e.x - 1, e.y, e.z, lv);
+                this.trySpreadCh(vol, e.x, e.y + 1, e.z, lv);
+                this.trySpreadCh(vol, e.x, e.y - 1, e.z, lv);
+                this.trySpreadCh(vol, e.x, e.y, e.z + 1, lv);
+                this.trySpreadCh(vol, e.x, e.y, e.z - 1, lv);
             }
         }
     }
 
     /**
-     * One sky-removal neighbour step: a neighbour dimmer than the removed level
-     * is itself cleared and queued for further removal; an equal/brighter
-     * neighbour is a surviving source and is queued onto the add-stack to refill.
+     * One channel removal neighbour step: a neighbour dimmer than the removed
+     * level is itself cleared and queued for further removal; an equal/brighter
+     * neighbour is a surviving source, queued onto the add-stack to refill.
+     * @param vol  the light volume (lights.light or lights.skylight)
      * @param nx   neighbour world x
      * @param ny   neighbour world y
      * @param nz   neighbour world z
      * @param lvl  the level being removed from the parent cell
      */
-    fn skTryRemove(nx : i32, ny : i32, nz : i32, lvl : i32) : void {
-        let nl : i32 = this.skGetW(nx, ny, nz);
+    fn tryRemoveCh(vol : i64, nx : i32, ny : i32, nz : i32, lvl : i32) : void {
+        let nl : i32 = this.lvGetW(vol, nx, ny, nz);
         if (nl != 0) {
             if (nl < lvl) {
-                this.skSetW(nx, ny, nz, 0);
+                this.lvSetW(vol, nx, ny, nz, 0);
                 this.rpush(nx, ny, nz, nl);
             } else {
                 this.lpush(nx, ny, nz);
@@ -1401,21 +1368,21 @@ class ChunkManager {
         }
     }
 
-    /** Flood the removal stack as SKY light, feeding the add-stack from sources. */
-    fn skFloodRemove() : void {
+    /**
+     * Flood one channel's removal stack, feeding the add-stack from surviving
+     * (brighter/equal) sources so they refill the cleared region.
+     * @param vol  the light volume (lights.light or lights.skylight)
+     */
+    fn floodRemoveCh(vol : i64) : void {
         while (this.lights.rqn > 0) {
             this.lights.rqn = this.lights.rqn - 1;
             let e : LightRemoval = this.lights.rq[this.lights.rqn];
-            let x : i32 = e.x;
-            let y : i32 = e.y;
-            let z : i32 = e.z;
-            let lvl : i32 = e.lvl;
-            this.skTryRemove(x + 1, y, z, lvl);
-            this.skTryRemove(x - 1, y, z, lvl);
-            this.skTryRemove(x, y + 1, z, lvl);
-            this.skTryRemove(x, y - 1, z, lvl);
-            this.skTryRemove(x, y, z + 1, lvl);
-            this.skTryRemove(x, y, z - 1, lvl);
+            this.tryRemoveCh(vol, e.x + 1, e.y, e.z, e.lvl);
+            this.tryRemoveCh(vol, e.x - 1, e.y, e.z, e.lvl);
+            this.tryRemoveCh(vol, e.x, e.y + 1, e.z, e.lvl);
+            this.tryRemoveCh(vol, e.x, e.y - 1, e.z, e.lvl);
+            this.tryRemoveCh(vol, e.x, e.y, e.z + 1, e.lvl);
+            this.tryRemoveCh(vol, e.x, e.y, e.z - 1, e.lvl);
         }
     }
 
@@ -1448,85 +1415,6 @@ class ChunkManager {
         }
         this.lights.rq[this.lights.rqn] = LightRemoval { x: wx, y: wy, z: wz, lvl: lvl };
         this.lights.rqn = this.lights.rqn + 1;
-    }
-
-    /**
-     * Spread block light into one neighbour, losing one level per block, when it
-     * would be brighter there (and the neighbour isn't opaque). Pushes the
-     * brightened neighbour so the flood continues from it.
-     * @param nx  neighbour world x
-     * @param ny  neighbour world y
-     * @param nz  neighbour world z
-     * @param lv  this cell's block-light level (neighbour gets lv-1)
-     */
-    fn tryAdd(nx : i32, ny : i32, nz : i32, lv : i32) : void {
-        if (isOpaque(this.worldGet(nx, ny, nz))) {
-            return;
-        }
-        if (this.blGetW(nx, ny, nz) < lv - 1) {
-            this.blSetW(nx, ny, nz, lv - 1);
-            this.lpush(nx, ny, nz);
-        }
-    }
-
-    /** Flood the light add-stack to completion (bounded by the stack cap). */
-    fn floodAdd() : void {
-        while (this.lights.lqn > 0) {
-            this.lights.lqn = this.lights.lqn - 1;
-            let e : IVec3 = this.lights.lq[this.lights.lqn];
-            let x : i32 = e.x;
-            let y : i32 = e.y;
-            let z : i32 = e.z;
-            let lv : i32 = this.blGetW(x, y, z);
-            if (lv > 1) {
-                this.tryAdd(x + 1, y, z, lv);
-                this.tryAdd(x - 1, y, z, lv);
-                this.tryAdd(x, y + 1, z, lv);
-                this.tryAdd(x, y - 1, z, lv);
-                this.tryAdd(x, y, z + 1, lv);
-                this.tryAdd(x, y, z - 1, lv);
-            }
-        }
-    }
-
-    /**
-     * One block-light removal neighbour step: a neighbour dimmer than the
-     * removed level is itself cleared and queued for further removal; an
-     * equal/brighter neighbour is a surviving source and is queued onto the
-     * add-stack to refill.
-     * @param nx   neighbour world x
-     * @param ny   neighbour world y
-     * @param nz   neighbour world z
-     * @param lvl  the level being removed from the parent cell
-     */
-    fn tryRemove(nx : i32, ny : i32, nz : i32, lvl : i32) : void {
-        let nl : i32 = this.blGetW(nx, ny, nz);
-        if (nl != 0) {
-            if (nl < lvl) {
-                this.blSetW(nx, ny, nz, 0);
-                this.rpush(nx, ny, nz, nl);
-            } else {
-                this.lpush(nx, ny, nz);
-            }
-        }
-    }
-
-    /** Flood the removal stack, feeding the add-stack from brighter neighbours. */
-    fn floodRemove() : void {
-        while (this.lights.rqn > 0) {
-            this.lights.rqn = this.lights.rqn - 1;
-            let e : LightRemoval = this.lights.rq[this.lights.rqn];
-            let x : i32 = e.x;
-            let y : i32 = e.y;
-            let z : i32 = e.z;
-            let lvl : i32 = e.lvl;
-            this.tryRemove(x + 1, y, z, lvl);
-            this.tryRemove(x - 1, y, z, lvl);
-            this.tryRemove(x, y + 1, z, lvl);
-            this.tryRemove(x, y - 1, z, lvl);
-            this.tryRemove(x, y, z + 1, lvl);
-            this.tryRemove(x, y, z - 1, lvl);
-        }
     }
 
     /** Re-mesh every slot whose light changed, then clear the flags. */
@@ -1563,7 +1451,7 @@ class ChunkManager {
         let cur : i32 = this.blGetW(wx, wy, wz);
         this.blSetW(wx, wy, wz, 0);
         this.rpush(wx, wy, wz, cur + 1);
-        this.floodRemove();
+        this.floodRemoveCh(this.lights.light);
         // 2. If the block now there emits light, re-seed it.
         let emit : i32 = lightEmission(this.worldGet(wx, wy, wz));
         if (emit > 0) {
@@ -1577,7 +1465,7 @@ class ChunkManager {
         this.lpush(wx, wy - 1, wz);
         this.lpush(wx, wy, wz + 1);
         this.lpush(wx, wy, wz - 1);
-        this.floodAdd();
+        this.floodAddCh(this.lights.light);
         // 4. Sky light: reconcile the edited column's vertical exposure — seed a
         // REMOVAL where a cell darkened (a hole got sealed) and an ADD where it
         // brightened (a hole opened) — then flood both, so sky light recedes as
@@ -1610,7 +1498,7 @@ class ChunkManager {
                 cy = cy - 1;
             }
         }
-        this.skFloodRemove();
+        this.floodRemoveCh(this.lights.skylight);
         // Also seed the add from the edited cell + its 6 neighbours, so the
         // sideways sky gradient flows into a newly opened space even when the
         // edit doesn't change the column (e.g. digging a horizontal tunnel off
@@ -1622,7 +1510,7 @@ class ChunkManager {
         this.lpush(wx, wy - 1, wz);
         this.lpush(wx, wy, wz + 1);
         this.lpush(wx, wy, wz - 1);
-        this.skFloodAdd();
+        this.floodAddCh(this.lights.skylight);
         // A face is baked from the light of the AIR cell it looks into. When the
         // edited cell sits on a chunk border, the face that looks into it belongs
         // to the NEIGHBOUR chunk, whose light values didn't change — so

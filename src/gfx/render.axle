@@ -93,9 +93,6 @@ class Renderer {
                           // lights/clips into here once, then worker threads
                           // rasterise it in parallel column bands (tiled render)
     triN : i32,           // number of queued triangles this frame
-    mobLight : f64,   // ambient light factor of the mob currently being drawn
-                      // (sky×daylight + block at its cell) so mobs darken at
-                      // night / in caves instead of being lit 24/7
     bloom : Bloom,    // soft-glow post-process (owns its half-res buffers + jobs)
     mobs : MobView,   // mob box-model renderer (owns its own projection scratch)
     sel : Selection,  // targeted-block selection wireframe (owns its own scratch)
@@ -106,7 +103,6 @@ class Renderer {
      */
     constructor() {
         this.hw = config::halfW;
-        this.mobLight = 1.0;
         this.triBuf = malloc<RasterTri>(config::triQueueCap);
         this.triN = 0;
         this.mips = 0;

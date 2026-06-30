@@ -61,14 +61,6 @@ class Mob extends Entity {
         this.speed = config::mobWanderSpeed;
     }
 
-    /**
-     * Whether the creeper fuse is currently lit.
-     * @return true if charging (fuse >= 0)
-     */
-    fn isCharging() : bool {
-        return this.fuse >= 0;
-    }
-
     /** Flag a hit so the renderer glows the mob red for a few frames. */
     fn flashHurt() : void {
         this.hurtTimer = config::hurtFlashFrames;

@@ -5,7 +5,6 @@
 
 use sdl_platform::{putPixel, getF64, setF64, readI32, rgb};
 use crate::config;
-use crate::mathx::{ clampF64, clampI32 };
 
 /**
  * The render target bundle: framebuffer + z-buffer base pointers and the frame

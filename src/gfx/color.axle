@@ -6,24 +6,43 @@
 use sdl_platform::{rgb, putPixel, readI32};
 
 /**
+ * Clamp one colour channel to [0, 255].
+ * @param v  the channel value
+ * @return v clamped to 0..255
+ */
+fn clamp255(v : i32) : i32 {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > 255) {
+        return 255;
+    }
+    return v;
+}
+
+/**
+ * Pack three channels into a 0x00RRGGBB framebuffer pixel (no alpha) — the
+ * shared form of the `(r & 0xFF) * 65536 + …` literal that the world / sky /
+ * god-ray / bloom / underwater passes open-coded.
+ * @param r  red channel
+ * @param g  green channel
+ * @param b  blue channel
+ * @return the packed pixel
+ */
+fn packRgb(r : i32, g : i32, b : i32) : i32 {
+    return (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF);
+}
+
+/**
  * Multiply each channel of an ARGB-packed colour by `bright` (clamped).
  * @param color   the ARGB-packed colour.
  * @param bright  per-channel multiplier.
  * @return the scaled colour.
  */
 fn scaleRgb(color : i32, bright : f64) : i32 {
-    let r : i32 = Math::floorToInt(((color >> 16) & 0xFF) as f64 * bright) as i32;
-    let g : i32 = Math::floorToInt(((color >> 8) & 0xFF) as f64 * bright) as i32;
-    let b : i32 = Math::floorToInt((color & 0xFF) as f64 * bright) as i32;
-    if (r > 255) {
-        r = 255;
-    }
-    if (g > 255) {
-        g = 255;
-    }
-    if (b > 255) {
-        b = 255;
-    }
+    let r : i32 = clamp255(Math::floorToInt(((color >> 16) & 0xFF) as f64 * bright) as i32);
+    let g : i32 = clamp255(Math::floorToInt(((color >> 8) & 0xFF) as f64 * bright) as i32);
+    let b : i32 = clamp255(Math::floorToInt((color & 0xFF) as f64 * bright) as i32);
     return rgb(r, g, b);
 }
 

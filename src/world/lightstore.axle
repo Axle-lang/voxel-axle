@@ -13,14 +13,8 @@
 // so there is no new sharing — the data simply has a focused home.
 
 use sdl_platform::{allocBytes, setF64};
+use crate::vec3::{ IVec3 };
 use crate::config;
-
-/** An integer voxel coordinate — one entry of the block-light flood (add) stack. */
-struct IVec3 {
-    x : i32,
-    y : i32,
-    z : i32,
-}
 
 /** One entry of the block-light removal stack: a voxel + its old light level. */
 struct LightRemoval {
