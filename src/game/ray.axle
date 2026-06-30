@@ -6,7 +6,7 @@
 
 use crate::world::manager::ChunkManager;
 use crate::entities::player::Player;
-use crate::vec3::{ Vec3, vec3 };
+use crate::vec3::{ Vec3, vec3, ivec3 };
 use crate::config;
 
 /** Result of casting the player's look-ray into the voxel world. */
@@ -113,8 +113,8 @@ class Picker {
                 t = tMaxZ;
                 tMaxZ = tMaxZ + tDeltaZ;
             }
-            if (man.solidTarget(x, y, z)) {
-                let boxH : f64 = man.blockBoxHeight(x, y, z);
+            if (man.solidTarget(ivec3(x, y, z))) {
+                let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
                 if (boxH >= 1.0) {
                     // Full cube: the DDA's step-from cell IS the place cell.
                     this.hit = 1;

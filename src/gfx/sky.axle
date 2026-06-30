@@ -16,6 +16,7 @@
 use sdl_platform::{putPixel, rgb};
 use crate::gfx::raster::{ FrameBuf };
 use crate::entities::player::Player;
+use crate::vec3::{ Vec3, vec3 };
 use crate::mathx::{ clampI32 };
 use crate::config;
 
@@ -169,17 +170,15 @@ fn drawDisc(fb : FrameBuf, d : Disc, kind : i32) : void {
  * tracks the world. Skipped when the direction is behind the camera.
  * @param p       player (camera orientation)
  * @param fb      the render target (framebuffer + size)
- * @param dx      sky direction x
- * @param dy      sky direction y
- * @param dz      sky direction z
+ * @param dir     sky direction (unit)
  * @param radius  disc radius in pixels
  * @param kind    0 = sun, 1 = moon
  * @param hw      half the render width (horizontal projection centre)
  */
-fn drawSky(p : Player, fb : FrameBuf, dx : f64, dy : f64, dz : f64, radius : f64, kind : i32, hw : f64) : void {
-    let rx : f64 = dx * p.cosy + dz * p.siny;
-    let rz : f64 = (0.0 - dx) * p.siny + dz * p.cosy;
-    let ry : f64 = dy;
+fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, kind : i32, hw : f64) : void {
+    let rx : f64 = dir.x * p.cosy + dir.z * p.siny;
+    let rz : f64 = (0.0 - dir.x) * p.siny + dir.z * p.cosy;
+    let ry : f64 = dir.y;
     let ry2 : f64 = ry * p.cosp - rz * p.sinp;
     let rz2 : f64 = ry * p.sinp + rz * p.cosp;
     if (rz2 < 0.05) {
@@ -317,10 +316,10 @@ fn drawCelestial(ds : DayState, p : Player, fb : FrameBuf, hw : f64) : void {
     let sunR : f64 = (fb.h as f64) * 0.085;
     let moonR : f64 = (fb.h as f64) * 0.072;
     if (ds.sunY > 0.0 - 0.04) {
-        drawSky(p, fb, ds.sunX, ds.sunY, ds.sunZ, sunR, 0, hw);
+        drawSky(p, fb, vec3(ds.sunX, ds.sunY, ds.sunZ), sunR, 0, hw);
     }
     if ((0.0 - ds.sunY) > 0.0 - 0.04) {
-        drawSky(p, fb, 0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ, moonR, 1, hw);
+        drawSky(p, fb, vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ), moonR, 1, hw);
     }
 }
 

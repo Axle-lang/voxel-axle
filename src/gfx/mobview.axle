@@ -17,7 +17,7 @@ use sdl_platform::{allocBytes, getF64, setF64, rgb};
 use crate::gfx::color::{scaleRgb, tintIf};
 use crate::gfx::sky::{ DayState };
 use crate::gfx::raster::{rasterTriTex, rasterTri, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band};
-use crate::vec3::{ Vec3, vec3 };
+use crate::vec3::{ Vec3, vec3, ivec3 };
 use crate::entities::player::Player;
 use crate::entities::mob::Mob;
 use crate::entities::mobs::MobManager;
@@ -435,19 +435,17 @@ class MobView {
      * exponential curve as terrain, so mobs darken at night / underground and
      * are lit by nearby torches.
      * @param man       the chunk manager (light maps)
-     * @param mx        mob x
-     * @param my        mob feet y
-     * @param mz        mob z
+     * @param pos       the mob's feet position
      * @param lcurve    the renderer's brightness lookup (lightFalloff^(15-level))
      * @param daylight  the day factor that scales sky light
      * @return ambient light factor in [lightMin, 1]
      */
-    fn mobLightAt(man : ChunkManager, mx : f64, my : f64, mz : f64, lcurve : i64, daylight : f64) : f64 {
-        let wx : i32 = Math::floorToInt(mx) as i32;
-        let wy : i32 = Math::floorToInt(my + 0.5) as i32;
-        let wz : i32 = Math::floorToInt(mz) as i32;
-        let skyF : f64 = getF64(lcurve, man.skGetW(wx, wy, wz)) * daylight;
-        let blkF : f64 = getF64(lcurve, man.blGetW(wx, wy, wz));
+    fn mobLightAt(man : ChunkManager, pos : Vec3, lcurve : i64, daylight : f64) : f64 {
+        let wx : i32 = Math::floorToInt(pos.x) as i32;
+        let wy : i32 = Math::floorToInt(pos.y + 0.5) as i32;
+        let wz : i32 = Math::floorToInt(pos.z) as i32;
+        let skyF : f64 = getF64(lcurve, man.skGetW(ivec3(wx, wy, wz))) * daylight;
+        let blkF : f64 = getF64(lcurve, man.blGetW(ivec3(wx, wy, wz)));
         let cf : f64 = skyF;
         if (blkF > cf) {
             cf = blkF;
@@ -471,35 +469,35 @@ class MobView {
         let i : i32 = 0;
         while (i < mm.chN) {
             let m : Mob = mm.chickenAt(i);
-            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.mobLight = this.mobLightAt(man, m.pos, lcurve, day);
             this.drawChicken(p, m, fb, scene);
             i = i + 1;
         }
         i = 0;
         while (i < mm.shN) {
             let m : Mob = mm.sheepAt(i);
-            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.mobLight = this.mobLightAt(man, m.pos, lcurve, day);
             this.drawSheep(p, m, fb, scene);
             i = i + 1;
         }
         i = 0;
         while (i < mm.coN) {
             let m : Mob = mm.cowAt(i);
-            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.mobLight = this.mobLightAt(man, m.pos, lcurve, day);
             this.drawCow(p, m, fb, scene);
             i = i + 1;
         }
         i = 0;
         while (i < mm.pgN) {
             let m : Mob = mm.pigAt(i);
-            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.mobLight = this.mobLightAt(man, m.pos, lcurve, day);
             this.drawPig(p, m, fb, scene);
             i = i + 1;
         }
         i = 0;
         while (i < mm.crN) {
             let m : Mob = mm.creeperAt(i);
-            this.mobLight = this.mobLightAt(man, m.pos.x, m.pos.y, m.pos.z, lcurve, day);
+            this.mobLight = this.mobLightAt(man, m.pos, lcurve, day);
             this.drawCreeper(p, m, fb, scene);
             i = i + 1;
         }

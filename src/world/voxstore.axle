@@ -11,6 +11,7 @@
 // no import cycle. Axle arrays (`Block[]`/`i32[]`) are references, so writes
 // through a VoxStore handed to a free function mutate the owning ring in place.
 
+use crate::vec3::{ IVec3 };
 use crate::config;
 use crate::config::{ Block };
 
@@ -48,53 +49,47 @@ class VoxStore {
     /**
      * Read a padded local voxel: bedrock (Stone) below y=0, Air at/above the
      * world top, the stored block otherwise.
-     * @param slot  the slot index
-     * @param lx    the local x coordinate
-     * @param ly    the local y coordinate
-     * @param lz    the local z coordinate
+     * @param slot   the slot index
+     * @param local  the padded local voxel coordinate
      * @return the block id at that cell
      */
-    fn getVox(slot : i32, lx : i32, ly : i32, lz : i32) : Block {
-        if (ly < 0) {
+    fn getVox(slot : i32, local : IVec3) : Block {
+        if (local.y < 0) {
             return Block::Stone;
         }
-        if (ly >= config::worldHeight) {
+        if (local.y >= config::worldHeight) {
             return Block::Air;
         }
-        return this.vox[this.voxIdx(slot, lx, ly, lz)];
+        return this.vox[this.voxIdx(slot, local.x, local.y, local.z)];
     }
 
     /**
      * Write block `id` at a padded local voxel (no bounds check).
-     * @param slot  the slot index
-     * @param lx    the local x coordinate
-     * @param ly    the local y coordinate
-     * @param lz    the local z coordinate
-     * @param id    the block id to write
+     * @param slot   the slot index
+     * @param local  the padded local voxel coordinate
+     * @param id     the block id to write
      */
-    fn setVoxLocal(slot : i32, lx : i32, ly : i32, lz : i32, own id : Block) : void {
-        this.vox[this.voxIdx(slot, lx, ly, lz)] = id;
+    fn setVoxLocal(slot : i32, local : IVec3, own id : Block) : void {
+        this.vox[this.voxIdx(slot, local.x, local.y, local.z)] = id;
     }
 
     /**
-     * Write `id` only if (lx, ly, lz) is inside this slot's padded volume — used
-     * when stamping trees whose origin sits just outside the chunk.
-     * @param slot  the slot index
-     * @param lx    the local x coordinate
-     * @param ly    the local y coordinate
-     * @param lz    the local z coordinate
-     * @param id    the block id to write
+     * Write `id` only if `local` is inside this slot's padded volume — used when
+     * stamping trees whose origin sits just outside the chunk.
+     * @param slot   the slot index
+     * @param local  the padded local voxel coordinate
+     * @param id     the block id to write
      */
-    fn setVoxClip(slot : i32, lx : i32, ly : i32, lz : i32, id : Block) : void {
+    fn setVoxClip(slot : i32, local : IVec3, id : Block) : void {
         let s : i32 = config::chunkSize;
-        if (lx < 0 - 1 || lx > s || lz < 0 - 1 || lz > s) {
+        if (local.x < 0 - 1 || local.x > s || local.z < 0 - 1 || local.z > s) {
             return;
         }
-        if (ly < 0 || ly >= config::worldHeight) {
+        if (local.y < 0 || local.y >= config::worldHeight) {
             return;
         }
         let v : Block = id;
-        this.setVoxLocal(slot, lx, ly, lz, v);
+        this.setVoxLocal(slot, local, v);
     }
 
     /**

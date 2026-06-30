@@ -15,6 +15,7 @@
 use sdl_platform::{Mixer, SoundBank};
 use sdl_platform::fileExists;
 use crate::world::blocks::materialOf;
+use crate::vec3::{ Vec3, IVec3 };
 use crate::config;
 use crate::config::{ Block, AudioMaterial, MobKind };
 
@@ -208,12 +209,10 @@ class AudioManager {
     /**
      * Dig / place sound at a block, attenuated live by distance.
      * @param blockId  the block broken or placed
-     * @param bx       block x
-     * @param by       block y
-     * @param bz       block z
+     * @param cell     the block cell
      * @param rnd      variant selector in [0, 1)
      */
-    fn blockEdit(blockId : Block, bx : i32, by : i32, bz : i32, rnd : f64) : void {
+    fn blockEdit(blockId : Block, cell : IVec3, rnd : f64) : void {
         let mat : AudioMaterial = materialOf(blockId);
         let bank : SoundBank = this.digBanks[mat as i32];
         if (!bank.loaded()) {
@@ -221,19 +220,20 @@ class AudioManager {
         }
         this.acquire();
         bank.playRandPos(this.mixer, rnd, config::volBreak,
-            (bx as f64) + 0.5, (by as f64) + 0.5, (bz as f64) + 0.5, config::sndBreakDist);
+            (cell.x as f64) + 0.5, (cell.y as f64) + 0.5, (cell.z as f64) + 0.5, config::sndBreakDist);
         this.release();
     }
 
     /**
      * A mob's idle voice at its world position, attenuated live by distance.
      * @param kind  the mob kind
-     * @param x     source x
-     * @param y     source y
-     * @param z     source z
+     * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobSay(kind : MobKind, x : f64, y : f64, z : f64, rnd : f64) : void {
+    fn mobSay(kind : MobKind, pos : Vec3, rnd : f64) : void {
+        let x : f64 = pos.x;
+        let y : f64 = pos.y;
+        let z : f64 = pos.z;
         this.acquire();
         match kind {
             MobKind::Chicken => {
@@ -258,12 +258,13 @@ class AudioManager {
      * A mob's hurt cry at its world position. Species without a dedicated clip
      * fall back to the generic impact (player hurt) sound.
      * @param kind  the mob kind
-     * @param x     source x
-     * @param y     source y
-     * @param z     source z
+     * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobHurt(kind : MobKind, x : f64, y : f64, z : f64, rnd : f64) : void {
+    fn mobHurt(kind : MobKind, pos : Vec3, rnd : f64) : void {
+        let x : f64 = pos.x;
+        let y : f64 = pos.y;
+        let z : f64 = pos.z;
         this.acquire();
         match kind {
             MobKind::Chicken => {
@@ -312,25 +313,21 @@ class AudioManager {
 
     /**
      * The creeper lighting its fuse, attenuated live by distance.
-     * @param x  creeper x
-     * @param y  creeper y
-     * @param z  creeper z
+     * @param pos  the creeper position
      */
-    fn creeperFuse(x : f64, y : f64, z : f64) : void {
+    fn creeperFuse(pos : Vec3) : void {
         this.acquire();
-        this.creeperChargeBank.playRandPos(this.mixer, 0.0, config::volCreeper, x, y, z, config::sndCreeperDist);
+        this.creeperChargeBank.playRandPos(this.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
         this.release();
     }
 
     /**
      * The creeper detonating, attenuated live by distance.
-     * @param x  creeper x
-     * @param y  creeper y
-     * @param z  creeper z
+     * @param pos  the creeper position
      */
-    fn creeperBlast(x : f64, y : f64, z : f64) : void {
+    fn creeperBlast(pos : Vec3) : void {
         this.acquire();
-        this.creeperBlastBank.playRandPos(this.mixer, 0.0, config::volCreeper, x, y, z, config::sndCreeperDist);
+        this.creeperBlastBank.playRandPos(this.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
         this.release();
     }
 }

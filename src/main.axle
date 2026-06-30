@@ -41,6 +41,7 @@ use crate::entities::mobs::MobManager;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::ray::{Picker, cellInPlayer};
 use crate::game::sfx::{ AudioManager, audioLoop };
+use crate::vec3::{ IVec3, ivec3 };
 use crate::game::tick::TickManager;
 use crate::gfx::render::Renderer;
 use crate::gfx::raster::FrameBuf;
@@ -329,7 +330,7 @@ fn main() : void {
                         let fbx : i32 = Math::floorToInt(player.pos.x) as i32;
                         let fby : i32 = (Math::floorToInt(player.pos.y) as i32) - 1;
                         let fbz : i32 = Math::floorToInt(player.pos.z) as i32;
-                        let under : Block = man.worldGet(fbx, fby, fbz);
+                        let under : Block = man.worldGet(ivec3(fbx, fby, fbz));
                         if (under != Block::Air && under != Block::Water) {
                             sfx.footstep(under, mobs.rand());
                         }
@@ -389,22 +390,24 @@ fn main() : void {
             if (sdlLeftHeld(btn) && attackCd == 0) {
                 let kind : i32 = mobs.attackNearest(player, sfx);
                 if (kind < 0 && picker.hit == 1) {
-                    let broken : Block = man.worldGet(picker.bx, picker.by, picker.bz);
-                    man.breakAt(picker.bx, picker.by, picker.bz);
-                    sfx.blockEdit(broken, picker.bx, picker.by, picker.bz, mobs.rand());
-                    blocksim.enqueue6(picker.bx, picker.by, picker.bz);
-                    man.lightUpdate(picker.bx, picker.by, picker.bz);
+                    let bcell : IVec3 = ivec3(picker.bx, picker.by, picker.bz);
+                    let broken : Block = man.worldGet(bcell);
+                    man.breakAt(bcell);
+                    sfx.blockEdit(broken, bcell, mobs.rand());
+                    blocksim.enqueue6(bcell);
+                    man.lightUpdate(bcell);
                 }
                 attackCd = config::editCooldown;
             }
             let rightDown : bool = sdlRightHeld(btn);
             if (rightDown && !wasRight && picker.hit == 1) {
                 if (!cellInPlayer(player, picker.px, picker.py, picker.pz)) {
+                    let pcell : IVec3 = ivec3(picker.px, picker.py, picker.pz);
                     let held : Block = player.heldBlock();
-                    man.placeAt(picker.px, picker.py, picker.pz, held);
-                    sfx.blockEdit(held, picker.px, picker.py, picker.pz, mobs.rand());
-                    blocksim.enqueue6(picker.px, picker.py, picker.pz);
-                    man.lightUpdate(picker.px, picker.py, picker.pz);
+                    man.placeAt(pcell, held);
+                    sfx.blockEdit(held, pcell, mobs.rand());
+                    blocksim.enqueue6(pcell);
+                    man.lightUpdate(pcell);
                 }
             }
             wasRight = rightDown;
@@ -486,7 +489,7 @@ fn main() : void {
             if (!paused) {
                 if (picker.hit == 1) {
                     renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
-                        man.blockBoxHeight(picker.bx, picker.by, picker.bz));
+                        man.blockBoxHeight(ivec3(picker.bx, picker.by, picker.bz)));
                 }
                 drawHud(pixels, w, h, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
                 renderer.crosshair(fb);

@@ -14,7 +14,7 @@ use crate::gfx::sky::{ DayState, computeDayState, drawSkyGradient, drawCelestial
 use crate::gfx::mobview::{ MobView, MobScene, Material };
 use crate::gfx::selection::Selection;
 use crate::gfx::raster::{rasterTriTex, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band};
-use crate::vec3::{ vec3 };
+use crate::vec3::{ IVec3, vec3, ivec3 };
 use crate::entities::player::Player;
 use crate::world::manager::ChunkManager;
 use crate::entities::mobs::MobManager;
@@ -374,14 +374,14 @@ class Renderer {
      * @return the classification value described above
      */
     fn cornerSample(man : ChunkManager, wx : i32, y : i32, wz : i32) : f64 {
-        let id : Block = man.worldGet(wx, y, wz);
+        let id : Block = man.worldGet(ivec3(wx, y, wz));
         if (id == Block::Air) {
             return 0.0 - 1.0;
         }
         if (!isWater(id)) {
             return 0.0 - 2.0;
         }
-        if (isSource(id) || isWater(man.worldGet(wx, y + 1, wz))) {
+        if (isSource(id) || isWater(man.worldGet(ivec3(wx, y + 1, wz)))) {
             return 2.0;
         }
         let lvl : i32 = fluidLevel(id);
@@ -468,7 +468,7 @@ class Renderer {
         // Partial, floor-resting blocks (thin snow, slabs later) render at their
         // real box height (top + side tops lowered to y + boxH), like a short
         // water surface. blockBoxHeight is the single authority (1.0 = full cube).
-        let boxH : f64 = man.blockBoxHeight(x, y, z);
+        let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
         let isPartialFace : bool = boxH < 1.0;
         let nx : f64 = 0.0;
         let ny : f64 = 0.0;
@@ -516,10 +516,10 @@ class Renderer {
         let flowU : f64 = 0.0;
         let flowV : f64 = 0.0;
         if (isWaterFace) {
-            let lpx : i32 = fluidLevel(man.worldGet(x + 1, y, z));
-            let lnx : i32 = fluidLevel(man.worldGet(x - 1, y, z));
-            let lpz : i32 = fluidLevel(man.worldGet(x, y, z + 1));
-            let lnz : i32 = fluidLevel(man.worldGet(x, y, z - 1));
+            let lpx : i32 = fluidLevel(man.worldGet(ivec3(x + 1, y, z)));
+            let lnx : i32 = fluidLevel(man.worldGet(ivec3(x - 1, y, z)));
+            let lpz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z + 1)));
+            let lnz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z - 1)));
             let tscroll : f64 = phase * config::waterFlowSpeed;
             flowU = ((lpx - lnx) as f64) * tscroll;
             flowV = ((lpz - lnz) as f64) * tscroll;
@@ -549,16 +549,17 @@ class Renderer {
             FaceDir::PosZ => { sbz = z + 1; }
             _ => { sbz = z - 1; }
         }
+        let shadowCell : IVec3 = ivec3(sbx, sby, sbz);
         // `bright` is now the pure Lambert (sun-direction) term; the cast shadow
         // is applied PER CORNER below (smooth, face-independent), not flattened
         // over the whole face here — that's what removes the block staircase.
 
         // Hemispherical sky access (baked ray-traced AO): darkens the ambient sky
         // light in valleys, recesses and under canopy. Sampled once per face.
-        let skyAcc : f64 = (man.skyaccessGet(sbx, sby, sbz) as f64) * 0.00392157;
+        let skyAcc : f64 = (man.skyaccessGet(shadowCell) as f64) * 0.00392157;
         let skyAOFac : f64 = config::aoSkyMin + (1.0 - config::aoSkyMin) * skyAcc;
         // One-bounce coloured indirect tint (per face): nearby surfaces' colour.
-        let bnc : i32 = man.bounceGet(sbx, sby, sbz);
+        let bnc : i32 = man.bounceGet(shadowCell);
         let bncR : f64 = (((bnc >> 16) & 0xFF) as f64) * 0.0078125;
         let bncG : f64 = (((bnc >> 8) & 0xFF) as f64) * 0.0078125;
         let bncB : f64 = ((bnc & 0xFF) as f64) * 0.0078125;
@@ -616,9 +617,11 @@ class Renderer {
                     t2y = sgy;
                 }
             }
-            let visK : f64 = (man.sunSoftCorner(sbx, sby, sbz, t1x, t1y, t1z, t2x, t2y, t2z) as f64) * 0.00392157;
+
+            let visK : f64 = (man.sunSoftCorner(shadowCell, ivec3(t1x, t1y, t1z), ivec3(t2x, t2y, t2z)) as f64) * 0.00392157;
             let keepK : f64 = config::shadowKeep + (1.0 - config::shadowKeep) * visK;
             let brightK : f64 = config::ambient + keepK * (bright - config::ambient);
+
             // Per-corner smooth light: sky/block nibbles averaged at bake time,
             // through the exponential curve (sky dimmed by daylight), times the
             // per-corner shaded brightness and the AO factor; block light warm.
@@ -636,6 +639,7 @@ class Renderer {
             let lfac : f64 = config::lightMin + (1.0 - config::lightMin) * cfk;
             let cbase : f64 = brightK * lfac * aoFac;
             let wf : f64 = (blkLk as f64) * 0.0667 * config::torchWarm;
+
             // Warm sun / cool shade by how directly THIS corner is sunlit, ×
             // the one-bounce tint, applied in proportion to the sky-light share
             // (so torch-lit caves stay warm).
@@ -654,6 +658,7 @@ class Renderer {
             let crk : f64 = cbase * (1.0 + wf) * tR;
             let cgk : f64 = cbase * tG;
             let cbk : f64 = cbase * (1.0 - wf) * tB;
+
             if (isWaterFace) {
                 // View vector from this corner to the eye.
                 let vx : f64 = p.eye.x - ((x + oxv) as f64);

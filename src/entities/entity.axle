@@ -14,7 +14,7 @@
 use crate::world::manager::ChunkManager;
 use crate::world::blocks::{ isWater, fluidLevel };
 use crate::config;
-use crate::vec3::{ Vec3, vec3 };
+use crate::vec3::{ Vec3, vec3, ivec3 };
 
 class Entity {
     pos : Vec3,          // body centre on X/Z, foot height on Y
@@ -108,7 +108,7 @@ class Entity {
             while (x <= x1) {
                 let z : i32 = z0;
                 while (z <= z1) {
-                    if (world.collideFloorCell(x, y, z, py)) {
+                    if (world.collideFloorCell(ivec3(x, y, z), py)) {
                         return true;
                     }
                     z = z + 1;
@@ -145,7 +145,7 @@ class Entity {
             while (z <= z1) {
                 let y : i32 = yHi;
                 while (y >= yLo) {
-                    let st : f64 = world.supportHeight(x, y, z);
+                    let st : f64 = world.supportHeight(ivec3(x, y, z));
                     if (st > 0.0 - 900000.0) {
                         if (st > best) {
                             best = st;
@@ -327,7 +327,7 @@ class Entity {
         let bz : i32 = Math::floorToInt(this.pos.z) as i32;
         let fy : i32 = Math::floorToInt(this.pos.y + 0.1) as i32;
         let my : i32 = Math::floorToInt(this.pos.y + this.height * 0.5) as i32;
-        return isWater(world.worldGet(bx, fy, bz)) || isWater(world.worldGet(bx, my, bz));
+        return isWater(world.worldGet(ivec3(bx, fy, bz))) || isWater(world.worldGet(ivec3(bx, my, bz)));
     }
 
     /**
@@ -356,8 +356,8 @@ class Entity {
             let fbx : i32 = Math::floorToInt(this.pos.x) as i32;
             let fby : i32 = Math::floorToInt(this.pos.y + 0.2) as i32;
             let fbz : i32 = Math::floorToInt(this.pos.z) as i32;
-            let gx : i32 = fluidLevel(world.worldGet(fbx - 1, fby, fbz)) - fluidLevel(world.worldGet(fbx + 1, fby, fbz));
-            let gz : i32 = fluidLevel(world.worldGet(fbx, fby, fbz - 1)) - fluidLevel(world.worldGet(fbx, fby, fbz + 1));
+            let gx : i32 = fluidLevel(world.worldGet(ivec3(fbx - 1, fby, fbz))) - fluidLevel(world.worldGet(ivec3(fbx + 1, fby, fbz)));
+            let gz : i32 = fluidLevel(world.worldGet(ivec3(fbx, fby, fbz - 1))) - fluidLevel(world.worldGet(ivec3(fbx, fby, fbz + 1)));
             if (gx > 2) {
                 gx = 2;
             } else if (gx < 0 - 2) {

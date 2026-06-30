@@ -7,6 +7,7 @@ use crate::entities::player::Player;
 use crate::world::manager::ChunkManager;
 use crate::world::blocksim::BlockSim;
 use crate::game::sfx::AudioManager;
+use crate::vec3::{ IVec3, ivec3 };
 use crate::config;
 use crate::config::{ MobKind, Block };
 
@@ -62,7 +63,7 @@ class Creeper extends Mob {
             if (hostile && dist <= config::creeperTriggerDist) {
                 this.fuse = config::creeperFuseFrames;
                 this.tick(world, 0.0, 0.0);
-                sfx.creeperFuse(this.pos.x, this.pos.y, this.pos.z);
+                sfx.creeperFuse(this.pos);
                 return;
             }
             if (hostile && dist <= config::creeperChaseDist) {
@@ -86,7 +87,7 @@ class Creeper extends Mob {
         this.tick(world, 0.0, 0.0);
         if (this.fuse <= 0) {
             this.explode(world, player, sim);
-            sfx.creeperBlast(this.pos.x, this.pos.y, this.pos.z);
+            sfx.creeperBlast(this.pos);
         }
     }
 
@@ -121,16 +122,14 @@ class Creeper extends Mob {
                 let oz : i32 = 0 - r;
                 while (oz <= r) {
                     if (ox * ox + oy * oy + oz * oz <= r * r) {
-                        let bx : i32 = cx + ox;
-                        let by : i32 = cy + oy;
-                        let bz : i32 = cz + oz;
+                        let cell : IVec3 = ivec3(cx + ox, cy + oy, cz + oz);
                         // Only re-run the block updates where a block actually
                         // broke: re-light the crater (sky pours in, shadows
                         // shift) and wake the fluid / falling sim around it.
-                        if (world.worldGet(bx, by, bz) != Block::Air) {
-                            world.breakAt(bx, by, bz);
-                            world.lightUpdate(bx, by, bz);
-                            sim.enqueue6(bx, by, bz);
+                        if (world.worldGet(cell) != Block::Air) {
+                            world.breakAt(cell);
+                            world.lightUpdate(cell);
+                            sim.enqueue6(cell);
                         }
                     }
                     oz = oz + 1;

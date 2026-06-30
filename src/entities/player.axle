@@ -12,7 +12,7 @@ use crate::world::blocks::{ isWater };
 use crate::config;
 use crate::config::{ Block };
 use crate::mathx::{ clampF64 };
-use crate::vec3::{ Vec3, vec3 };
+use crate::vec3::{ Vec3, vec3, ivec3 };
 
 class Player extends Entity {
     yaw : f64,
@@ -169,7 +169,7 @@ class Player extends Entity {
         let ex : i32 = Math::floorToInt(this.pos.x) as i32;
         let ey : i32 = Math::floorToInt(this.pos.y + config::eyeHeight) as i32;
         let ez : i32 = Math::floorToInt(this.pos.z) as i32;
-        let submerged : bool = isWater(world.worldGet(ex, ey, ez));
+        let submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
         this.headInWater = submerged;
 
         let speed : f64 = config::walkSpeed;

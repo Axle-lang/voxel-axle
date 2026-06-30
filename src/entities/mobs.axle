@@ -235,7 +235,7 @@ class MobManager {
         }
         m.vocalTimer = m.vocalTimer - 1;
         if (m.vocalTimer <= 0) {
-            sfx.mobSay(m.kind, m.pos.x, m.pos.y, m.pos.z, this.rand());
+            sfx.mobSay(m.kind, m.pos, this.rand());
             m.vocalTimer = this.nextVocalDelay();
         }
     }
@@ -473,7 +473,7 @@ class MobManager {
         let target : Mob = this.pick(bestArr, bestIdx);
         target.damage(config::attackDamage);
         target.flashHurt();
-        sfx.mobHurt(target.kind, target.pos.x, target.pos.y, target.pos.z, this.rand());
+        sfx.mobHurt(target.kind, target.pos, this.rand());
         let kind : i32 = target.kind as i32;
         if (target.isAlive()) {
             target.panicFrom(player.pos.x, player.pos.z);
