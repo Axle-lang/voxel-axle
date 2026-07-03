@@ -31,21 +31,21 @@ plan — read it before moving or adding a file.
 - A file that grows past ~700 lines is doing more than one job: split it
   along the jobs, not by line count.
 
-## Axle toolchain — REQUIRED: v0.12.1 or newer
+## Axle toolchain — REQUIRED: v0.14.1 or newer
 
-This project must be compiled with **Axle v0.12.1+**: it uses the primitive
+This project must be compiled with **Axle v0.14.1+**: it uses the primitive
 numeric method surface (`x.floorToInt()`, not a `Math` class) and per-platform
 module overlays, neither of which the 0.7 line has. Always check the version
 before building:
 
 ```powershell
-axle --version        # must print 0.12.1 or higher
+axle --version        # must print 0.14.1 or higher
 ```
 
-If the version is < 0.12.1 (or `axle: command not found`), install/upgrade the
+If the version is < 0.14.1 (or `axle: command not found`), install/upgrade the
 compiler (see below) **before** compiling anything. Do not fall back to an
 older version: codegen and the stdlib evolve between releases, and an older
-binary can surface errors that no longer exist in 0.12.1+.
+binary can surface errors that no longer exist in 0.14.1+.
 
 ## Install / upgrade Axle
 
@@ -54,10 +54,10 @@ The compiler lives in the sibling repo `../axle` (Rust + LLVM 18 backend).
 ### Windows (this machine)
 
 The binary is installed via the MSI at `C:\Program Files (x86)\Axle\axle.exe`.
-Two ways to get 0.12.1+:
+Two ways to get 0.14.1+:
 
 1. **MSI release (recommended)** — install the Windows x64 `.msi` from the
-   `v0.12.1` version, then reopen the terminal and
+   `v0.14.1` version, then reopen the terminal and
    recheck `axle --version`.
 2. **Build from source** — from `../axle`:
    ```powershell
@@ -70,7 +70,7 @@ Two ways to get 0.12.1+:
 ### Linux / macOS
 
 - **Linux (apt)**: official repo — `sudo apt install axle`, then
-  `sudo apt upgrade` to move to 0.12.1+. Details in
+  `sudo apt upgrade` to move to 0.14.1+. Details in
   `../axle/docs/src/getting-started/install.md`.
 - **macOS / no apt**: Docker image or build from source
   (`../axle/docs/src/getting-started/build.md`).
@@ -126,7 +126,7 @@ flag. `-O 3` is numerically identical here: `--physics-check` and
 `--light-check` agree to the last digit at both levels.
 
 ```powershell
-axle --version        # 0.12.1+ required
+axle --version        # 0.14.1+ required
 axle run -O 3         # from the project root
 axle run -O 3 -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
 axle run -O 3 -- --cpu     # the software rasteriser; --gpu: the GPU and nothing else

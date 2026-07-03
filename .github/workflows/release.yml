@@ -18,7 +18,7 @@ env:
   # serves whatever is current, so the build checks instead of assuming:
   # an older `axle` then fails with one clear line rather than a hundred
   # confusing errors further down.
-  AXLE_MIN: '0.12.1'
+  AXLE_MIN: '0.14.1'
 
 jobs:
   linux:

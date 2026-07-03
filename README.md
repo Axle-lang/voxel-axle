@@ -8,7 +8,7 @@ No engine. Every pixel of terrain, sky, water and mobs is shaded by the game's o
 
 <p align="center">
   <a href="https://axle-lang.dev"><img alt="Powered by Axle" src="https://img.shields.io/badge/powered%20by-Axle-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
-  <a href="https://axle-lang.dev"><img alt="Axle 0.12.1+" src="https://img.shields.io/badge/axle-0.12.1%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://axle-lang.dev"><img alt="Axle 0.14.1+" src="https://img.shields.io/badge/axle-0.14.1%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
   <img alt="Rendering: CPU or GPU" src="https://img.shields.io/badge/rendering-CPU%20%C2%B7%20GPU-FF7A45?style=flat-square&labelColor=1b1b2b">
@@ -93,7 +93,7 @@ No engine. Every pixel of terrain, sky, water and mobs is shaded by the game's o
 ```bash
 git clone --recurse-submodules <repo-url>   # the platform layer is a submodule
 cd voxel-axle
-axle --version                              # must print 0.12.1 or newer
+axle --version                              # must print 0.14.1 or newer
 axle run -O 3                               # compile and play
 ```
 
@@ -112,7 +112,7 @@ It also draws the overlay now. The HUD, the heart row, the hotbar and the pause 
 
 ## 📦 Prerequisites
 
-Two things: the **Axle compiler** (v0.12.1+) and this repo **with its
+Two things: the **Axle compiler** (v0.14.1+) and this repo **with its
 submodule**.
 
 ### Clone the repo and its platform submodule
@@ -170,7 +170,7 @@ prerequisite and not a runtime one.
 ## 🛠️ Build & run
 
 From this directory, with the submodule initialised and
-`axle --version` reporting 0.12.1+:
+`axle --version` reporting 0.14.1+:
 
 ```bash
 axle run -O 3                         # compile and play, in one step
