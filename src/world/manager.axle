@@ -328,6 +328,17 @@ class ChunkManager {
         };
     }
 
+    /**
+     * Extra vertical cells the auto-step / floor scan is padded by. A 1-cell pad
+     * widens the step allowance (see Entity.moveX/moveZ) so a snow-capped or
+     * near-full ledge is cleared instead of stopping the body dead against it.
+     * The single knob the step logic reads.
+     * @return the pad in whole cells
+     */
+    fn floorScanPad() : i32 {
+        return 1;
+    }
+
     // ── Streaming ───────────────────────────────────────────────
 
     /**
@@ -1061,9 +1072,11 @@ class ChunkManager {
         if (isTransparent(this.getVox(slot, ivec3(lx - 1, ly, lz)))) {
             this.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
         }
-        // A partial block above (snow, a slab) is transparent but COVERS this top
-        // from view, so skip it — otherwise the ground peeks through under the
-        // partial block's floating top sheet when seen edge-on.
+        // A partial block above (snow, a slab) is transparent but seals this top
+        // from view: its own raised top now renders double-sided (see
+        // renderFace), so it stays watertight even when the eye drops below it —
+        // no need to draw the ground skin under it (that only showed a
+        // contrasting rim). A normal transparent block above keeps this top.
         let above : Block = this.getVox(slot, ivec3(lx, ly + 1, lz));
         if (isTransparent(above) && !isPartialShape(above)) {
             this.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));

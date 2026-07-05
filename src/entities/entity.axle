@@ -193,11 +193,17 @@ class Entity {
             return;
         }
         if (this.onGround == 1 || this.inWater) {
-            let stepY : f64 = this.pos.y + config::stepHeight;
+            // The auto-step allowance is padded by floorScanPad: on a surface
+            // that can dip below its nominal cell top, the same 1-block ledge
+            // measures taller from inside the dip, so without the pad you stop
+            // dead. On the classic surface floorScanPad is 0, so this is exactly
+            // config::stepHeight (unchanged) — the knob lives in ChunkManager.
+            let stepAllow : f64 = config::stepHeight + (world.floorScanPad() as f64) * 0.55;
+            let stepY : f64 = this.pos.y + stepAllow;
             if (!this.collidesAt(world, nx, stepY, this.pos.z)) {
                 let top : f64 = this.supportTop(world, nx, this.pos.z,
                     Math::floorToInt(this.pos.y) as i32, Math::floorToInt(stepY) as i32);
-                if (top > this.pos.y && top - this.pos.y <= config::stepHeight
+                if (top > this.pos.y && top - this.pos.y <= stepAllow
                     && !this.collidesAt(world, nx, top, this.pos.z)) {
                     this.stepUp = this.stepUp + (top - this.pos.y);
                     this.pos.x = nx;
@@ -235,11 +241,14 @@ class Entity {
             return;
         }
         if (this.onGround == 1 || this.inWater) {
-            let stepY : f64 = this.pos.y + config::stepHeight;
+            // Padded auto-step allowance (see moveX): floorScanPad is 0 on the
+            // classic surface, so stepAllow == config::stepHeight.
+            let stepAllow : f64 = config::stepHeight + (world.floorScanPad() as f64) * 0.55;
+            let stepY : f64 = this.pos.y + stepAllow;
             if (!this.collidesAt(world, this.pos.x, stepY, nz)) {
                 let top : f64 = this.supportTop(world, this.pos.x, nz,
                     Math::floorToInt(this.pos.y) as i32, Math::floorToInt(stepY) as i32);
-                if (top > this.pos.y && top - this.pos.y <= config::stepHeight
+                if (top > this.pos.y && top - this.pos.y <= stepAllow
                     && !this.collidesAt(world, this.pos.x, top, nz)) {
                     this.stepUp = this.stepUp + (top - this.pos.y);
                     this.pos.z = nz;

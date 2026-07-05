@@ -500,10 +500,14 @@ class Renderer {
         let vx : f64 = p.eye.x - fcx;
         let vy : f64 = p.eye.y - fcy;
         let vz : f64 = p.eye.z - fcz;
-        // Water surfaces draw double-sided so the rippling surface is visible
-        // from below; all other faces back-face cull.
+        // Water surfaces AND the top of a partial block (thin snow, a slab) draw
+        // double-sided so the surface stays visible from below; every other face
+        // back-face culls. Without this the raised partial top back-face culls
+        // the instant the eye drops below its plane (y + boxH) and the top
+        // "disappears as you descend" — worse the deeper the block (higher plane).
         let facing : f64 = vx * nx + vy * ny + vz * nz;
-        if (!isWaterFace && facing <= 0.0) {
+        let topPartial : bool = isPartialFace && ny > 0.0;
+        if (!isWaterFace && !topPartial && facing <= 0.0) {
             return;
         }
         if (vx * vx + vz * vz > config::renderDist * config::renderDist) {
