@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class Savanna extends Biome {
+class Savanna : Biome {
     /** Construct the savanna biome. */
     constructor() {
         super();
-        this.treeThresh = 0.993;
-        this.treeKindId = TreeKind::Acacia;
-        this.treeHt = 5;
+        self.treeThresh = 0.993;
+        self.treeKindId = TreeKind::Acacia;
+        self.treeHt = 5;
     }
 
     /**
@@ -18,7 +18,7 @@ class Savanna extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::GrassSavanna;
     }
 }

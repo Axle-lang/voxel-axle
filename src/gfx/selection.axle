@@ -19,9 +19,9 @@ class Selection {
 
     /** Allocate the 8-corner projection scratch. */
     constructor() {
-        this.csx = allocBytes(8 * 8);
-        this.csy = allocBytes(8 * 8);
-        this.ciz = allocBytes(8 * 8);
+        self.csx = allocBytes(8 * 8);
+        self.csy = allocBytes(8 * 8);
+        self.ciz = allocBytes(8 * 8);
     }
 
     /**
@@ -35,7 +35,7 @@ class Selection {
      * @param k   scratch slot index to store the result in
      * @return true if the point is in front of the near plane
      */
-    fn projCorner(p : Player, wx : f64, wy : f64, wz : f64, hw : f64, k : i32) : bool {
+    fn projCorner(self, p : Player, wx : f64, wy : f64, wz : f64, hw : f64, k : i32) : bool {
         let dx : f64 = wx - p.eye.x;
         let dy : f64 = wy - p.eye.y;
         let dz : f64 = wz - p.eye.z;
@@ -46,9 +46,9 @@ class Selection {
         if (rz2 < config::nearPlane) {
             return false;
         }
-        setF64(this.csx, k, hw + config::focal * rx / rz2);
-        setF64(this.csy, k, config::halfH - config::focal * ry2 / rz2);
-        setF64(this.ciz, k, 1.0 / rz2);
+        setF64(self.csx, k, hw + config::focal * rx / rz2);
+        setF64(self.csy, k, config::halfH - config::focal * ry2 / rz2);
+        setF64(self.ciz, k, 1.0 / rz2);
         return true;
     }
 
@@ -62,7 +62,7 @@ class Selection {
      * @param iz     inverse depth of the dot
      * @param color  dot color
      */
-    fn selDot(fb : FrameBuf, px : i32, py : i32, iz : f64, color : i32) : void {
+    fn selDot(self, fb : FrameBuf, px : i32, py : i32, iz : f64, color : i32) : void {
         let pixels : i64 = fb.pixels;
         let zbuf : i64 = fb.zbuf;
         let w : i32 = fb.w;
@@ -92,16 +92,16 @@ class Selection {
      * @param b      second projected corner slot
      * @param color  line color
      */
-    fn selEdge(fb : FrameBuf, a : i32, b : i32, color : i32) : void {
-        let ax : f64 = getF64(this.csx, a);
-        let bx : f64 = getF64(this.csx, b);
+    fn selEdge(self, fb : FrameBuf, a : i32, b : i32, color : i32) : void {
+        let ax : f64 = getF64(self.csx, a);
+        let bx : f64 = getF64(self.csx, b);
         if (ax < 0.0 - 1.0e8 || bx < 0.0 - 1.0e8) {
             return;
         }
-        let ay : f64 = getF64(this.csy, a);
-        let by : f64 = getF64(this.csy, b);
-        let aiz : f64 = getF64(this.ciz, a);
-        let biz : f64 = getF64(this.ciz, b);
+        let ay : f64 = getF64(self.csy, a);
+        let by : f64 = getF64(self.csy, b);
+        let aiz : f64 = getF64(self.ciz, a);
+        let biz : f64 = getF64(self.ciz, b);
         let ddx : f64 = bx - ax;
         let ddy : f64 = by - ay;
         let adx : f64 = ddx;
@@ -126,7 +126,7 @@ class Selection {
             let px : i32 = Math::floorToInt(ax + ddx * t) as i32;
             let py : i32 = Math::floorToInt(ay + ddy * t) as i32;
             let iz : f64 = aiz + (biz - aiz) * t;
-            this.selDot(fb, px, py, iz, color);
+            self.selDot(fb, px, py, iz, color);
             i = i + 1;
         }
     }
@@ -144,29 +144,29 @@ class Selection {
      * @param topH  the block's real height (1.0 full, snowDepth for a thin snow
      *              layer) so the outline hugs the true box, not a cube
      */
-    fn draw(p : Player, fb : FrameBuf, hw : f64, bx : i32, by : i32, bz : i32, topH : f64) : void {
+    fn draw(self, p : Player, fb : FrameBuf, hw : f64, bx : i32, by : i32, bz : i32, topH : f64) : void {
         let k : i32 = 0;
         while (k < 8) {
             let cdx : f64 = (k & 1) as f64;
             let cdy : f64 = ((k / 2) & 1) as f64 * topH;
             let cdz : f64 = ((k / 4) & 1) as f64;
-            if (!this.projCorner(p, (bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz, hw, k)) {
-                setF64(this.csx, k, 0.0 - 1.0e9);
+            if (!self.projCorner(p, (bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz, hw, k)) {
+                setF64(self.csx, k, 0.0 - 1.0e9);
             }
             k = k + 1;
         }
         let col : i32 = rgb(36, 38, 44);
-        this.selEdge(fb, 0, 1, col);
-        this.selEdge(fb, 2, 3, col);
-        this.selEdge(fb, 4, 5, col);
-        this.selEdge(fb, 6, 7, col);
-        this.selEdge(fb, 0, 2, col);
-        this.selEdge(fb, 1, 3, col);
-        this.selEdge(fb, 4, 6, col);
-        this.selEdge(fb, 5, 7, col);
-        this.selEdge(fb, 0, 4, col);
-        this.selEdge(fb, 1, 5, col);
-        this.selEdge(fb, 2, 6, col);
-        this.selEdge(fb, 3, 7, col);
+        self.selEdge(fb, 0, 1, col);
+        self.selEdge(fb, 2, 3, col);
+        self.selEdge(fb, 4, 5, col);
+        self.selEdge(fb, 6, 7, col);
+        self.selEdge(fb, 0, 2, col);
+        self.selEdge(fb, 1, 3, col);
+        self.selEdge(fb, 4, 6, col);
+        self.selEdge(fb, 5, 7, col);
+        self.selEdge(fb, 0, 4, col);
+        self.selEdge(fb, 1, 5, col);
+        self.selEdge(fb, 2, 6, col);
+        self.selEdge(fb, 3, 7, col);
     }
 }

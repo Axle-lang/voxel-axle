@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class BambooJungle extends Biome {
+class BambooJungle : Biome {
     /** Construct the bamboo jungle biome. */
     constructor() {
         super();
-        this.treeThresh = 0.80;   // dense stands of bamboo
-        this.treeKindId = TreeKind::Bamboo;
-        this.treeHt = 12;
+        self.treeThresh = 0.80;   // dense stands of bamboo
+        self.treeKindId = TreeKind::Bamboo;
+        self.treeHt = 12;
     }
 
     /**
@@ -18,7 +18,7 @@ class BambooJungle extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::GrassJungle;
     }
 }

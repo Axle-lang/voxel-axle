@@ -11,12 +11,12 @@ use crate::vec3::{ IVec3, ivec3 };
 use crate::config;
 use crate::config::{ MobKind, Block };
 
-class Creeper extends Mob {
+class Creeper : Mob {
     /** Create a creeper at (x, y, z). */
     constructor(x : f64, y : f64, z : f64) {
         super(x, y, z, MobKind::Creeper, config::mobCreeperHp);
-        this.speed = config::mobCreeperSpeed;
-        this.height = 1.5;
+        self.speed = config::mobCreeperSpeed;
+        self.height = 1.5;
     }
 
     /**
@@ -30,20 +30,20 @@ class Creeper extends Mob {
      * @param sfx     the audio manager for the charge / blast sounds
      * @param sim     the block-update sim woken around the blast crater
      */
-    fn step(world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
-        if (this.hurtTimer > 0) {
-            this.hurtTimer = this.hurtTimer - 1;
+    fn step(mut self, world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
+        if (self.hurtTimer > 0) {
+            self.hurtTimer = self.hurtTimer - 1;
         }
-        if (this.state == 1) {
-            if (this.deathTimer > 0) {
-                this.deathTimer = this.deathTimer - 1;
+        if (self.state == 1) {
+            if (self.deathTimer > 0) {
+                self.deathTimer = self.deathTimer - 1;
             }
-            this.tick(world, 0.0, 0.0);
+            self.tick(world, 0.0, 0.0);
             return;
         }
-        let dx : f64 = player.pos.x - this.pos.x;
-        let dy : f64 = player.pos.y - this.pos.y;
-        let dz : f64 = player.pos.z - this.pos.z;
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
         // 3D distance + an explicit vertical cap: a player flying or standing
         // high overhead is NOT in range, so the creeper won't chase or blow up
         // under an out-of-reach target.
@@ -52,26 +52,26 @@ class Creeper extends Mob {
         if (vert < 0.0) {
             vert = 0.0 - vert;
         }
-        this.heading = atan2(dz, dx);
+        self.heading = atan2(dz, dx);
 
         // Hostile only toward a survival player who is near our own level. In
         // creative / flight, or too far above/below, the creeper stands down
         // (and any lit fuse is defused below).
         let hostile : bool = player.creative == 0 && vert <= config::creeperMaxVertical;
 
-        if (this.fuse < 0) {
+        if (self.fuse < 0) {
             if (hostile && dist <= config::creeperTriggerDist) {
-                this.fuse = config::creeperFuseFrames;
-                this.tick(world, 0.0, 0.0);
-                sfx.creeperFuse(this.pos);
+                self.fuse = config::creeperFuseFrames;
+                self.tick(world, 0.0, 0.0);
+                sfx.creeperFuse(self.pos);
                 return;
             }
             if (hostile && dist <= config::creeperChaseDist) {
                 let spd : f64 = config::mobCreeperSpeed;
-                this.walkPhase = this.walkPhase + 0.35;
-                this.tick(world, Math::cos(this.heading) * spd, Math::sin(this.heading) * spd);
+                self.walkPhase = self.walkPhase + 0.35;
+                self.tick(world, Math::cos(self.heading) * spd, Math::sin(self.heading) * spd);
             } else {
-                this.tick(world, 0.0, 0.0);
+                self.tick(world, 0.0, 0.0);
             }
             return;
         }
@@ -79,15 +79,15 @@ class Creeper extends Mob {
         // Fuse lit: defuse if the player escaped (3D / vertically) or switched
         // to creative.
         if (!hostile || dist > config::creeperTriggerDist * 2.4) {
-            this.fuse = 0 - 1;
-            this.tick(world, 0.0, 0.0);
+            self.fuse = 0 - 1;
+            self.tick(world, 0.0, 0.0);
             return;
         }
-        this.fuse = this.fuse - 1;
-        this.tick(world, 0.0, 0.0);
-        if (this.fuse <= 0) {
-            this.explode(world, player, sim);
-            sfx.creeperBlast(this.pos);
+        self.fuse = self.fuse - 1;
+        self.tick(world, 0.0, 0.0);
+        if (self.fuse <= 0) {
+            self.explode(world, player, sim);
+            sfx.creeperBlast(self.pos);
         }
     }
 
@@ -98,10 +98,10 @@ class Creeper extends Mob {
      * @param player  the player to damage by the blast
      * @param sim     the block-update sim woken (fluid / falling) around each broken cell
      */
-    fn explode(world : ChunkManager, player : Player, sim : BlockSim) : void {
-        let dx : f64 = player.pos.x - this.pos.x;
-        let dy : f64 = player.pos.y - this.pos.y;
-        let dz : f64 = player.pos.z - this.pos.z;
+    fn explode(mut self, world : ChunkManager, player : Player, sim : BlockSim) : void {
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
         let d : f64 = Math::sqrt(dx * dx + dy * dy + dz * dz);
         let reach : f64 = config::creeperBlastRadius * 2.0;
         if (d < reach) {
@@ -112,9 +112,9 @@ class Creeper extends Mob {
             }
         }
         let r : i32 = Math::floorToInt(config::creeperBlastRadius) as i32;
-        let cx : i32 = Math::floorToInt(this.pos.x) as i32;
-        let cy : i32 = Math::floorToInt(this.pos.y) as i32;
-        let cz : i32 = Math::floorToInt(this.pos.z) as i32;
+        let cx : i32 = Math::floorToInt(self.pos.x) as i32;
+        let cy : i32 = Math::floorToInt(self.pos.y) as i32;
+        let cz : i32 = Math::floorToInt(self.pos.z) as i32;
         let ox : i32 = 0 - r;
         while (ox <= r) {
             let oy : i32 = 0 - r;
@@ -138,7 +138,7 @@ class Creeper extends Mob {
             }
             ox = ox + 1;
         }
-        this.state = 1;
-        this.deathTimer = 0;
+        self.state = 1;
+        self.deathTimer = 0;
     }
 }

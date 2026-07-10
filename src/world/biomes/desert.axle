@@ -4,14 +4,14 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class Desert extends Biome {
+class Desert : Biome {
     /** Construct the desert biome. */
     constructor() {
         super();
-        this.fillerBlock = Block::Sandstone;
-        this.treeThresh = 0.992;
-        this.treeKindId = TreeKind::Cactus;
-        this.treeHt = 3;
+        self.fillerBlock = Block::Sandstone;
+        self.treeThresh = 0.992;
+        self.treeKindId = TreeKind::Cactus;
+        self.treeHt = 3;
     }
 
     /**
@@ -19,7 +19,7 @@ class Desert extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::Sand;
     }
 }

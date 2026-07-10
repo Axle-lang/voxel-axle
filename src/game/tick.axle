@@ -26,20 +26,20 @@ class TickManager {
 
     /** Start at tick 0 with the cadences pulled from config. */
     constructor() {
-        this.tick = 0;
-        this.maintainEvery = config::maintainTicks;
+        self.tick = 0;
+        self.maintainEvery = config::maintainTicks;
         // Bias so the first dueMaintain fires immediately (prompt first spawn).
-        this.lastMaintain = 0 - config::maintainTicks;
-        this.simEvery = config::simTicks;
-        this.lastSim = 0;
-        this.lastCX = 0;
-        this.lastCZ = 0;
-        this.hasLast = 0;
+        self.lastMaintain = 0 - config::maintainTicks;
+        self.simEvery = config::simTicks;
+        self.lastSim = 0;
+        self.lastCX = 0;
+        self.lastCZ = 0;
+        self.hasLast = 0;
     }
 
     /** Advance one fixed simulation step. Call once per physics step. */
-    fn advance() : void {
-        this.tick = this.tick + 1;
+    fn advance(mut self) : void {
+        self.tick = self.tick + 1;
     }
 
     /**
@@ -49,9 +49,9 @@ class TickManager {
      * fires exactly once for the interval it crossed. Deterministic.
      * @return whether the maintenance pass is due this frame
      */
-    fn dueMaintain() : bool {
-        if (this.tick - this.lastMaintain >= this.maintainEvery) {
-            this.lastMaintain = this.tick;
+    fn dueMaintain(mut self) : bool {
+        if (self.tick - self.lastMaintain >= self.maintainEvery) {
+            self.lastMaintain = self.tick;
             return true;
         }
         return false;
@@ -63,9 +63,9 @@ class TickManager {
      * Drives the block-update sim.
      * @return whether the block-update sim is due this frame
      */
-    fn dueSim() : bool {
-        if (this.tick - this.lastSim >= this.simEvery) {
-            this.lastSim = this.tick;
+    fn dueSim(mut self) : bool {
+        if (self.tick - self.lastSim >= self.simEvery) {
+            self.lastSim = self.tick;
             return true;
         }
         return false;
@@ -79,13 +79,13 @@ class TickManager {
      * @param cz  the player's current chunk Z
      * @return whether streaming must run this tick
      */
-    fn dueStream(cx : i32, cz : i32) : bool {
-        if (this.hasLast == 1 && cx == this.lastCX && cz == this.lastCZ) {
+    fn dueStream(mut self, cx : i32, cz : i32) : bool {
+        if (self.hasLast == 1 && cx == self.lastCX && cz == self.lastCZ) {
             return false;
         }
-        this.lastCX = cx;
-        this.lastCZ = cz;
-        this.hasLast = 1;
+        self.lastCX = cx;
+        self.lastCZ = cz;
+        self.hasLast = 1;
         return true;
     }
 }

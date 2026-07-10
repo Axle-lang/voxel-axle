@@ -102,28 +102,28 @@ class Renderer {
      * set the projection width from config, and fill the face corner table.
      */
     constructor() {
-        this.hw = config::halfW;
-        this.triBuf = malloc<RasterTri>(config::triQueueCap);
-        this.triN = 0;
-        this.mips = 0;
+        self.hw = config::halfW;
+        self.triBuf = malloc<RasterTri>(config::triQueueCap);
+        self.triN = 0;
+        self.mips = 0;
         // Per-mip-level offset/size tables for the anisotropic sampler.
-        this.mipOff = allocBytes((config::mipLevels as i64) * 4);
-        this.mipSz = allocBytes((config::mipLevels as i64) * 4);
+        self.mipOff = allocBytes((config::mipLevels as i64) * 4);
+        self.mipSz = allocBytes((config::mipLevels as i64) * 4);
         let ml : i32 = 0;
         while (ml < config::mipLevels) {
-            putPixel(this.mipOff, ml, mipLevelOffset(ml));
-            putPixel(this.mipSz, ml, mipLevelSize(ml));
+            putPixel(self.mipOff, ml, mipLevelOffset(ml));
+            putPixel(self.mipSz, ml, mipLevelSize(ml));
             ml = ml + 1;
         }
-        this.sunX = 0.0;
-        this.sunY = 1.0;
-        this.sunZ = 0.0;
-        this.daylight = 1.0;
-        this.skyColR = config::daySkyR;
-        this.skyColG = config::daySkyG;
-        this.skyColB = config::daySkyB;
+        self.sunX = 0.0;
+        self.sunY = 1.0;
+        self.sunZ = 0.0;
+        self.daylight = 1.0;
+        self.skyColR = config::daySkyR;
+        self.skyColG = config::daySkyG;
+        self.skyColB = config::daySkyB;
         // Brightness curve lookup: lcurve[level] = lightFalloff^(15-level).
-        this.lcurve = allocBytes(16 * 8);
+        self.lcurve = allocBytes(16 * 8);
         let li : i32 = 0;
         while (li < 16) {
             let pc : f64 = 1.0;
@@ -132,52 +132,52 @@ class Renderer {
                 pc = pc * config::lightFalloff;
                 kc = kc + 1;
             }
-            setF64(this.lcurve, li, pc);
+            setF64(self.lcurve, li, pc);
             li = li + 1;
         }
         // Bloom half-res buffers, sized for the max framebuffer (≤1280×400 →
         // half-res ≤640×200). Six f64 channels (bright RGB + blur scratch).
-        this.bloom = new Bloom();
+        self.bloom = new Bloom();
         // Mob box models and the selection wireframe own their own scratch.
-        this.mobs = new MobView();
-        this.sel = new Selection();
-        this.coff = malloc<i32>(72);
-        this.uvu = malloc<i32>(24);
-        this.uvv = malloc<i32>(24);
+        self.mobs = new MobView();
+        self.sel = new Selection();
+        self.coff = malloc<i32>(72);
+        self.uvu = malloc<i32>(24);
+        self.uvv = malloc<i32>(24);
         // Screen-space scratch sized for a near-clipped polygon (≤ 5 verts).
-        this.csx = allocBytes(8 * 8);
-        this.csy = allocBytes(8 * 8);
-        this.ciz = allocBytes(8 * 8);
+        self.csx = allocBytes(8 * 8);
+        self.csy = allocBytes(8 * 8);
+        self.ciz = allocBytes(8 * 8);
         // Camera-space input (ca*) and clipped output (cb*) buffers: x, y,
         // z (depth) and the u, v texture coordinates per vertex.
-        this.cax = allocBytes(8 * 8);
-        this.cay = allocBytes(8 * 8);
-        this.caz = allocBytes(8 * 8);
-        this.cau = allocBytes(8 * 8);
-        this.cav = allocBytes(8 * 8);
-        this.cbx = allocBytes(8 * 8);
-        this.cby = allocBytes(8 * 8);
-        this.cbz = allocBytes(8 * 8);
-        this.cbu = allocBytes(8 * 8);
-        this.cbv = allocBytes(8 * 8);
-        this.car = allocBytes(8 * 8);
-        this.cag = allocBytes(8 * 8);
-        this.cab = allocBytes(8 * 8);
-        this.cbr = allocBytes(8 * 8);
-        this.cbg = allocBytes(8 * 8);
-        this.cbb = allocBytes(8 * 8);
-        this.fillTable();
+        self.cax = allocBytes(8 * 8);
+        self.cay = allocBytes(8 * 8);
+        self.caz = allocBytes(8 * 8);
+        self.cau = allocBytes(8 * 8);
+        self.cav = allocBytes(8 * 8);
+        self.cbx = allocBytes(8 * 8);
+        self.cby = allocBytes(8 * 8);
+        self.cbz = allocBytes(8 * 8);
+        self.cbu = allocBytes(8 * 8);
+        self.cbv = allocBytes(8 * 8);
+        self.car = allocBytes(8 * 8);
+        self.cag = allocBytes(8 * 8);
+        self.cab = allocBytes(8 * 8);
+        self.cbr = allocBytes(8 * 8);
+        self.cbg = allocBytes(8 * 8);
+        self.cbb = allocBytes(8 * 8);
+        self.fillTable();
     }
 
     /**
      * Set the atlas base pointer and (re)build its mip chain.
      * @param base  base address of the loaded atlas texels
      */
-    fn setAtlas(base : i64) : void {
-        if (this.mips == 0) {
-            this.mips = allocBytes((mipChainTexels() as i64) * 4);
+    fn setAtlas(mut self, base : i64) : void {
+        if (self.mips == 0) {
+            self.mips = allocBytes((mipChainTexels() as i64) * 4);
         }
-        buildMipChain(base, this.mips);
+        buildMipChain(base, self.mips);
     }
 
     /**
@@ -187,8 +187,8 @@ class Renderer {
      * instead of keeping the original atlas buffer alive.
      * @return base address of the level-0 atlas texels
      */
-    fn atlasBase() : i64 {
-        return this.mips;
+    fn atlasBase(self) : i64 {
+        return self.mips;
     }
 
     /**
@@ -198,8 +198,8 @@ class Renderer {
      * stretching — the view stays to scale.
      * @param renderW  framebuffer width in pixels
      */
-    fn setViewWidth(renderW : i32) : void {
-        this.hw = (renderW as f64) * 0.5;
+    fn setViewWidth(mut self, renderW : i32) : void {
+        self.hw = (renderW as f64) * 0.5;
     }
 
     /**
@@ -213,44 +213,44 @@ class Renderer {
      * @param u    tile u coordinate for the corner
      * @param v    tile v coordinate for the corner
      */
-    fn setCorner(dir : i32, k : i32, ox : i32, oy : i32, oz : i32, u : i32, v : i32) : void {
+    fn setCorner(mut self, dir : i32, k : i32, ox : i32, oy : i32, oz : i32, u : i32, v : i32) : void {
         let b : i32 = (dir * 4 + k) * 3;
-        this.coff[b] = ox;
-        this.coff[b + 1] = oy;
-        this.coff[b + 2] = oz;
+        self.coff[b] = ox;
+        self.coff[b + 1] = oy;
+        self.coff[b + 2] = oz;
         let q : i32 = dir * 4 + k;
-        this.uvu[q] = u;
-        this.uvv[q] = v;
+        self.uvu[q] = u;
+        self.uvv[q] = v;
     }
 
     /**
      * Fill the per-direction face corner / UV tables for all 6 cube faces.
      */
-    fn fillTable() : void {
-        this.setCorner(0, 0, 1, 0, 0, 0, 1);
-        this.setCorner(0, 1, 1, 0, 1, 1, 1);
-        this.setCorner(0, 2, 1, 1, 1, 1, 0);
-        this.setCorner(0, 3, 1, 1, 0, 0, 0);
-        this.setCorner(1, 0, 0, 0, 0, 0, 1);
-        this.setCorner(1, 1, 0, 1, 0, 0, 0);
-        this.setCorner(1, 2, 0, 1, 1, 1, 0);
-        this.setCorner(1, 3, 0, 0, 1, 1, 1);
-        this.setCorner(2, 0, 0, 1, 0, 0, 0);
-        this.setCorner(2, 1, 1, 1, 0, 1, 0);
-        this.setCorner(2, 2, 1, 1, 1, 1, 1);
-        this.setCorner(2, 3, 0, 1, 1, 0, 1);
-        this.setCorner(3, 0, 0, 0, 0, 0, 0);
-        this.setCorner(3, 1, 0, 0, 1, 0, 1);
-        this.setCorner(3, 2, 1, 0, 1, 1, 1);
-        this.setCorner(3, 3, 1, 0, 0, 1, 0);
-        this.setCorner(4, 0, 0, 0, 1, 0, 1);
-        this.setCorner(4, 1, 1, 0, 1, 1, 1);
-        this.setCorner(4, 2, 1, 1, 1, 1, 0);
-        this.setCorner(4, 3, 0, 1, 1, 0, 0);
-        this.setCorner(5, 0, 0, 0, 0, 0, 1);
-        this.setCorner(5, 1, 0, 1, 0, 0, 0);
-        this.setCorner(5, 2, 1, 1, 0, 1, 0);
-        this.setCorner(5, 3, 1, 0, 0, 1, 1);
+    fn fillTable(mut self) : void {
+        self.setCorner(0, 0, 1, 0, 0, 0, 1);
+        self.setCorner(0, 1, 1, 0, 1, 1, 1);
+        self.setCorner(0, 2, 1, 1, 1, 1, 0);
+        self.setCorner(0, 3, 1, 1, 0, 0, 0);
+        self.setCorner(1, 0, 0, 0, 0, 0, 1);
+        self.setCorner(1, 1, 0, 1, 0, 0, 0);
+        self.setCorner(1, 2, 0, 1, 1, 1, 0);
+        self.setCorner(1, 3, 0, 0, 1, 1, 1);
+        self.setCorner(2, 0, 0, 1, 0, 0, 0);
+        self.setCorner(2, 1, 1, 1, 0, 1, 0);
+        self.setCorner(2, 2, 1, 1, 1, 1, 1);
+        self.setCorner(2, 3, 0, 1, 1, 0, 1);
+        self.setCorner(3, 0, 0, 0, 0, 0, 0);
+        self.setCorner(3, 1, 0, 0, 1, 0, 1);
+        self.setCorner(3, 2, 1, 0, 1, 1, 1);
+        self.setCorner(3, 3, 1, 0, 0, 1, 0);
+        self.setCorner(4, 0, 0, 0, 1, 0, 1);
+        self.setCorner(4, 1, 1, 0, 1, 1, 1);
+        self.setCorner(4, 2, 1, 1, 1, 1, 0);
+        self.setCorner(4, 3, 0, 1, 1, 0, 0);
+        self.setCorner(5, 0, 0, 0, 0, 0, 1);
+        self.setCorner(5, 1, 0, 1, 0, 0, 0);
+        self.setCorner(5, 2, 1, 1, 0, 1, 0);
+        self.setCorner(5, 3, 1, 0, 0, 1, 1);
     }
 
     // ── Projection & near-plane clipping ──
@@ -262,8 +262,8 @@ class Renderer {
      * @param nz  normal z
      * @return brightness factor in [ambient, 1]
      */
-    fn shadeN(nx : f64, ny : f64, nz : f64) : f64 {
-        let ndl : f64 = nx * this.sunX + ny * this.sunY + nz * this.sunZ;
+    fn shadeN(self, nx : f64, ny : f64, nz : f64) : f64 {
+        let ndl : f64 = nx * self.sunX + ny * self.sunY + nz * self.sunZ;
         if (ndl < 0.0) {
             ndl = 0.0;
         }
@@ -281,15 +281,15 @@ class Renderer {
      * @param wz  world z of the point
      * @param k   scratch slot index to store the result in
      */
-    fn toCam(p : Player, wx : f64, wy : f64, wz : f64, k : i32) : void {
+    fn toCam(self, p : Player, wx : f64, wy : f64, wz : f64, k : i32) : void {
         let dx : f64 = wx - p.eye.x;
         let dy : f64 = wy - p.eye.y;
         let dz : f64 = wz - p.eye.z;
         let rx : f64 = dx * p.cosy + dz * p.siny;
         let rz : f64 = (0.0 - dx) * p.siny + dz * p.cosy;
-        setF64(this.cax, k, rx);
-        setF64(this.cay, k, dy * p.cosp - rz * p.sinp);
-        setF64(this.caz, k, dy * p.sinp + rz * p.cosp);
+        setF64(self.cax, k, rx);
+        setF64(self.cay, k, dy * p.cosp - rz * p.sinp);
+        setF64(self.caz, k, dy * p.sinp + rz * p.cosp);
     }
 
     /**
@@ -300,15 +300,15 @@ class Renderer {
      * @param t  blend parameter (0 at j, 1 at i)
      * @param o  output vertex slot
      */
-    fn emitLerp(j : i32, i : i32, t : f64, o : i32) : void {
-        setF64(this.cbx, o, getF64(this.cax, j) + (getF64(this.cax, i) - getF64(this.cax, j)) * t);
-        setF64(this.cby, o, getF64(this.cay, j) + (getF64(this.cay, i) - getF64(this.cay, j)) * t);
-        setF64(this.cbz, o, getF64(this.caz, j) + (getF64(this.caz, i) - getF64(this.caz, j)) * t);
-        setF64(this.cbu, o, getF64(this.cau, j) + (getF64(this.cau, i) - getF64(this.cau, j)) * t);
-        setF64(this.cbv, o, getF64(this.cav, j) + (getF64(this.cav, i) - getF64(this.cav, j)) * t);
-        setF64(this.cbr, o, getF64(this.car, j) + (getF64(this.car, i) - getF64(this.car, j)) * t);
-        setF64(this.cbg, o, getF64(this.cag, j) + (getF64(this.cag, i) - getF64(this.cag, j)) * t);
-        setF64(this.cbb, o, getF64(this.cab, j) + (getF64(this.cab, i) - getF64(this.cab, j)) * t);
+    fn emitLerp(self, j : i32, i : i32, t : f64, o : i32) : void {
+        setF64(self.cbx, o, getF64(self.cax, j) + (getF64(self.cax, i) - getF64(self.cax, j)) * t);
+        setF64(self.cby, o, getF64(self.cay, j) + (getF64(self.cay, i) - getF64(self.cay, j)) * t);
+        setF64(self.cbz, o, getF64(self.caz, j) + (getF64(self.caz, i) - getF64(self.caz, j)) * t);
+        setF64(self.cbu, o, getF64(self.cau, j) + (getF64(self.cau, i) - getF64(self.cau, j)) * t);
+        setF64(self.cbv, o, getF64(self.cav, j) + (getF64(self.cav, i) - getF64(self.cav, j)) * t);
+        setF64(self.cbr, o, getF64(self.car, j) + (getF64(self.car, i) - getF64(self.car, j)) * t);
+        setF64(self.cbg, o, getF64(self.cag, j) + (getF64(self.cag, i) - getF64(self.cag, j)) * t);
+        setF64(self.cbb, o, getF64(self.cab, j) + (getF64(self.cab, i) - getF64(self.cab, j)) * t);
     }
 
     /**
@@ -316,15 +316,15 @@ class Renderer {
      * @param i  input vertex slot
      * @param o  output vertex slot
      */
-    fn copyVert(i : i32, o : i32) : void {
-        setF64(this.cbx, o, getF64(this.cax, i));
-        setF64(this.cby, o, getF64(this.cay, i));
-        setF64(this.cbz, o, getF64(this.caz, i));
-        setF64(this.cbu, o, getF64(this.cau, i));
-        setF64(this.cbv, o, getF64(this.cav, i));
-        setF64(this.cbr, o, getF64(this.car, i));
-        setF64(this.cbg, o, getF64(this.cag, i));
-        setF64(this.cbb, o, getF64(this.cab, i));
+    fn copyVert(self, i : i32, o : i32) : void {
+        setF64(self.cbx, o, getF64(self.cax, i));
+        setF64(self.cby, o, getF64(self.cay, i));
+        setF64(self.cbz, o, getF64(self.caz, i));
+        setF64(self.cbu, o, getF64(self.cau, i));
+        setF64(self.cbv, o, getF64(self.cav, i));
+        setF64(self.cbr, o, getF64(self.car, i));
+        setF64(self.cbg, o, getF64(self.cag, i));
+        setF64(self.cbb, o, getF64(self.cab, i));
     }
 
     /**
@@ -336,22 +336,22 @@ class Renderer {
      * @param nIn  number of input vertices in the `ca*` buffers
      * @return number of output vertices written to the `cb*` buffers
      */
-    fn clipNear(nIn : i32) : i32 {
+    fn clipNear(self, nIn : i32) : i32 {
         let outN : i32 = 0;
         let j : i32 = nIn - 1;
         let i : i32 = 0;
         while (i < nIn) {
-            let zi : f64 = getF64(this.caz, i);
-            let zj : f64 = getF64(this.caz, j);
+            let zi : f64 = getF64(self.caz, i);
+            let zj : f64 = getF64(self.caz, j);
             let inI : bool = zi >= config::nearPlane;
             let inJ : bool = zj >= config::nearPlane;
             if (inI != inJ) {
                 let t : f64 = (config::nearPlane - zj) / (zi - zj);
-                this.emitLerp(j, i, t, outN);
+                self.emitLerp(j, i, t, outN);
                 outN = outN + 1;
             }
             if (inI) {
-                this.copyVert(i, outN);
+                self.copyVert(i, outN);
                 outN = outN + 1;
             }
             j = i;
@@ -373,7 +373,7 @@ class Renderer {
      * @param wz   world z
      * @return the classification value described above
      */
-    fn cornerSample(man : ChunkManager, wx : i32, y : i32, wz : i32) : f64 {
+    fn cornerSample(self, man : ChunkManager, wx : i32, y : i32, wz : i32) : f64 {
         let id : Block = man.worldGet(ivec3(wx, y, wz));
         if (id == Block::Air) {
             return 0.0 - 1.0;
@@ -401,11 +401,11 @@ class Renderer {
      * @param cz   corner world z (a block boundary)
      * @return the corner height fraction (0..1)
      */
-    fn waterCornerY(man : ChunkManager, cx : i32, y : i32, cz : i32) : f64 {
-        let s0 : f64 = this.cornerSample(man, cx - 1, y, cz - 1);
-        let s1 : f64 = this.cornerSample(man, cx, y, cz - 1);
-        let s2 : f64 = this.cornerSample(man, cx - 1, y, cz);
-        let s3 : f64 = this.cornerSample(man, cx, y, cz);
+    fn waterCornerY(self, man : ChunkManager, cx : i32, y : i32, cz : i32) : f64 {
+        let s0 : f64 = self.cornerSample(man, cx - 1, y, cz - 1);
+        let s1 : f64 = self.cornerSample(man, cx, y, cz - 1);
+        let s2 : f64 = self.cornerSample(man, cx - 1, y, cz);
+        let s3 : f64 = self.cornerSample(man, cx, y, cz);
         if (s0 > 1.5 || s1 > 1.5 || s2 > 1.5 || s3 > 1.5) {
             return 1.0;   // a source / column corner stays full height
         }
@@ -457,7 +457,7 @@ class Renderer {
      * @param p       player providing the eye position and orientation
      * @param phase   animation time phase (scrolls flowing-water textures)
      */
-    fn renderFace(man : ChunkManager, idx : i32, p : Player, phase : f64) : void {
+    fn renderFace(mut self, man : ChunkManager, idx : i32, p : Player, phase : f64) : void {
         let x : i32 = man.fx[idx];
         let y : i32 = man.fy[idx];
         let z : i32 = man.fz[idx];
@@ -531,7 +531,7 @@ class Renderer {
 
         // Face-direction (Lambert) shading + the directional sun shadow, shared
         // by all 4 corners (computed once before the per-corner light below).
-        let bright : f64 = this.shadeN(nx, ny, nz);
+        let bright : f64 = self.shadeN(nx, ny, nz);
         if (isWaterFace && facing <= 0.0) {
             bright = bright * 0.62;   // underside / far face of water, dimmer
         }
@@ -581,18 +581,18 @@ class Renderer {
         let k : i32 = 0;
         while (k < 4) {
             let b : i32 = (di * 4 + k) * 3;
-            let oxv : i32 = this.coff[b];
-            let oyv : i32 = this.coff[b + 1];
-            let ozv : i32 = this.coff[b + 2];
+            let oxv : i32 = self.coff[b];
+            let oyv : i32 = self.coff[b + 1];
+            let ozv : i32 = self.coff[b + 2];
             let cornerY : f64 = (y as f64) + (oyv as f64);
             if (isWaterFace && oyv > 0) {
-                cornerY = (y as f64) + this.waterCornerY(man, x + oxv, y, z + ozv);
+                cornerY = (y as f64) + self.waterCornerY(man, x + oxv, y, z + ozv);
             } else if (isPartialFace && oyv > 0) {
                 cornerY = (y as f64) + boxH;
             }
-            this.toCam(p, (x + oxv) as f64, cornerY, (z + ozv) as f64, k);
-            setF64(this.cau, k, (this.uvu[q + k] as f64) + flowU);
-            setF64(this.cav, k, (this.uvv[q + k] as f64) + flowV);
+            self.toCam(p, (x + oxv) as f64, cornerY, (z + ozv) as f64, k);
+            setF64(self.cau, k, (self.uvu[q + k] as f64) + flowU);
+            setF64(self.cav, k, (self.uvv[q + k] as f64) + flowV);
             // Per-corner SOFT CAST SHADOW: average the soft sun-visibility over
             // the 4 air cells meeting at this corner (symmetric → continuous
             // across faces, no block staircase), then keep that fraction of the
@@ -634,8 +634,8 @@ class Renderer {
             let blkLk : i32 = lb & 0xF;
             let aok : i32 = readU8(man.fao, (idx * 4 + k) as i64);
             let aoFac : f64 = 1.0 - config::aoStrength * ((3 - aok) as f64) * 0.3333333;
-            let skyFk : f64 = getF64(this.lcurve, skyLk) * this.daylight * skyAOFac;
-            let blkFk : f64 = getF64(this.lcurve, blkLk);
+            let skyFk : f64 = getF64(self.lcurve, skyLk) * self.daylight * skyAOFac;
+            let blkFk : f64 = getF64(self.lcurve, blkLk);
             let cfk : f64 = skyFk;
             if (blkFk > cfk) {
                 cfk = blkFk;
@@ -651,7 +651,7 @@ class Renderer {
             if (brightK > config::ambient) {
                 directK = (brightK - config::ambient) / (1.0 - config::ambient);
             }
-            let wsunK : f64 = directK * this.daylight;
+            let wsunK : f64 = directK * self.daylight;
             let tintRk : f64 = (config::shadeTintR + (config::sunTintR - config::shadeTintR) * wsunK) * bncR;
             let tintGk : f64 = (config::shadeTintG + (config::sunTintG - config::shadeTintG) * wsunK) * bncG;
             let tintBk : f64 = (config::shadeTintB + (config::sunTintB - config::shadeTintB) * wsunK) * bncB;
@@ -677,9 +677,9 @@ class Renderer {
                 vz = vz / vl;
                 // Sun glint: half-vector specular, cos^32, gated by sun visibility
                 // and daylight. A strong warm multiplier that bloom turns to gold.
-                let hx : f64 = vx + this.sunX;
-                let hy : f64 = vy + this.sunY;
-                let hz : f64 = vz + this.sunZ;
+                let hx : f64 = vx + self.sunX;
+                let hy : f64 = vy + self.sunY;
+                let hz : f64 = vz + self.sunZ;
                 let hl : f64 = Math::sqrt(hx * hx + hy * hy + hz * hz);
                 if (hl < 0.0001) {
                     hl = 0.0001;
@@ -692,7 +692,7 @@ class Renderer {
                 let s4 : f64 = s2 * s2;
                 let s8 : f64 = s4 * s4;
                 let s16 : f64 = s8 * s8;
-                let spec : f64 = s16 * s16 * visK * this.daylight * config::waterSpecStrength;
+                let spec : f64 = s16 * s16 * visK * self.daylight * config::waterSpecStrength;
                 // Fresnel: brighter at grazing view angles (sky-reflection sheen).
                 let ndv : f64 = nx * vx + ny * vy + nz * vz;
                 if (ndv < 0.0) {
@@ -706,14 +706,14 @@ class Renderer {
                 cgk = cgk * fboost * (1.0 + spec * 1.00);
                 cbk = cbk * fboost * (1.0 + spec * 0.72);
             }
-            setF64(this.car, k, crk);
-            setF64(this.cag, k, cgk);
-            setF64(this.cab, k, cbk);
+            setF64(self.car, k, crk);
+            setF64(self.cag, k, cgk);
+            setF64(self.cab, k, cbk);
             k = k + 1;
         }
 
         // Clip against the near plane, then project the surviving polygon.
-        let n : i32 = this.clipNear(4);
+        let n : i32 = self.clipNear(4);
         if (n < 3) {
             return;
         }
@@ -724,10 +724,10 @@ class Renderer {
         // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
         let v : i32 = 0;
         while (v < n) {
-            let rz2 : f64 = getF64(this.cbz, v);
-            setF64(this.csx, v, this.hw + config::focal * getF64(this.cbx, v) / rz2);
-            setF64(this.csy, v, config::halfH - config::focal * getF64(this.cby, v) / rz2);
-            setF64(this.ciz, v, 1.0 / rz2);
+            let rz2 : f64 = getF64(self.cbz, v);
+            setF64(self.csx, v, self.hw + config::focal * getF64(self.cbx, v) / rz2);
+            setF64(self.csy, v, config::halfH - config::focal * getF64(self.cby, v) / rz2);
+            setF64(self.ciz, v, 1.0 / rz2);
             v = v + 1;
         }
 
@@ -741,15 +741,15 @@ class Renderer {
         }
         let t : i32 = 1;
         while (t < n - 1) {
-            if (this.triN < config::triQueueCap) {
-                this.triBuf[this.triN] = RasterTri {
-                    a: RasterVert { sx: getF64(this.csx, 0), sy: getF64(this.csy, 0), iz: getF64(this.ciz, 0), u: getF64(this.cbu, 0), v: getF64(this.cbv, 0), tr: getF64(this.cbr, 0), tg: getF64(this.cbg, 0), tb: getF64(this.cbb, 0) },
-                    b: RasterVert { sx: getF64(this.csx, t), sy: getF64(this.csy, t), iz: getF64(this.ciz, t), u: getF64(this.cbu, t), v: getF64(this.cbv, t), tr: getF64(this.cbr, t), tg: getF64(this.cbg, t), tb: getF64(this.cbb, t) },
-                    c: RasterVert { sx: getF64(this.csx, t + 1), sy: getF64(this.csy, t + 1), iz: getF64(this.ciz, t + 1), u: getF64(this.cbu, t + 1), v: getF64(this.cbv, t + 1), tr: getF64(this.cbr, t + 1), tg: getF64(this.cbg, t + 1), tb: getF64(this.cbb, t + 1) },
+            if (self.triN < config::triQueueCap) {
+                self.triBuf[self.triN] = RasterTri {
+                    a: RasterVert { sx: getF64(self.csx, 0), sy: getF64(self.csy, 0), iz: getF64(self.ciz, 0), u: getF64(self.cbu, 0), v: getF64(self.cbv, 0), tr: getF64(self.cbr, 0), tg: getF64(self.cbg, 0), tb: getF64(self.cbb, 0) },
+                    b: RasterVert { sx: getF64(self.csx, t), sy: getF64(self.csy, t), iz: getF64(self.ciz, t), u: getF64(self.cbu, t), v: getF64(self.cbv, t), tr: getF64(self.cbr, t), tg: getF64(self.cbg, t), tb: getF64(self.cbb, t) },
+                    c: RasterVert { sx: getF64(self.csx, t + 1), sy: getF64(self.csy, t + 1), iz: getF64(self.ciz, t + 1), u: getF64(self.cbu, t + 1), v: getF64(self.cbv, t + 1), tr: getF64(self.cbr, t + 1), tg: getF64(self.cbg, t + 1), tb: getF64(self.cbb, t + 1) },
                     tile: tile,
                     wrap: wf
                 };
-                this.triN = this.triN + 1;
+                self.triN = self.triN + 1;
             }
             t = t + 1;
         }
@@ -766,7 +766,7 @@ class Renderer {
      * @param cz  chunk z index
      * @return true if the chunk should be drawn
      */
-    fn chunkVisible(p : Player, cx : i32, cz : i32) : bool {
+    fn chunkVisible(self, p : Player, cx : i32, cz : i32) : bool {
         let s : f64 = config::chunkSize as f64;
         let wx : f64 = (cx as f64) * s + s * 0.5;
         let wz : f64 = (cz as f64) * s + s * 0.5;
@@ -795,15 +795,15 @@ class Renderer {
      * @param dayTime  time of day in [0, 1)
      * @return the day/night state for this frame
      */
-    fn updateDayState(dayTime : f64) : DayState {
+    fn updateDayState(mut self, dayTime : f64) : DayState {
         let ds : DayState = computeDayState(dayTime);
-        this.sunX = ds.sunX;
-        this.sunY = ds.sunY;
-        this.sunZ = ds.sunZ;
-        this.daylight = ds.daylight;
-        this.skyColR = ds.skyColR;
-        this.skyColG = ds.skyColG;
-        this.skyColB = ds.skyColB;
+        self.sunX = ds.sunX;
+        self.sunY = ds.sunY;
+        self.sunZ = ds.sunZ;
+        self.daylight = ds.daylight;
+        self.skyColR = ds.skyColR;
+        self.skyColG = ds.skyColG;
+        self.skyColB = ds.skyColB;
         return ds;
     }
 
@@ -819,37 +819,37 @@ class Renderer {
      * @param p   player (camera orientation)
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
-    fn godRays(p : Player, fb : FrameBuf) : void {
-        if (!config::godRaysOn || this.sunY < 0.02) {
+    fn godRays(self, p : Player, fb : FrameBuf) : void {
+        if (!config::godRaysOn || self.sunY < 0.02) {
             return;
         }
         // Project the sun direction to screen (mirrors drawSky).
-        let rx : f64 = this.sunX * p.cosy + this.sunZ * p.siny;
-        let rz : f64 = (0.0 - this.sunX) * p.siny + this.sunZ * p.cosy;
-        let ry2 : f64 = this.sunY * p.cosp - rz * p.sinp;
-        let rz2 : f64 = this.sunY * p.sinp + rz * p.cosp;
+        let rx : f64 = self.sunX * p.cosy + self.sunZ * p.siny;
+        let rz : f64 = (0.0 - self.sunX) * p.siny + self.sunZ * p.cosy;
+        let ry2 : f64 = self.sunY * p.cosp - rz * p.sinp;
+        let rz2 : f64 = self.sunY * p.sinp + rz * p.cosp;
         if (rz2 < 0.05) {
             return;   // sun behind the camera
         }
         // Overall exposure: fade in as the sun climbs, scale by daylight.
-        let climb : f64 = this.sunY * 4.0;
+        let climb : f64 = self.sunY * 4.0;
         if (climb > 1.0) {
             climb = 1.0;
         }
-        let expo : f64 = config::godRayWeight * this.daylight * climb;
+        let expo : f64 = config::godRayWeight * self.daylight * climb;
         if (expo <= 0.0) {
             return;
         }
         let sun : SunScreen = SunScreen {
-            sunSx: this.hw + config::focal * rx / rz2,
+            sunSx: self.hw + config::focal * rx / rz2,
             sunSy: config::halfH - config::focal * ry2 / rz2,
             expo: expo,
         };
         // Split the rows across two threads (disjoint output rows → race-free):
         // a worker does the top half while the main thread does the bottom half.
         let half : i32 = fb.h / 2;
-        let tk : Task<i32> = spawn godRaysJob(this, fb, 0, half, sun);
-        this.godRaysRows(fb, half, fb.h, sun);
+        let tk : Task<i32> = spawn godRaysJob(self, fb, 0, half, sun);
+        self.godRaysRows(fb, half, fb.h, sun);
         let d : i32 = tk.join();
     }
 
@@ -861,7 +861,7 @@ class Renderer {
      * @param y1   last screen row (exclusive)
      * @param sun  the sun's screen position + exposure
      */
-    fn godRaysRows(fb : FrameBuf, y0 : i32, y1 : i32, sun : SunScreen) : void {
+    fn godRaysRows(self, fb : FrameBuf, y0 : i32, y1 : i32, sun : SunScreen) : void {
         let pixels : i64 = fb.pixels;
         let zbuf : i64 = fb.zbuf;
         let w : i32 = fb.w;
@@ -898,8 +898,8 @@ class Renderer {
      * threshold are untouched. Call after the sky/world/god-rays, before the HUD.
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
-    fn bloomPass(fb : FrameBuf) : void {
-        this.bloom.run(fb.pixels, fb.w, fb.h);
+    fn bloomPass(self, fb : FrameBuf) : void {
+        self.bloom.run(fb.pixels, fb.w, fb.h);
     }
 
     // ── World pass (clear → sky → project/clip → parallel raster) ──
@@ -918,11 +918,11 @@ class Renderer {
      * @param phase      animation time phase (scrolls flowing-water textures)
      * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
      */
-    fn render(man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
+    fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
         let w : i32 = fb.w;
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
-        let ds : DayState = this.updateDayState(dayTime);
+        let ds : DayState = self.updateDayState(dayTime);
         // Underwater the cleared "void" becomes deep water instead of sky.
         let bg : i32 = rgb(ds.skyColR, ds.skyColG, ds.skyColB);
         if (underwater) {
@@ -932,22 +932,22 @@ class Renderer {
         // Atmospheric sky gradient + warm sun halo over the cleared frame, then
         // the sun/moon discs ride on top — all behind the world (above water).
         if (!underwater) {
-            drawSkyGradient(ds, p, fb, this.hw);
-            drawCelestial(ds, p, fb, this.hw);
+            drawSkyGradient(ds, p, fb, self.hw);
+            drawCelestial(ds, p, fb, self.hw);
         }
         // World pass — single thread: project / light / clip every visible face
-        // into the triangle queue (this.triBuf / triN). Then the queue is
+        // into the triangle queue (self.triBuf / triN). Then the queue is
         // rasterised in parallel column bands below.
-        this.triN = 0;
+        self.triN = 0;
         let slots : i32 = config::span * config::span;
         let slot : i32 = 0;
         while (slot < slots) {
-            if (man.loaded[slot] == 1 && this.chunkVisible(p, man.cxs[slot], man.czs[slot])) {
+            if (man.loaded[slot] == 1 && self.chunkVisible(p, man.cxs[slot], man.czs[slot])) {
                 let base : i32 = slot * config::maxFacesPerChunk;
                 let n : i32 = man.fcount[slot];
                 let fi : i32 = 0;
                 while (fi < n) {
-                    this.renderFace(man, base + fi, p, phase);
+                    self.renderFace(man, base + fi, p, phase);
                     fi = fi + 1;
                 }
             }
@@ -960,20 +960,20 @@ class Renderer {
         let nT : i32 = config::rasterTiles;
         if (nT >= 4) {
             let bw : i32 = (w + 3) / 4;
-            let ta : Task<i32> = spawn rasterTilesJob(this, fb, bw, bw * 2);
-            let tb : Task<i32> = spawn rasterTilesJob(this, fb, bw * 2, bw * 3);
-            let tc : Task<i32> = spawn rasterTilesJob(this, fb, bw * 3, w);
-            this.rasterizeBand(fb, 0, bw);
+            let ta : Task<i32> = spawn rasterTilesJob(self, fb, bw, bw * 2);
+            let tb : Task<i32> = spawn rasterTilesJob(self, fb, bw * 2, bw * 3);
+            let tc : Task<i32> = spawn rasterTilesJob(self, fb, bw * 3, w);
+            self.rasterizeBand(fb, 0, bw);
             let da : i32 = ta.join();
             let db : i32 = tb.join();
             let dc : i32 = tc.join();
         } else if (nT == 2) {
             let bw : i32 = (w + 1) / 2;
-            let ta : Task<i32> = spawn rasterTilesJob(this, fb, bw, w);
-            this.rasterizeBand(fb, 0, bw);
+            let ta : Task<i32> = spawn rasterTilesJob(self, fb, bw, w);
+            self.rasterizeBand(fb, 0, bw);
             let da : i32 = ta.join();
         } else {
-            this.rasterizeBand(fb, 0, w);
+            self.rasterizeBand(fb, 0, w);
         }
     }
 
@@ -985,13 +985,13 @@ class Renderer {
      * @param bx0  inclusive left screen column of this band
      * @param bx1  exclusive right screen column of this band
      */
-    fn rasterizeBand(fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
+    fn rasterizeBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
         let i : i32 = 0;
-        let atlas : MipAtlas = MipAtlas { mips: this.mips, mipOff: this.mipOff, mipSz: this.mipSz };
-        let fogCol : Rgb = Rgb { r: this.skyColR, g: this.skyColG, b: this.skyColB };
+        let atlas : MipAtlas = MipAtlas { mips: self.mips, mipOff: self.mipOff, mipSz: self.mipSz };
+        let fogCol : Rgb = Rgb { r: self.skyColR, g: self.skyColG, b: self.skyColB };
         let band : Band = Band { x0: bx0, x1: bx1 };
-        while (i < this.triN) {
-            let tri : RasterTri = this.triBuf[i];
+        while (i < self.triN) {
+            let tri : RasterTri = self.triBuf[i];
             rasterTriTex(fb, tri, atlas, fogCol, band);
             i = i + 1;
         }
@@ -1005,15 +1005,15 @@ class Renderer {
      * @param p    player providing the eye position and orientation
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
-    fn renderTorches(man : ChunkManager, p : Player, fb : FrameBuf) : void {
+    fn renderTorches(self, man : ChunkManager, p : Player, fb : FrameBuf) : void {
         let hw : f64 = 0.09;
         let ht : f64 = 0.55;
         let mat : Material = Material { color: rgb(240, 180, 70), tile: config::tlTorch, hurt: false };
-        let scene : MobScene = this.mobScene();
+        let scene : MobScene = self.mobScene();
         let slots : i32 = config::span * config::span;
         let slot : i32 = 0;
         while (slot < slots) {
-            if (man.loaded[slot] == 1 && this.chunkVisible(p, man.cxs[slot], man.czs[slot])) {
+            if (man.loaded[slot] == 1 && self.chunkVisible(p, man.cxs[slot], man.czs[slot])) {
                 let base : i32 = slot * config::maxTorchesPerChunk;
                 let n : i32 = man.tcount[slot];
                 let ti : i32 = 0;
@@ -1026,11 +1026,11 @@ class Renderer {
                     let z1 : f64 = cz + hw;
                     let y0 : f64 = man.ty[base + ti] as f64;
                     let y1 : f64 = y0 + ht;
-                    this.mobs.drawQuad(p, fb, vec3(x1, y0, z1), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(1.0, 0.0, 0.0), mat, scene);
-                    this.mobs.drawQuad(p, fb, vec3(x0, y0, z0), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x0, y1, z0), vec3(0.0 - 1.0, 0.0, 0.0), mat, scene);
-                    this.mobs.drawQuad(p, fb, vec3(x0, y0, z1), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 0.0, 1.0), mat, scene);
-                    this.mobs.drawQuad(p, fb, vec3(x1, y0, z0), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(0.0, 0.0, 0.0 - 1.0), mat, scene);
-                    this.mobs.drawQuad(p, fb, vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 1.0, 0.0), mat, scene);
+                    self.mobs.drawQuad(p, fb, vec3(x1, y0, z1), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(1.0, 0.0, 0.0), mat, scene);
+                    self.mobs.drawQuad(p, fb, vec3(x0, y0, z0), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x0, y1, z0), vec3(0.0 - 1.0, 0.0, 0.0), mat, scene);
+                    self.mobs.drawQuad(p, fb, vec3(x0, y0, z1), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 0.0, 1.0), mat, scene);
+                    self.mobs.drawQuad(p, fb, vec3(x1, y0, z0), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(0.0, 0.0, 0.0 - 1.0), mat, scene);
+                    self.mobs.drawQuad(p, fb, vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 1.0, 0.0), mat, scene);
                     ti = ti + 1;
                 }
             }
@@ -1044,16 +1044,16 @@ class Renderer {
      * plus the projection half-width. Handed to the MobView draws each frame.
      * @return the per-frame mob scene context
      */
-    fn mobScene() : MobScene {
+    fn mobScene(self) : MobScene {
         return MobScene {
-            atlas: MipAtlas { mips: this.mips, mipOff: this.mipOff, mipSz: this.mipSz },
-            fog: Rgb { r: this.skyColR, g: this.skyColG, b: this.skyColB },
+            atlas: MipAtlas { mips: self.mips, mipOff: self.mipOff, mipSz: self.mipSz },
+            fog: Rgb { r: self.skyColR, g: self.skyColG, b: self.skyColB },
             ds: DayState {
-                sunX: this.sunX, sunY: this.sunY, sunZ: this.sunZ,
-                daylight: this.daylight,
-                skyColR: this.skyColR, skyColG: this.skyColG, skyColB: this.skyColB,
+                sunX: self.sunX, sunY: self.sunY, sunZ: self.sunZ,
+                daylight: self.daylight,
+                skyColR: self.skyColR, skyColG: self.skyColG, skyColB: self.skyColB,
             },
-            hw: this.hw,
+            hw: self.hw,
         };
     }
 
@@ -1065,7 +1065,7 @@ class Renderer {
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param phase  time phase that animates the caustics
      */
-    fn underwaterOverlay(fb : FrameBuf, phase : f64) : void {
+    fn underwaterOverlay(self, fb : FrameBuf, phase : f64) : void {
         let pixels : i64 = fb.pixels;
         let zbuf : i64 = fb.zbuf;
         let w : i32 = fb.w;
@@ -1122,11 +1122,11 @@ class Renderer {
             // Column wobbles with height + its own phase → wavy, not a streak.
             let wob : f64 = Math::sin(phase * 0.4 + (bi as f64) * 1.7 + (yy as f64) * 0.07) * 3.0;
             let bx : i32 = (hx % w) + Math::floorToInt(wob) as i32;
-            this.plotBubble(fb, bx, yy, bcol);
+            self.plotBubble(fb, bx, yy, bcol);
             // Vary size: about half are a 2-px mote, the rest a single pixel.
             if ((hs & 1) == 0) {
-                this.plotBubble(fb, bx + 1, yy, bcol);
-                this.plotBubble(fb, bx, yy - 1, bcol);
+                self.plotBubble(fb, bx + 1, yy, bcol);
+                self.plotBubble(fb, bx, yy - 1, bcol);
             }
             bi = bi + 1;
         }
@@ -1139,7 +1139,7 @@ class Renderer {
      * @param y    pixel y
      * @param col  bubble colour
      */
-    fn plotBubble(fb : FrameBuf, x : i32, y : i32, col : i32) : void {
+    fn plotBubble(self, fb : FrameBuf, x : i32, y : i32, col : i32) : void {
         let pixels : i64 = fb.pixels;
         let w : i32 = fb.w;
         let h : i32 = fb.h;
@@ -1164,15 +1164,15 @@ class Renderer {
      * @param p    player providing the eye position and orientation
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
-    fn renderMobs(man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf) : void {
-        this.mobs.drawAll(man, mm, p, fb, this.mobScene(), this.lcurve);
+    fn renderMobs(self, man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf) : void {
+        self.mobs.drawAll(man, mm, p, fb, self.mobScene(), self.lcurve);
     }
 
     /**
      * Draw the centre-screen crosshair.
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
-    fn crosshair(fb : FrameBuf) : void {
+    fn crosshair(self, fb : FrameBuf) : void {
         let pixels : i64 = fb.pixels;
         let w : i32 = fb.w;
         let h : i32 = fb.h;
@@ -1200,8 +1200,8 @@ class Renderer {
      * @param topH  the block's real box height (1.0 full, snowDepth for a thin
      *              snow layer) so the outline hugs the true box, not a cube
      */
-    fn drawSelection(p : Player, fb : FrameBuf, bx : i32, by : i32, bz : i32, topH : f64) : void {
-        this.sel.draw(p, fb, this.hw, bx, by, bz, topH);
+    fn drawSelection(self, p : Player, fb : FrameBuf, bx : i32, by : i32, bz : i32, topH : f64) : void {
+        self.sel.draw(p, fb, self.hw, bx, by, bz, topH);
     }
 }
 

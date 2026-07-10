@@ -26,10 +26,10 @@ class Biome {
      * these fields in their own constructor after calling `super()`.
      */
     constructor() {
-        this.fillerBlock = Block::Dirt;
-        this.treeThresh = 1.1;
-        this.treeKindId = TreeKind::None;
-        this.treeHt = 0;
+        self.fillerBlock = Block::Dirt;
+        self.treeThresh = 1.1;
+        self.treeKindId = TreeKind::None;
+        self.treeHt = 0;
     }
 
     /**
@@ -37,7 +37,7 @@ class Biome {
      * @param height  the column's surface height
      * @return the surface block
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::Grass;
     }
 }

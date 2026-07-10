@@ -29,30 +29,30 @@ class GameClock {
      * Start the clock at the current time with an empty accumulator.
      */
     constructor() {
-        this.msPerTick = 1000 / config::tickHz;
-        this.maxAccum = this.msPerTick * 8;   // cap catch-up to 8 steps
-        this.accLast = ticks();
-        this.acc = 0;
-        this.capLast = ticks();
+        self.msPerTick = 1000 / config::tickHz;
+        self.maxAccum = self.msPerTick * 8;   // cap catch-up to 8 steps
+        self.accLast = ticks();
+        self.acc = 0;
+        self.capLast = ticks();
     }
 
     /**
      * Number of fixed simulation steps to run this frame.
      * @return how many fixed simulation steps are due this frame
      */
-    fn steps() : i32 {
+    fn steps(mut self) : i32 {
         let now : i32 = ticks();
-        let dt : i32 = now - this.accLast;
-        this.accLast = now;
+        let dt : i32 = now - self.accLast;
+        self.accLast = now;
         if (dt < 0) {
             dt = 0;
         }
-        this.acc = this.acc + dt;
-        if (this.acc > this.maxAccum) {
-            this.acc = this.maxAccum;
+        self.acc = self.acc + dt;
+        if (self.acc > self.maxAccum) {
+            self.acc = self.maxAccum;
         }
-        let n : i32 = this.acc / this.msPerTick;
-        this.acc = this.acc - n * this.msPerTick;
+        let n : i32 = self.acc / self.msPerTick;
+        self.acc = self.acc - n * self.msPerTick;
         return n;
     }
 
@@ -60,12 +60,12 @@ class GameClock {
      * Sleep any unused frame budget to hold the loop near `tickHz` and
      * keep the CPU idle between frames.
      */
-    fn cap() : void {
+    fn cap(mut self) : void {
         let now : i32 = ticks();
-        let dt : i32 = now - this.capLast;
-        if (dt >= 0 && dt < this.msPerTick) {
-            delay(this.msPerTick - dt);
+        let dt : i32 = now - self.capLast;
+        if (dt >= 0 && dt < self.msPerTick) {
+            delay(self.msPerTick - dt);
         }
-        this.capLast = ticks();
+        self.capLast = ticks();
     }
 }

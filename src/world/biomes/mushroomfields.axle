@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class MushroomFields extends Biome {
+class MushroomFields : Biome {
     /** Construct the mushroom fields biome. */
     constructor() {
         super();
-        this.treeThresh = 0.955;
-        this.treeKindId = TreeKind::RedMushroom;
-        this.treeHt = 4;
+        self.treeThresh = 0.955;
+        self.treeKindId = TreeKind::RedMushroom;
+        self.treeHt = 4;
     }
 
     /**
@@ -18,7 +18,7 @@ class MushroomFields extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::Mycelium;
     }
 }

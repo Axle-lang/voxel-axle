@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class Jungle extends Biome {
+class Jungle : Biome {
     /** Construct the jungle biome. */
     constructor() {
         super();
-        this.treeThresh = 0.865;
-        this.treeKindId = TreeKind::Jungle;
-        this.treeHt = 8;
+        self.treeThresh = 0.865;
+        self.treeKindId = TreeKind::Jungle;
+        self.treeHt = 8;
     }
 
     /**
@@ -18,7 +18,7 @@ class Jungle extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::GrassJungle;
     }
 }

@@ -80,45 +80,45 @@ class AudioManager {
 
     /** Open the mixer, resolve the sounds/ prefix and load every bank. */
     constructor() {
-        this.mixer = new Mixer();
-        this.lock = new AtomicBoolean(false);
-        this.running = new AtomicBoolean(true);
-        this.base = "assets/sounds/";
+        self.mixer = new Mixer();
+        self.lock = new AtomicBoolean(false);
+        self.running = new AtomicBoolean(true);
+        self.base = "assets/sounds/";
         if (!fileExists("assets/sounds/step/grass/1.wav")) {
-            this.base = "../assets/sounds/";
+            self.base = "../assets/sounds/";
         }
 
         // Per-material footstep + dig banks (variants auto-discovered 1..8).
-        this.footstepBanks = malloc<SoundBank>(config::matCount);
-        this.digBanks = malloc<SoundBank>(config::matCount);
+        self.footstepBanks = malloc<SoundBank>(config::matCount);
+        self.digBanks = malloc<SoundBank>(config::matCount);
         let m : i32 = 0;
         while (m < config::matCount) {
             let mat : AudioMaterial = materialAt(m);
             let fb : SoundBank = new SoundBank(8);
-            this.loadDir(fb, "step/" + matFolder(mat));
-            this.footstepBanks[m] = fb;
+            self.loadDir(fb, "step/" + matFolder(mat));
+            self.footstepBanks[m] = fb;
             let db : SoundBank = new SoundBank(8);
-            this.loadDir(db, "dig/" + matFolder(mat));
-            this.digBanks[m] = db;
+            self.loadDir(db, "dig/" + matFolder(mat));
+            self.digBanks[m] = db;
             m = m + 1;
         }
 
-        this.chickenSayBank = this.bankFrom("mob/chicken/say");
-        this.chickenHurtBank = this.bankFrom("mob/chicken/hurt");
-        this.cowSayBank = this.bankFrom("mob/cow/say");
-        this.cowHurtBank = this.bankFrom("mob/cow/hurt");
-        this.sheepSayBank = this.bankFrom("mob/sheep/say");
-        this.pigSayBank = this.bankFrom("mob/pig/say");
-        this.playerHurtBank = this.bankFrom("player/hurt");
-        this.splashBank = this.bankFrom("player/splash");
-        this.ambientUWBank = this.bankFrom("ambient/underwater");
+        self.chickenSayBank = self.bankFrom("mob/chicken/say");
+        self.chickenHurtBank = self.bankFrom("mob/chicken/hurt");
+        self.cowSayBank = self.bankFrom("mob/cow/say");
+        self.cowHurtBank = self.bankFrom("mob/cow/hurt");
+        self.sheepSayBank = self.bankFrom("mob/sheep/say");
+        self.pigSayBank = self.bankFrom("mob/pig/say");
+        self.playerHurtBank = self.bankFrom("player/hurt");
+        self.splashBank = self.bankFrom("player/splash");
+        self.ambientUWBank = self.bankFrom("ambient/underwater");
 
         // The creeper's charge / blast are single bespoke files (not numbered
         // variant folders), so load them directly.
-        this.creeperChargeBank = new SoundBank(1);
-        this.creeperChargeBank.add(this.base + "mob/creeper/charge.wav");
-        this.creeperBlastBank = new SoundBank(1);
-        this.creeperBlastBank.add(this.base + "mob/creeper/exploded.wav");
+        self.creeperChargeBank = new SoundBank(1);
+        self.creeperChargeBank.add(self.base + "mob/creeper/charge.wav");
+        self.creeperBlastBank = new SoundBank(1);
+        self.creeperBlastBank.add(self.base + "mob/creeper/exploded.wav");
     }
 
     /**
@@ -127,10 +127,10 @@ class AudioManager {
      * @param bank  the bank to fill
      * @param rel   the folder, relative to the sounds prefix
      */
-    fn loadDir(bank : SoundBank, rel : string) : void {
+    fn loadDir(self, bank : SoundBank, rel : string) : void {
         let i : i32 = 1;
         while (i <= 8) {
-            bank.add(this.base + rel + "/" + i + ".wav");
+            bank.add(self.base + rel + "/" + i + ".wav");
             i = i + 1;
         }
     }
@@ -140,9 +140,9 @@ class AudioManager {
      * @param rel  the folder, relative to the sounds prefix
      * @return the loaded bank
      */
-    fn bankFrom(rel : string) : SoundBank {
+    fn bankFrom(self, rel : string) : SoundBank {
         let b : SoundBank = new SoundBank(8);
-        this.loadDir(b, rel);
+        self.loadDir(b, rel);
         return b;
     }
 
@@ -152,21 +152,21 @@ class AudioManager {
      * @param y  listener y
      * @param z  listener z
      */
-    fn setListener(x : f64, y : f64, z : f64) : void {
-        this.acquire();
-        this.mixer.setListener(x, y, z);
-        this.release();
+    fn setListener(self, x : f64, y : f64, z : f64) : void {
+        self.acquire();
+        self.mixer.setListener(x, y, z);
+        self.release();
     }
 
     /** Spin until this thread owns the mixer lock (short critical sections). */
-    fn acquire() : void {
-        while (!this.lock.compareAndSet(false, true)) {
+    fn acquire(self) : void {
+        while (!self.lock.compareAndSet(false, true)) {
         }
     }
 
     /** Release the mixer lock. */
-    fn release() : void {
-        this.lock.set(false);
+    fn release(self) : void {
+        self.lock.set(false);
     }
 
     /**
@@ -174,20 +174,20 @@ class AudioManager {
      * audio thread (audioLoop), NOT per frame — so a slow render/bake frame can
      * no longer starve the queue and make the sound stutter.
      */
-    fn pumpTick() : void {
-        this.acquire();
-        this.mixer.pump();
-        this.release();
+    fn pumpTick(self) : void {
+        self.acquire();
+        self.mixer.pump();
+        self.release();
     }
 
     /** Signal the audio thread to stop (call before joining it on quit). */
-    fn stop() : void {
-        this.running.set(false);
+    fn stop(self) : void {
+        self.running.set(false);
     }
 
     /** Whether the audio thread should keep running. */
-    fn isRunning() : bool {
-        return this.running.get();
+    fn isRunning(self) : bool {
+        return self.running.get();
     }
 
     /**
@@ -195,15 +195,15 @@ class AudioManager {
      * @param blockId  the block stepped on
      * @param rnd      variant selector in [0, 1)
      */
-    fn footstep(blockId : Block, rnd : f64) : void {
+    fn footstep(self, blockId : Block, rnd : f64) : void {
         let mat : AudioMaterial = materialOf(blockId);
-        let bank : SoundBank = this.footstepBanks[mat as i32];
+        let bank : SoundBank = self.footstepBanks[mat as i32];
         if (!bank.loaded()) {
-            bank = this.footstepBanks[AudioMaterial::Stone as i32];
+            bank = self.footstepBanks[AudioMaterial::Stone as i32];
         }
-        this.acquire();
-        bank.playRand(this.mixer, rnd, config::volFootstep);
-        this.release();
+        self.acquire();
+        bank.playRand(self.mixer, rnd, config::volFootstep);
+        self.release();
     }
 
     /**
@@ -212,16 +212,16 @@ class AudioManager {
      * @param cell     the block cell
      * @param rnd      variant selector in [0, 1)
      */
-    fn blockEdit(blockId : Block, cell : IVec3, rnd : f64) : void {
+    fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
         let mat : AudioMaterial = materialOf(blockId);
-        let bank : SoundBank = this.digBanks[mat as i32];
+        let bank : SoundBank = self.digBanks[mat as i32];
         if (!bank.loaded()) {
-            bank = this.digBanks[AudioMaterial::Stone as i32];
+            bank = self.digBanks[AudioMaterial::Stone as i32];
         }
-        this.acquire();
-        bank.playRandPos(this.mixer, rnd, config::volBreak,
+        self.acquire();
+        bank.playRandPos(self.mixer, rnd, config::volBreak,
             (cell.x as f64) + 0.5, (cell.y as f64) + 0.5, (cell.z as f64) + 0.5, config::sndBreakDist);
-        this.release();
+        self.release();
     }
 
     /**
@@ -230,28 +230,28 @@ class AudioManager {
      * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobSay(kind : MobKind, pos : Vec3, rnd : f64) : void {
+    fn mobSay(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
         let x : f64 = pos.x;
         let y : f64 = pos.y;
         let z : f64 = pos.z;
-        this.acquire();
+        self.acquire();
         match kind {
             MobKind::Chicken => {
-                this.chickenSayBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.chickenSayBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             MobKind::Cow => {
-                this.cowSayBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.cowSayBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             MobKind::Sheep => {
-                this.sheepSayBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.sheepSayBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             MobKind::Pig => {
-                this.pigSayBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.pigSayBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             // The creeper has no idle voice (only its fuse / blast).
             _ => {}
         }
-        this.release();
+        self.release();
     }
 
     /**
@@ -261,74 +261,74 @@ class AudioManager {
      * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobHurt(kind : MobKind, pos : Vec3, rnd : f64) : void {
+    fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
         let x : f64 = pos.x;
         let y : f64 = pos.y;
         let z : f64 = pos.z;
-        this.acquire();
+        self.acquire();
         match kind {
             MobKind::Chicken => {
-                this.chickenHurtBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.chickenHurtBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             MobKind::Cow => {
-                this.cowHurtBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.cowHurtBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
             // Species without a dedicated clip fall back to the generic impact.
             _ => {
-                this.playerHurtBank.playRandPos(this.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
+                self.playerHurtBank.playRandPos(self.mixer, rnd, config::volMob, x, y, z, config::sndMobDist);
             }
         }
-        this.release();
+        self.release();
     }
 
     /**
      * The player taking damage (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn playerHurt(rnd : f64) : void {
-        this.acquire();
-        this.playerHurtBank.playRand(this.mixer, rnd, config::volPlayer);
-        this.release();
+    fn playerHurt(self, rnd : f64) : void {
+        self.acquire();
+        self.playerHurtBank.playRand(self.mixer, rnd, config::volPlayer);
+        self.release();
     }
 
     /**
      * A splash as the player enters water (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn splash(rnd : f64) : void {
-        this.acquire();
-        this.splashBank.playRand(this.mixer, rnd, config::volPlayer);
-        this.release();
+    fn splash(self, rnd : f64) : void {
+        self.acquire();
+        self.splashBank.playRand(self.mixer, rnd, config::volPlayer);
+        self.release();
     }
 
     /**
      * A soft underwater ambience while submerged (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn ambientUnderwater(rnd : f64) : void {
-        this.acquire();
-        this.ambientUWBank.playRand(this.mixer, rnd, config::volAmbient);
-        this.release();
+    fn ambientUnderwater(self, rnd : f64) : void {
+        self.acquire();
+        self.ambientUWBank.playRand(self.mixer, rnd, config::volAmbient);
+        self.release();
     }
 
     /**
      * The creeper lighting its fuse, attenuated live by distance.
      * @param pos  the creeper position
      */
-    fn creeperFuse(pos : Vec3) : void {
-        this.acquire();
-        this.creeperChargeBank.playRandPos(this.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
-        this.release();
+    fn creeperFuse(self, pos : Vec3) : void {
+        self.acquire();
+        self.creeperChargeBank.playRandPos(self.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
+        self.release();
     }
 
     /**
      * The creeper detonating, attenuated live by distance.
      * @param pos  the creeper position
      */
-    fn creeperBlast(pos : Vec3) : void {
-        this.acquire();
-        this.creeperBlastBank.playRandPos(this.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
-        this.release();
+    fn creeperBlast(self, pos : Vec3) : void {
+        self.acquire();
+        self.creeperBlastBank.playRandPos(self.mixer, 0.0, config::volCreeper, pos.x, pos.y, pos.z, config::sndCreeperDist);
+        self.release();
     }
 }
 

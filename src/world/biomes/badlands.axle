@@ -4,11 +4,11 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block };
 
-class Badlands extends Biome {
+class Badlands : Biome {
     /** Construct the badlands biome (red sandstone filler, no trees). */
     constructor() {
         super();
-        this.fillerBlock = Block::RedSandstone;
+        self.fillerBlock = Block::RedSandstone;
     }
 
     /**
@@ -16,7 +16,7 @@ class Badlands extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         if (height <= config::seaLevel + 2) {
             return Block::RedSand;
         }

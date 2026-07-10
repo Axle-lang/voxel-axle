@@ -5,12 +5,12 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ TreeKind };
 
-class Plains extends Biome {
+class Plains : Biome {
     /** Construct the plains biome. */
     constructor() {
         super();
-        this.treeThresh = 0.992;
-        this.treeKindId = TreeKind::Oak;
-        this.treeHt = 4;
+        self.treeThresh = 0.992;
+        self.treeKindId = TreeKind::Oak;
+        self.treeHt = 4;
     }
 }

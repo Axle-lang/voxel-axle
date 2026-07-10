@@ -23,13 +23,13 @@ class Picker {
      * Initialise an empty pick result (nothing hit yet).
      */
     constructor() {
-        this.hit = 0;
-        this.bx = 0;
-        this.by = 0;
-        this.bz = 0;
-        this.px = 0;
-        this.py = 0;
-        this.pz = 0;
+        self.hit = 0;
+        self.bx = 0;
+        self.by = 0;
+        self.bz = 0;
+        self.px = 0;
+        self.py = 0;
+        self.pz = 0;
     }
 
     /**
@@ -39,8 +39,8 @@ class Picker {
      * @param man  the chunk manager providing voxel queries
      * @param p    the player whose eye and look angles drive the ray
      */
-    fn cast(man : ChunkManager, p : Player) : void {
-        this.hit = 0;
+    fn cast(mut self, man : ChunkManager, p : Player) : void {
+        self.hit = 0;
         let ox : f64 = p.eye.x;
         let oy : f64 = p.eye.y;
         let oz : f64 = p.eye.z;
@@ -96,7 +96,7 @@ class Picker {
         let prevy : i32 = y;
         let prevz : i32 = z;
         let t : f64 = 0.0;
-        while (t <= config::reachDist && this.hit == 0) {
+        while (t <= config::reachDist && self.hit == 0) {
             prevx = x;
             prevy = y;
             prevz = z;
@@ -117,13 +117,13 @@ class Picker {
                 let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
                 if (boxH >= 1.0) {
                     // Full cube: the DDA's step-from cell IS the place cell.
-                    this.hit = 1;
-                    this.bx = x;
-                    this.by = y;
-                    this.bz = z;
-                    this.px = prevx;
-                    this.py = prevy;
-                    this.pz = prevz;
+                    self.hit = 1;
+                    self.bx = x;
+                    self.by = y;
+                    self.bz = z;
+                    self.px = prevx;
+                    self.py = prevy;
+                    self.pz = prevz;
                 } else {
                     // Partial block (snow today, slabs later): a hit only when the
                     // ray pierces the REAL short box — not the phantom full cube —
@@ -132,20 +132,20 @@ class Picker {
                     // usually a side cell, so the block popped out sideways).
                     let face : i32 = rayCellBoxFace(p.eye, vec3(dx, dy, dz), x, y, z, boxH, config::reachDist);
                     if (face != 0) {
-                        this.hit = 1;
-                        this.bx = x;
-                        this.by = y;
-                        this.bz = z;
-                        this.px = x;
-                        this.py = y;
-                        this.pz = z;
+                        self.hit = 1;
+                        self.bx = x;
+                        self.by = y;
+                        self.bz = z;
+                        self.px = x;
+                        self.py = y;
+                        self.pz = z;
                         match face {
-                            1 => { this.px = x + 1; }
-                            2 => { this.px = x - 1; }
-                            3 => { this.py = y + 1; }
-                            4 => { this.py = y - 1; }
-                            5 => { this.pz = z + 1; }
-                            _ => { this.pz = z - 1; }
+                            1 => { self.px = x + 1; }
+                            2 => { self.px = x - 1; }
+                            3 => { self.py = y + 1; }
+                            4 => { self.py = y - 1; }
+                            5 => { self.pz = z + 1; }
+                            _ => { self.pz = z - 1; }
                         }
                     }
                 }

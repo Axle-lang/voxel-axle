@@ -52,23 +52,23 @@ class Biomes {
 
     /** Construct the registry, instantiating one of every biome. */
     constructor() {
-        this.plains = new Plains();
-        this.forest = new Forest();
-        this.birch = new BirchForest();
-        this.taiga = new Taiga();
-        this.jungle = new Jungle();
-        this.savanna = new Savanna();
-        this.desert = new Desert();
-        this.badlands = new Badlands();
-        this.swamp = new Swamp();
-        this.snowy = new Snowy();
-        this.mountain = new Mountain();
-        this.beach = new Beach();
-        this.ocean = new Ocean();
-        this.frozen = new FrozenOcean();
-        this.bambooJungle = new BambooJungle();
-        this.cherryGrove = new CherryGrove();
-        this.mushroomFields = new MushroomFields();
+        self.plains = new Plains();
+        self.forest = new Forest();
+        self.birch = new BirchForest();
+        self.taiga = new Taiga();
+        self.jungle = new Jungle();
+        self.savanna = new Savanna();
+        self.desert = new Desert();
+        self.badlands = new Badlands();
+        self.swamp = new Swamp();
+        self.snowy = new Snowy();
+        self.mountain = new Mountain();
+        self.beach = new Beach();
+        self.ocean = new Ocean();
+        self.frozen = new FrozenOcean();
+        self.bambooJungle = new BambooJungle();
+        self.cherryGrove = new CherryGrove();
+        self.mushroomFields = new MushroomFields();
     }
 
     /**
@@ -76,25 +76,25 @@ class Biomes {
      * @param b  the biome id
      * @return the biome instance
      */
-    fn byId(b : BiomeId) : Biome {
+    fn byId(self, b : BiomeId) : Biome {
         return match b {
-            BiomeId::Plains => this.plains as Biome,
-            BiomeId::Forest => this.forest as Biome,
-            BiomeId::BirchForest => this.birch as Biome,
-            BiomeId::Taiga => this.taiga as Biome,
-            BiomeId::Jungle => this.jungle as Biome,
-            BiomeId::Savanna => this.savanna as Biome,
-            BiomeId::Desert => this.desert as Biome,
-            BiomeId::Badlands => this.badlands as Biome,
-            BiomeId::Swamp => this.swamp as Biome,
-            BiomeId::Snowy => this.snowy as Biome,
-            BiomeId::Mountain => this.mountain as Biome,
-            BiomeId::Beach => this.beach as Biome,
-            BiomeId::FrozenOcean => this.frozen as Biome,
-            BiomeId::BambooJungle => this.bambooJungle as Biome,
-            BiomeId::CherryGrove => this.cherryGrove as Biome,
-            BiomeId::MushroomFields => this.mushroomFields as Biome,
-            _ => this.ocean as Biome,
+            BiomeId::Plains => self.plains as Biome,
+            BiomeId::Forest => self.forest as Biome,
+            BiomeId::BirchForest => self.birch as Biome,
+            BiomeId::Taiga => self.taiga as Biome,
+            BiomeId::Jungle => self.jungle as Biome,
+            BiomeId::Savanna => self.savanna as Biome,
+            BiomeId::Desert => self.desert as Biome,
+            BiomeId::Badlands => self.badlands as Biome,
+            BiomeId::Swamp => self.swamp as Biome,
+            BiomeId::Snowy => self.snowy as Biome,
+            BiomeId::Mountain => self.mountain as Biome,
+            BiomeId::Beach => self.beach as Biome,
+            BiomeId::FrozenOcean => self.frozen as Biome,
+            BiomeId::BambooJungle => self.bambooJungle as Biome,
+            BiomeId::CherryGrove => self.cherryGrove as Biome,
+            BiomeId::MushroomFields => self.mushroomFields as Biome,
+            _ => self.ocean as Biome,
         };
     }
 
@@ -105,25 +105,25 @@ class Biomes {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(b : BiomeId, height : i32) : Block {
+    fn surface(self, b : BiomeId, height : i32) : Block {
         return match b {
-            BiomeId::Plains => this.plains.surface(height),
-            BiomeId::Forest => this.forest.surface(height),
-            BiomeId::BirchForest => this.birch.surface(height),
-            BiomeId::Taiga => this.taiga.surface(height),
-            BiomeId::Jungle => this.jungle.surface(height),
-            BiomeId::Savanna => this.savanna.surface(height),
-            BiomeId::Desert => this.desert.surface(height),
-            BiomeId::Badlands => this.badlands.surface(height),
-            BiomeId::Swamp => this.swamp.surface(height),
-            BiomeId::Snowy => this.snowy.surface(height),
-            BiomeId::Mountain => this.mountain.surface(height),
-            BiomeId::Beach => this.beach.surface(height),
-            BiomeId::FrozenOcean => this.frozen.surface(height),
-            BiomeId::BambooJungle => this.bambooJungle.surface(height),
-            BiomeId::CherryGrove => this.cherryGrove.surface(height),
-            BiomeId::MushroomFields => this.mushroomFields.surface(height),
-            _ => this.ocean.surface(height),
+            BiomeId::Plains => self.plains.surface(height),
+            BiomeId::Forest => self.forest.surface(height),
+            BiomeId::BirchForest => self.birch.surface(height),
+            BiomeId::Taiga => self.taiga.surface(height),
+            BiomeId::Jungle => self.jungle.surface(height),
+            BiomeId::Savanna => self.savanna.surface(height),
+            BiomeId::Desert => self.desert.surface(height),
+            BiomeId::Badlands => self.badlands.surface(height),
+            BiomeId::Swamp => self.swamp.surface(height),
+            BiomeId::Snowy => self.snowy.surface(height),
+            BiomeId::Mountain => self.mountain.surface(height),
+            BiomeId::Beach => self.beach.surface(height),
+            BiomeId::FrozenOcean => self.frozen.surface(height),
+            BiomeId::BambooJungle => self.bambooJungle.surface(height),
+            BiomeId::CherryGrove => self.cherryGrove.surface(height),
+            BiomeId::MushroomFields => self.mushroomFields.surface(height),
+            _ => self.ocean.surface(height),
         };
     }
 
@@ -132,8 +132,8 @@ class Biomes {
      * @param b  the biome id
      * @return the filler block id
      */
-    fn filler(b : BiomeId) : Block {
-        return this.byId(b).fillerBlock;
+    fn filler(self, b : BiomeId) : Block {
+        return self.byId(b).fillerBlock;
     }
 
     /**
@@ -141,8 +141,8 @@ class Biomes {
      * @param b  the biome id
      * @return the tree-placement threshold
      */
-    fn treeThreshold(b : BiomeId) : f64 {
-        return this.byId(b).treeThresh;
+    fn treeThreshold(self, b : BiomeId) : f64 {
+        return self.byId(b).treeThresh;
     }
 
     /**
@@ -150,8 +150,8 @@ class Biomes {
      * @param b  the biome id
      * @return the tree kind id
      */
-    fn treeKind(b : BiomeId) : TreeKind {
-        return this.byId(b).treeKindId;
+    fn treeKind(self, b : BiomeId) : TreeKind {
+        return self.byId(b).treeKindId;
     }
 
     /**
@@ -159,8 +159,8 @@ class Biomes {
      * @param b  the biome id
      * @return the trunk height
      */
-    fn treeHeight(b : BiomeId) : i32 {
-        return this.byId(b).treeHt;
+    fn treeHeight(self, b : BiomeId) : i32 {
+        return self.byId(b).treeHt;
     }
 }
 

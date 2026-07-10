@@ -26,11 +26,11 @@ class BlockSim {
 
     /** Allocate the pending-cell ring buffer. */
     constructor() {
-        this.cap = config::simQueueCap;
-        this.pending = malloc<IVec3>(this.cap);
-        this.head = 0;
-        this.tail = 0;
-        this.count = 0;
+        self.cap = config::simQueueCap;
+        self.pending = malloc<IVec3>(self.cap);
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
     }
 
     /**
@@ -38,27 +38,27 @@ class BlockSim {
      * bounded and stable rather than growing without limit).
      * @param cell  the world cell
      */
-    fn enqueue(cell : IVec3) : void {
-        if (this.count >= this.cap) {
+    fn enqueue(mut self, cell : IVec3) : void {
+        if (self.count >= self.cap) {
             return;
         }
-        this.pending[this.tail] = IVec3 { x: cell.x, y: cell.y, z: cell.z };
-        this.tail = this.tail + 1;
-        if (this.tail >= this.cap) {
-            this.tail = 0;
+        self.pending[self.tail] = IVec3 { x: cell.x, y: cell.y, z: cell.z };
+        self.tail = self.tail + 1;
+        if (self.tail >= self.cap) {
+            self.tail = 0;
         }
-        this.count = this.count + 1;
+        self.count = self.count + 1;
     }
 
     /**
      * Queue the four horizontal neighbours of a cell.
      * @param cell  the world cell
      */
-    fn enqueue4(cell : IVec3) : void {
-        this.enqueue(ivec3(cell.x + 1, cell.y, cell.z));
-        this.enqueue(ivec3(cell.x - 1, cell.y, cell.z));
-        this.enqueue(ivec3(cell.x, cell.y, cell.z + 1));
-        this.enqueue(ivec3(cell.x, cell.y, cell.z - 1));
+    fn enqueue4(mut self, cell : IVec3) : void {
+        self.enqueue(ivec3(cell.x + 1, cell.y, cell.z));
+        self.enqueue(ivec3(cell.x - 1, cell.y, cell.z));
+        self.enqueue(ivec3(cell.x, cell.y, cell.z + 1));
+        self.enqueue(ivec3(cell.x, cell.y, cell.z - 1));
     }
 
     /**
@@ -67,37 +67,37 @@ class BlockSim {
      * get a chance to react.
      * @param cell  the world cell
      */
-    fn enqueue6(cell : IVec3) : void {
-        this.enqueue(cell);
-        this.enqueue(ivec3(cell.x, cell.y + 1, cell.z));
-        this.enqueue(ivec3(cell.x, cell.y - 1, cell.z));
-        this.enqueue4(cell);
+    fn enqueue6(mut self, cell : IVec3) : void {
+        self.enqueue(cell);
+        self.enqueue(ivec3(cell.x, cell.y + 1, cell.z));
+        self.enqueue(ivec3(cell.x, cell.y - 1, cell.z));
+        self.enqueue4(cell);
     }
 
     /**
      * Process up to `config::simBudget` queued cells. Call on the sim cadence.
      * @param man  the chunk manager whose voxels are read and written
      */
-    fn step(man : ChunkManager) : void {
+    fn step(mut self, man : ChunkManager) : void {
         // Process only the cells already queued at the START of this step (one
         // "generation"). Cells enqueued during processing (the next ring of
         // spread / the next block of a fall) wait for the next step, so water
         // advances exactly one block-ring per step and pours in calmly instead
         // of filling all at once. The budget still caps a generation so a big
         // flood can't spike one frame.
-        let gen : i32 = this.count;
+        let gen : i32 = self.count;
         if (gen > config::simBudget) {
             gen = config::simBudget;
         }
         let i : i32 = 0;
         while (i < gen) {
-            let cell : IVec3 = this.pending[this.head];
-            this.head = this.head + 1;
-            if (this.head >= this.cap) {
-                this.head = 0;
+            let cell : IVec3 = self.pending[self.head];
+            self.head = self.head + 1;
+            if (self.head >= self.cap) {
+                self.head = 0;
             }
-            this.count = this.count - 1;
-            this.process(man, cell);
+            self.count = self.count - 1;
+            self.process(man, cell);
             i = i + 1;
         }
     }
@@ -107,14 +107,14 @@ class BlockSim {
      * @param man   the chunk manager
      * @param cell  the world cell
      */
-    fn process(man : ChunkManager, cell : IVec3) : void {
+    fn process(mut self, man : ChunkManager, cell : IVec3) : void {
         let cur : Block = man.worldGet(cell);
         if (falls(cur)) {
-            this.doFall(man, cell, cur);
+            self.doFall(man, cell, cur);
             return;
         }
         if (isWater(cur)) {
-            this.doFluid(man, cell, cur);
+            self.doFluid(man, cell, cur);
         }
     }
 
@@ -126,15 +126,15 @@ class BlockSim {
      * @param cell  the world cell
      * @param cur   the falling block id
      */
-    fn doFall(man : ChunkManager, cell : IVec3, cur : Block) : void {
+    fn doFall(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
         let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
         let below : Block = man.worldGet(belowCell);
         if (below == Block::Air || isWater(below)) {
             man.setVoxel(cell, Block::Air);
             man.setVoxel(belowCell, cur);
-            this.enqueue(belowCell);                            // keep falling
-            this.enqueue(ivec3(cell.x, cell.y + 1, cell.z));    // whatever was above may now fall
-            this.enqueue4(belowCell);                           // displaced water around may flow
+            self.enqueue(belowCell);                            // keep falling
+            self.enqueue(ivec3(cell.x, cell.y + 1, cell.z));    // whatever was above may now fall
+            self.enqueue4(belowCell);                           // displaced water around may flow
         }
     }
 
@@ -145,7 +145,7 @@ class BlockSim {
      * @param cell  the world cell
      * @param cur   the water block id
      */
-    fn doFluid(man : ChunkManager, cell : IVec3, cur : Block) : void {
+    fn doFluid(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
         let lvl : i32 = fluidLevel(cur);
         let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
         let below : Block = man.worldGet(belowCell);
@@ -154,23 +154,23 @@ class BlockSim {
             // drop it does NOT spread sideways — so a waterfall stays a clean
             // vertical stream.
             man.setVoxel(belowCell, Block::FlowWater7);
-            this.enqueue(belowCell);
-            this.enqueue4(belowCell);
+            self.enqueue(belowCell);
+            self.enqueue4(belowCell);
         } else if (isSolid(below)) {
             // Only water RESTING on solid ground spreads (so the middle of a
             // waterfall, which sits on water, never pools out). It flows toward
             // the nearest drop, losing a level per block.
             if (lvl >= 2) {
-                this.spreadOut(man, cell, lvl - 1);
+                self.spreadOut(man, cell, lvl - 1);
             }
         }
         // (below is water → part of a column/pool: neither falls nor spreads.)
         // Flowing water with no feed (no higher neighbour, no water above) dries
         // up; the source never does. This cascades a cut-off back to air.
         if (!isSource(cur)) {
-            if (!this.fed(man, cell, lvl)) {
+            if (!self.fed(man, cell, lvl)) {
                 man.setVoxel(cell, Block::Air);
-                this.enqueue6(cell);
+                self.enqueue6(cell);
             }
         }
     }
@@ -185,11 +185,11 @@ class BlockSim {
      * @param cell  the world cell
      * @param nl    the flow level to place into neighbours
      */
-    fn spreadOut(man : ChunkManager, cell : IVec3, nl : i32) : void {
-        let dE : i32 = this.dropDist(man, cell, 1, 0);
-        let dW : i32 = this.dropDist(man, cell, 0 - 1, 0);
-        let dS : i32 = this.dropDist(man, cell, 0, 1);
-        let dN : i32 = this.dropDist(man, cell, 0, 0 - 1);
+    fn spreadOut(mut self, man : ChunkManager, cell : IVec3, nl : i32) : void {
+        let dE : i32 = self.dropDist(man, cell, 1, 0);
+        let dW : i32 = self.dropDist(man, cell, 0 - 1, 0);
+        let dS : i32 = self.dropDist(man, cell, 0, 1);
+        let dN : i32 = self.dropDist(man, cell, 0, 0 - 1);
         let best : i32 = dE;
         if (dW < best) {
             best = dW;
@@ -203,23 +203,23 @@ class BlockSim {
         if (best <= config::flowSearch) {
             // Flow only toward the nearest drop(s).
             if (dE == best) {
-                this.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
+                self.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
             }
             if (dW == best) {
-                this.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
+                self.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
             }
             if (dS == best) {
-                this.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
+                self.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
             }
             if (dN == best) {
-                this.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
+                self.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
             }
         } else {
             // No drop within reach: pool out evenly.
-            this.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
-            this.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
-            this.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
-            this.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
+            self.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
+            self.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
+            self.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
+            self.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
         }
     }
 
@@ -234,7 +234,7 @@ class BlockSim {
      * @param dirz  step in z (-1/0/1)
      * @return the drop distance, or flowSearch+1 if none / blocked
      */
-    fn dropDist(man : ChunkManager, cell : IVec3, dirx : i32, dirz : i32) : i32 {
+    fn dropDist(self, man : ChunkManager, cell : IVec3, dirx : i32, dirz : i32) : i32 {
         let maxD : i32 = config::flowSearch;
         let d : i32 = 1;
         while (d <= maxD) {
@@ -260,11 +260,11 @@ class BlockSim {
      * @param cell  the world cell
      * @param nl    the flow level to place
      */
-    fn spreadInto(man : ChunkManager, cell : IVec3, nl : i32) : void {
+    fn spreadInto(mut self, man : ChunkManager, cell : IVec3, nl : i32) : void {
         if (man.worldGet(cell) == Block::Air) {
             man.setVoxel(cell, fluidOfLevel(nl));
-            this.enqueue(cell);
-            this.enqueue(ivec3(cell.x, cell.y - 1, cell.z));   // it may then fall
+            self.enqueue(cell);
+            self.enqueue(ivec3(cell.x, cell.y - 1, cell.z));   // it may then fall
         }
     }
 
@@ -276,7 +276,7 @@ class BlockSim {
      * @param lvl   this cell's level
      * @return whether the cell has a feed
      */
-    fn fed(man : ChunkManager, cell : IVec3, lvl : i32) : bool {
+    fn fed(self, man : ChunkManager, cell : IVec3, lvl : i32) : bool {
         if (isWater(man.worldGet(ivec3(cell.x, cell.y + 1, cell.z)))) {
             return true;
         }

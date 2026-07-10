@@ -7,8 +7,8 @@
 // shared `VoxStore.voxIdx` layout, plus the block-light flood stacks, the sky-AO
 // hemisphere ray table and the per-slot light/sky-AO dirty + sweep cursors.
 //
-// `ChunkManager` composes one (`this.lights`) and runs the light engine over it.
-// This mirrors how the manager already composes a `VoxStore` (`this.store`):
+// `ChunkManager` composes one (`self.lights`) and runs the light engine over it.
+// This mirrors how the manager already composes a `VoxStore` (`self.store`):
 // the background light thread reaches both through the same manager reference,
 // so there is no new sharing — the data simply has a focused home.
 
@@ -57,37 +57,37 @@ class LightStore {
     constructor(slots : i32) {
         let hSide : i32 = config::chunkSize + 2;
         let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64);
-        this.light = allocBytes(vol);
-        this.skylight = allocBytes(vol);
-        this.sunlit = allocBytes(vol);
-        this.skyaccess = allocBytes(vol);
-        this.bnR = allocBytes(vol);
-        this.bnG = allocBytes(vol);
-        this.bnB = allocBytes(vol);
-        this.sunCursor = 0;
-        this.skyAOcursor = 0;
+        self.light = allocBytes(vol);
+        self.skylight = allocBytes(vol);
+        self.sunlit = allocBytes(vol);
+        self.skyaccess = allocBytes(vol);
+        self.bnR = allocBytes(vol);
+        self.bnG = allocBytes(vol);
+        self.bnB = allocBytes(vol);
+        self.sunCursor = 0;
+        self.skyAOcursor = 0;
         // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
         // for the sky-access bake.
         let m : i32 = config::skyAOSamples;
-        this.hemiX = allocBytes((m as i64) * 8);
-        this.hemiY = allocBytes((m as i64) * 8);
-        this.hemiZ = allocBytes((m as i64) * 8);
+        self.hemiX = allocBytes((m as i64) * 8);
+        self.hemiY = allocBytes((m as i64) * 8);
+        self.hemiZ = allocBytes((m as i64) * 8);
         let hi : i32 = 0;
         while (hi < m) {
             let yy : f64 = ((hi as f64) + 0.5) / (m as f64);   // 0..1 toward up
             let rr : f64 = Math::sqrt(1.0 - yy * yy);
             let th : f64 = (hi as f64) * 2.399963;             // golden angle
-            setF64(this.hemiX, hi, rr * Math::cos(th));
-            setF64(this.hemiY, hi, yy);
-            setF64(this.hemiZ, hi, rr * Math::sin(th));
+            setF64(self.hemiX, hi, rr * Math::cos(th));
+            setF64(self.hemiY, hi, yy);
+            setF64(self.hemiZ, hi, rr * Math::sin(th));
             hi = hi + 1;
         }
-        this.skyAOdirty = malloc<i32>(slots);
-        this.ldirty = malloc<i32>(slots);
+        self.skyAOdirty = malloc<i32>(slots);
+        self.ldirty = malloc<i32>(slots);
         let lcap : i32 = config::lightQueueCap;
-        this.lq = malloc<IVec3>(lcap);
-        this.lqn = 0;
-        this.rq = malloc<LightRemoval>(lcap);
-        this.rqn = 0;
+        self.lq = malloc<IVec3>(lcap);
+        self.lqn = 0;
+        self.rq = malloc<LightRemoval>(lcap);
+        self.rqn = 0;
     }
 }

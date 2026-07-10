@@ -17,7 +17,7 @@ use crate::config::{ MobKind };
 use crate::mathx::{ clampF64, wrapAngle, PI, TAU };
 use crate::vec3::{ Vec3, vec3 };
 
-class Mob extends Entity {
+class Mob : Entity {
     kind : MobKind,
     speed : f64,
     heading : f64,
@@ -34,36 +34,36 @@ class Mob extends Entity {
 
     /** Create a mob at (x, y, z) of the given kind with maxHp hit points. */
     constructor(x : f64, y : f64, z : f64, own kind : MobKind, maxHp : i32) {
-        this.pos = vec3(x, y, z);
-        this.velY = 0.0;
-        this.radius = config::mobRadius;
-        this.height = 1.0;
-        this.gravityScale = 1.0;
-        this.hp = maxHp;
-        this.maxHp = maxHp;
-        this.onGround = 0;
-        this.impact = 0.0;
-        this.grav = config::mobGravity;
-        this.apexY = y;
-        this.stepUp = 0.0;
-        this.kind = kind;
-        this.heading = 0.0;
-        this.targetHeading = 0.0;
-        this.turnTimer = 0;
-        this.moving = 1;
-        this.walkPhase = 0.0;
-        this.fleeTimer = 0;
-        this.hurtTimer = 0;
-        this.state = 0;
-        this.deathTimer = 0;
-        this.fuse = 0 - 1;
-        this.vocalTimer = config::mobVocalMin;
-        this.speed = config::mobWanderSpeed;
+        self.pos = vec3(x, y, z);
+        self.velY = 0.0;
+        self.radius = config::mobRadius;
+        self.height = 1.0;
+        self.gravityScale = 1.0;
+        self.hp = maxHp;
+        self.maxHp = maxHp;
+        self.onGround = 0;
+        self.impact = 0.0;
+        self.grav = config::mobGravity;
+        self.apexY = y;
+        self.stepUp = 0.0;
+        self.kind = kind;
+        self.heading = 0.0;
+        self.targetHeading = 0.0;
+        self.turnTimer = 0;
+        self.moving = 1;
+        self.walkPhase = 0.0;
+        self.fleeTimer = 0;
+        self.hurtTimer = 0;
+        self.state = 0;
+        self.deathTimer = 0;
+        self.fuse = 0 - 1;
+        self.vocalTimer = config::mobVocalMin;
+        self.speed = config::mobWanderSpeed;
     }
 
     /** Flag a hit so the renderer glows the mob red for a few frames. */
-    fn flashHurt() : void {
-        this.hurtTimer = config::hurtFlashFrames;
+    fn flashHurt(mut self) : void {
+        self.hurtTimer = config::hurtFlashFrames;
     }
 
     /**
@@ -71,56 +71,56 @@ class Mob extends Entity {
      * @param px  x coordinate of the source of the hit
      * @param pz  z coordinate of the source of the hit
      */
-    fn panicFrom(px : f64, pz : f64) : void {
-        this.targetHeading = atan2(this.pos.z - pz, this.pos.x - px);
-        this.fleeTimer = config::mobFleeFrames;
-        this.moving = 1;
-        this.turnTimer = config::mobFleeFrames;
+    fn panicFrom(mut self, px : f64, pz : f64) : void {
+        self.targetHeading = atan2(self.pos.z - pz, self.pos.x - px);
+        self.fleeTimer = config::mobFleeFrames;
+        self.moving = 1;
+        self.turnTimer = config::mobFleeFrames;
     }
 
     /** Begin the death collapse; the manager removes the mob when it ends. */
-    fn startDying() : void {
-        this.state = 1;
-        this.deathTimer = config::deathFrames;
-        this.moving = 0;
+    fn startDying(mut self) : void {
+        self.state = 1;
+        self.deathTimer = config::deathFrames;
+        self.moving = 0;
     }
 
     /**
      * Whether the mob is in its death collapse.
      * @return true while dying
      */
-    fn isDying() : bool {
-        return this.state == 1;
+    fn isDying(self) : bool {
+        return self.state == 1;
     }
 
     /**
      * Whether the death collapse has finished and the mob can be removed.
      * @return true when dying and the death timer has elapsed
      */
-    fn deathDone() : bool {
-        return this.state == 1 && this.deathTimer <= 0;
+    fn deathDone(self) : bool {
+        return self.state == 1 && self.deathTimer <= 0;
     }
 
     /**
      * Collapse progress in [0,1): 0 at the moment of death, 1 when gone.
      * @return the normalized death-collapse progress
      */
-    fn deathProgress() : f64 {
-        if (this.state == 0) {
+    fn deathProgress(self) : f64 {
+        if (self.state == 0) {
             return 0.0;
         }
         let df : f64 = config::deathFrames as f64;
-        return (df - (this.deathTimer as f64)) / df;
+        return (df - (self.deathTimer as f64)) / df;
     }
 
     /**
      * Ease `heading` toward `targetHeading` by at most `mobTurnRate`,
      * taking the shortest way around the circle.
      */
-    fn turnToward() : void {
-        let d : f64 = wrapAngle(this.targetHeading - this.heading);
+    fn turnToward(mut self) : void {
+        let d : f64 = wrapAngle(self.targetHeading - self.heading);
         let rate : f64 = config::mobTurnRate;
-        this.heading = this.heading + clampF64(d, 0.0 - rate, rate);
+        self.heading = self.heading + clampF64(d, 0.0 - rate, rate);
     }
 
     /**
@@ -130,50 +130,50 @@ class Mob extends Entity {
      * @param world  the chunk manager the mob moves through
      * @param rnd    a fresh pseudo-random value in [0,1)
      */
-    fn wander(world : ChunkManager, rnd : f64) : void {
-        if (this.hurtTimer > 0) {
-            this.hurtTimer = this.hurtTimer - 1;
+    fn wander(mut self, world : ChunkManager, rnd : f64) : void {
+        if (self.hurtTimer > 0) {
+            self.hurtTimer = self.hurtTimer - 1;
         }
 
         // Dying: stop steering, let gravity settle the body while the
         // collapse animation plays out.
-        if (this.state == 1) {
-            if (this.deathTimer > 0) {
-                this.deathTimer = this.deathTimer - 1;
+        if (self.state == 1) {
+            if (self.deathTimer > 0) {
+                self.deathTimer = self.deathTimer - 1;
             }
-            this.tick(world, 0.0, 0.0);
+            self.tick(world, 0.0, 0.0);
             return;
         }
 
-        if (this.fleeTimer > 0) {
-            this.fleeTimer = this.fleeTimer - 1;
+        if (self.fleeTimer > 0) {
+            self.fleeTimer = self.fleeTimer - 1;
         }
-        this.turnTimer = this.turnTimer - 1;
-        if (this.turnTimer <= 0 && this.fleeTimer <= 0) {
-            this.targetHeading = rnd * TAU;
-            this.turnTimer = config::mobTurnEveryMin + Math::floorToInt(rnd * (config::mobTurnEveryRand as f64)) as i32;
+        self.turnTimer = self.turnTimer - 1;
+        if (self.turnTimer <= 0 && self.fleeTimer <= 0) {
+            self.targetHeading = rnd * TAU;
+            self.turnTimer = config::mobTurnEveryMin + Math::floorToInt(rnd * (config::mobTurnEveryRand as f64)) as i32;
             if (rnd < config::mobIdleChance) {
-                this.moving = 0;
+                self.moving = 0;
             } else {
-                this.moving = 1;
+                self.moving = 1;
             }
         }
-        this.turnToward();
+        self.turnToward();
 
         let spd : f64 = 0.0;
-        if (this.fleeTimer > 0) {
+        if (self.fleeTimer > 0) {
             spd = config::mobFleeSpeed;
-        } else if (this.moving == 1) {
-            spd = this.speed;
+        } else if (self.moving == 1) {
+            spd = self.speed;
         }
 
         if (spd > 0.0) {
-            this.walkPhase = this.walkPhase + 0.35;
+            self.walkPhase = self.walkPhase + 0.35;
         }
 
-        let dx : f64 = Math::cos(this.heading) * spd;
-        let dz : f64 = Math::sin(this.heading) * spd;
-        this.tick(world, dx, dz);
+        let dx : f64 = Math::cos(self.heading) * spd;
+        let dz : f64 = Math::sin(self.heading) * spd;
+        self.tick(world, dx, dz);
     }
 }
 

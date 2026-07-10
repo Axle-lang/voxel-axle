@@ -25,8 +25,8 @@ class VoxStore {
      */
     constructor(slots : i32) {
         let hSide : i32 = config::chunkSize + 2;
-        this.vox = malloc<Block>(slots * hSide * hSide * config::worldHeight);
-        this.maxFY = malloc<i32>(slots);
+        self.vox = malloc<Block>(slots * hSide * hSide * config::worldHeight);
+        self.maxFY = malloc<i32>(slots);
     }
 
     /**
@@ -38,7 +38,7 @@ class VoxStore {
      * @param lz    the local z coordinate (skirt range [-1, chunkSize])
      * @return the flat offset into `vox` (and into the light byte volumes)
      */
-    fn voxIdx(slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
+    fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
         let hSide : i32 = config::chunkSize + 2;
         let px : i32 = lx + 1;
         let pz : i32 = lz + 1;
@@ -53,14 +53,14 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @return the block id at that cell
      */
-    fn getVox(slot : i32, local : IVec3) : Block {
+    fn getVox(self, slot : i32, local : IVec3) : Block {
         if (local.y < 0) {
             return Block::Stone;
         }
         if (local.y >= config::worldHeight) {
             return Block::Air;
         }
-        return this.vox[this.voxIdx(slot, local.x, local.y, local.z)];
+        return self.vox[self.voxIdx(slot, local.x, local.y, local.z)];
     }
 
     /**
@@ -69,8 +69,8 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @param id     the block id to write
      */
-    fn setVoxLocal(slot : i32, local : IVec3, own id : Block) : void {
-        this.vox[this.voxIdx(slot, local.x, local.y, local.z)] = id;
+    fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
+        self.vox[self.voxIdx(slot, local.x, local.y, local.z)] = id;
     }
 
     /**
@@ -80,7 +80,7 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @param id     the block id to write
      */
-    fn setVoxClip(slot : i32, local : IVec3, id : Block) : void {
+    fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
         let s : i32 = config::chunkSize;
         if (local.x < 0 - 1 || local.x > s || local.z < 0 - 1 || local.z > s) {
             return;
@@ -89,7 +89,7 @@ class VoxStore {
             return;
         }
         let v : Block = id;
-        this.setVoxLocal(slot, local, v);
+        self.setVoxLocal(slot, local, v);
     }
 
     /**
@@ -97,9 +97,9 @@ class VoxStore {
      * @param slot  the slot index
      * @param y     the candidate Y
      */
-    fn bumpFY(slot : i32, y : i32) : void {
-        if (y > this.maxFY[slot]) {
-            this.maxFY[slot] = y;
+    fn bumpFY(mut self, slot : i32, y : i32) : void {
+        if (y > self.maxFY[slot]) {
+            self.maxFY[slot] = y;
         }
     }
 }

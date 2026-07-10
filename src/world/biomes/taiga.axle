@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class Taiga extends Biome {
+class Taiga : Biome {
     /** Construct the taiga biome. */
     constructor() {
         super();
-        this.treeThresh = 0.918;
-        this.treeKindId = TreeKind::Spruce;
-        this.treeHt = 6;
+        self.treeThresh = 0.918;
+        self.treeKindId = TreeKind::Spruce;
+        self.treeHt = 6;
     }
 
     /**
@@ -18,7 +18,7 @@ class Taiga extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::GrassTaiga;
     }
 }

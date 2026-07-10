@@ -4,13 +4,13 @@ use crate::world::biomes::Biome;
 use crate::config;
 use crate::config::{ Block, TreeKind };
 
-class Swamp extends Biome {
+class Swamp : Biome {
     /** Construct the swamp biome. */
     constructor() {
         super();
-        this.treeThresh = 0.985;
-        this.treeKindId = TreeKind::Oak;
-        this.treeHt = 4;
+        self.treeThresh = 0.985;
+        self.treeKindId = TreeKind::Oak;
+        self.treeHt = 4;
     }
 
     /**
@@ -18,7 +18,7 @@ class Swamp extends Biome {
      * @param height  the column's surface height
      * @return the surface block id
      */
-    fn surface(height : i32) : Block {
+    fn surface(self, height : i32) : Block {
         return Block::GrassSwamp;
     }
 }
