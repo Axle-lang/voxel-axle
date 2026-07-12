@@ -5,10 +5,10 @@
 // super-traits (VoxelQuery / VoxelEdit / LightSample) compose the fine-grained
 // capabilities so a provider conforms once and a consumer can still depend on
 // the whole surface — while a consumer that needs only one capability depends on
-// just that trait (e.g. the picker takes `dyn BlockReader`, not all of VoxelQuery).
+// just that trait (e.g. the picker takes `dyn VoxelReader`, not all of VoxelQuery).
 //
 //   PROVIDER                    BUNDLE (fine-grained capabilities)
-//   kworld (ChunkManager)   ->  VoxelQuery  : BlockReader + CollisionField + Heightfield
+//   kworld (ChunkManager)   ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
 //                               VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
 //                                             + DayCycle + LightThread
 //                               LightSample : BlockLightField + SkyLightField
@@ -25,7 +25,7 @@ use crate::config::{ Block, MobKind };
 // ─── Voxel read capabilities ────────────────────────────────────────────────
 
 /** Read the block id at a cell and test raw / targetable solidity. */
-trait BlockReader {
+trait VoxelReader {
     fn worldGet(self, cell : IVec3) : Block;
     fn solidTarget(self, cell : IVec3) : bool;
     fn solidAt(self, cell : IVec3) : bool;
@@ -46,7 +46,7 @@ trait Heightfield {
 }
 
 /** Bundle: the full read-only voxel surface (block reads + collision + heights). */
-trait VoxelQuery : BlockReader, CollisionField, Heightfield {
+trait VoxelQuery : VoxelReader, CollisionField, Heightfield {
 }
 
 // ─── Voxel write + world lifecycle capabilities ─────────────────────────────

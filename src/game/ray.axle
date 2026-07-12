@@ -14,13 +14,13 @@ use crate::config;
  * The picker's own capability, named so the interaction layer depends on "a thing
  * that can cast a pick" rather than the concrete Picker.
  *
- * NOTE on the world param: the DDA reads only block solidity (`BlockReader`) and
+ * NOTE on the world param: the DDA reads only block solidity (`VoxelReader`) and
  * partial-block box heights (`CollisionField`), so it would ideally take a
  * two-capability bundle rather than the whole `dyn VoxelQuery` (it never touches
  * `Heightfield`). A single `dyn` param must name ONE declared trait, though, and
  * the only bundle ChunkManager (kworld-owned, read-only here) declares that
  * spans both leaves is `VoxelQuery`. Narrowing further would need kworld to
- * declare a `BlockReader + CollisionField` bundle on ChunkManager, so the param
+ * declare a `VoxelReader + CollisionField` bundle on ChunkManager, so the param
  * stays `dyn VoxelQuery` for now.
  */
 trait RayCaster {
