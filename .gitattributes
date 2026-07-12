@@ -1,0 +1,13 @@
+# Syntax highlighting on GitHub / Gitea (github-linguist)
+#
+# Linguist ships a fixed set of languages + grammars and cannot be taught Axle
+# from inside a repo (that needs an upstream github-linguist PR), so a local
+# VS Code grammar does NOT affect GitHub rendering. As a pragmatic remedy we map
+# .axle to Rust — by far the closest supported grammar: fn / let / mut / pub /
+# dyn / trait / struct / enum / use / match / self / as / is and //, ///, /** */
+# comments all highlight correctly (only `class` / `constructor` are missed).
+#
+# `linguist-detectable=true` also counts .axle toward the repo language bar so
+# the project reads as a code repo rather than "mostly Markdown/Python". Flip it
+# to false if you would rather keep .axle out of the language statistics.
+*.axle linguist-language=Rust linguist-detectable=true
