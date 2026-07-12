@@ -1,0 +1,786 @@
+// blocks — the block table: Block → atlas tile (per face), colour, predicates.
+//
+// Block behaviour is split into small, single-responsibility CAPABILITY traits
+// (Voidable, Occluding, Collidable, Fluid, Shaped, Foliage, Weighted, Emissive,
+// Audible, Textured, Diggable). Each capability owns a tiny value `struct` that
+// carries exactly its own fields and implements its trait with trivial getters,
+// and each has ONE `match id` factory (`emptyOf`, `occlusionOf`, `collisionOf`,
+// …) that builds that struct for a block id. There is no global per-block
+// record: a caller asks only for the capability it needs. Every historical free
+// function (isSolid, isWater, tileFor, materialOf, …) survives as a thin
+// delegate onto the matching `<cap>Of(id).<method>()`, so every existing caller
+// (kworld / kentity / krender / kio) keeps the same signature.
+//
+// To add a block: give it a variant in `configs::blocks` (the `Block` enum), an
+// atlas tile in `bake_atlas.py` (+ its `tl*` index in config), then add an arm
+// to whichever capability factories it differs from (usually just `surfaceOf`
+// and `soundOf`; the rest fall through to the sensible `_` default). The mesher
+// and renderer stay Block-agnostic.
+
+use sdl_platform::rgb;
+use crate::kernel::kworld::noise::{ snowDepth };
+use crate::config;
+use crate::config::{ Block, AudioMaterial, FaceDir };
+
+// ── Block capabilities ────────────────────────────────────────────────────
+// Each block attribute the engine asks about is grouped into a SMALL, single-
+// responsibility capability trait (mirroring kernel::seams). Data can't live on
+// a trait, so every capability pairs its trait with a value `struct` that holds
+// exactly those fields and returns them through trivial getters. Predicate names
+// match the historical free functions so the two read the same.
+
+/** Emptiness: whether the cell holds the air block (no substance at all). */
+trait Voidable {
+    fn isAir(self) : bool;
+}
+
+/** How light and sight pass through the cell — face culling and shading. */
+trait Occluding {
+    fn isTransparent(self) : bool;
+    fn isOpaque(self) : bool;
+}
+
+/** Physical presence: what the look-ray targets and the player stands against. */
+trait Collidable {
+    fn isSolid(self) : bool;
+    fn hasCollisionBox(self) : bool;
+    fn isCollidable(self) : bool;
+}
+
+/** Water behaviour: is-water / is-source and the flow level (0 = dry). */
+trait Fluid {
+    fn isWater(self) : bool;
+    fn isSource(self) : bool;
+    fn fluidLevel(self) : i32;
+}
+
+/** Non-cube geometry: partial floor-resting boxes (snow layer today, slabs later). */
+trait Shaped {
+    fn isSnowLayer(self) : bool;
+    fn isPartialShape(self) : bool;
+}
+
+/** Plant-family surfaces: leaves (light-leaking canopy) and grassy tops. */
+trait Foliage {
+    fn isLeaves(self) : bool;
+    fn isGrassy(self) : bool;
+}
+
+/** Gravity: whether the block drops when unsupported (sand / gravel). */
+trait Weighted {
+    fn falls(self) : bool;
+}
+
+/** Light the block radiates into the world (0 none, 1..15). */
+trait Emissive {
+    fn lightEmission(self) : i32;
+}
+
+/** Sound identity: the footstep / dig material. */
+trait Audible {
+    fn material(self) : AudioMaterial;
+}
+
+/** Appearance: per-face atlas tile, bounce albedo and fallback colour. */
+trait Textured {
+    fn tile(self, dir : FaceDir) : i32;
+    fn albedo(self) : i32;
+    fn color(self) : i32;
+}
+
+/** Break resistance (reserved for digging). */
+trait Diggable {
+    fn hardness(self) : f64;
+}
+
+// ── Capability structs + factories ────────────────────────────────────────
+// One tiny value struct per capability, each implementing its trait with plain
+// field returns, plus one `match id` factory. Values are copied verbatim from
+// the historical table, so behaviour is byte-for-byte unchanged. Blocks that
+// share an attribute collapse into an or-pattern arm; the `_` arm is the common
+// default (a plain full-cube solid).
+
+/** Air-ness: the one field the emptiness capability needs. */
+struct Emptiness : Voidable {
+    air : bool,
+
+    /** Whether the block is air. @return true for the air block */
+    fn isAir(self) : bool { return self.air; }
+}
+
+/**
+ * Emptiness for a block: only air is empty.
+ * @param id  the block
+ * @return its emptiness capability
+ */
+fn emptyOf(id : Block) : Emptiness {
+    return match id {
+        Block::Air => Emptiness { air: true },
+        _ => Emptiness { air: false },
+    };
+}
+
+/** Light/sight occlusion flags. */
+struct Occlusion : Occluding {
+    transparent : bool,
+    opaque : bool,
+
+    /** Whether a face against this block is drawn (light/air passes). @return transparency */
+    fn isTransparent(self) : bool { return self.transparent; }
+
+    /** Whether the block stops light and casts shade. @return opacity */
+    fn isOpaque(self) : bool { return self.opaque; }
+}
+
+/**
+ * Occlusion for a block: air / water / torch / snow layer let light and sight
+ * through; leaves cull faces but still leak light (transparent:false,
+ * opaque:false); every other full block is opaque.
+ * @param id  the block
+ * @return its occlusion capability
+ */
+fn occlusionOf(id : Block) : Occlusion {
+    return match id {
+        Block::Air
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+        | Block::Torch | Block::SnowLayer
+            => Occlusion { transparent: true, opaque: false },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Occlusion { transparent: false, opaque: false },
+        _ => Occlusion { transparent: false, opaque: true },
+    };
+}
+
+/** Physical-presence flags: aim target, collision box, walk-through. */
+struct Collision : Collidable {
+    solid : bool,
+    collisionBox : bool,
+    collidable : bool,
+
+    /** Whether the block is a "real" (non-air, non-water) block. @return solidity */
+    fn isSolid(self) : bool { return self.solid; }
+
+    /** Whether the block carries a physical collision box. @return whether it has a box */
+    fn hasCollisionBox(self) : bool { return self.collisionBox; }
+
+    /** Whether the player collides with / stands on the block. @return whether collidable */
+    fn isCollidable(self) : bool { return self.collidable; }
+}
+
+/**
+ * Collision for a block: air and water have no presence at all; a torch is
+ * solid to aim at but has no box; the snow layer has a box you don't collide
+ * with; everything else is a full standable solid.
+ * @param id  the block
+ * @return its collision capability
+ */
+fn collisionOf(id : Block) : Collision {
+    return match id {
+        Block::Air
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+            => Collision { solid: false, collisionBox: false, collidable: false },
+        Block::Torch => Collision { solid: true, collisionBox: false, collidable: false },
+        Block::SnowLayer => Collision { solid: true, collisionBox: true, collidable: false },
+        _ => Collision { solid: true, collisionBox: true, collidable: true },
+    };
+}
+
+/** Water state: is-water / is-source and the flow level. */
+struct Flow : Fluid {
+    water : bool,
+    source : bool,
+    fluid : i32,
+
+    /** Whether the block is any water (source or flowing). @return whether water */
+    fn isWater(self) : bool { return self.water; }
+
+    /** Whether the block is the still water source. @return whether the source */
+    fn isSource(self) : bool { return self.source; }
+
+    /** The water amount of the cell (8 source, 7..1 flowing, 0 none). @return fluid level */
+    fn fluidLevel(self) : i32 { return self.fluid; }
+}
+
+/**
+ * Fluid state for a block: the still source is level 8; each flowing block
+ * carries its own level 7..1; everything else is dry.
+ * @param id  the block
+ * @return its fluid capability
+ */
+fn flowOf(id : Block) : Flow {
+    return match id {
+        Block::Water => Flow { water: true, source: true, fluid: 8 },
+        Block::FlowWater1 => Flow { water: true, source: false, fluid: 1 },
+        Block::FlowWater2 => Flow { water: true, source: false, fluid: 2 },
+        Block::FlowWater3 => Flow { water: true, source: false, fluid: 3 },
+        Block::FlowWater4 => Flow { water: true, source: false, fluid: 4 },
+        Block::FlowWater5 => Flow { water: true, source: false, fluid: 5 },
+        Block::FlowWater6 => Flow { water: true, source: false, fluid: 6 },
+        Block::FlowWater7 => Flow { water: true, source: false, fluid: 7 },
+        _ => Flow { water: false, source: false, fluid: 0 },
+    };
+}
+
+/** Non-cube geometry flags. */
+struct Shape : Shaped {
+    snow : bool,
+    partial : bool,
+
+    /** Whether the block is the thin partial-height snow layer. @return whether snow layer */
+    fn isSnowLayer(self) : bool { return self.snow; }
+
+    /** Whether the block has a partial, floor-resting box. @return whether partial */
+    fn isPartialShape(self) : bool { return self.partial; }
+}
+
+/**
+ * Shape for a block: only the snow layer is a partial floor-resting box today.
+ * @param id  the block
+ * @return its shape capability
+ */
+fn shapeOf(id : Block) : Shape {
+    return match id {
+        Block::SnowLayer => Shape { snow: true, partial: true },
+        _ => Shape { snow: false, partial: false },
+    };
+}
+
+/** Plant-family flags: leaves vs grassy top. */
+struct Plant : Foliage {
+    leaves : bool,
+    grassy : bool,
+
+    /** Whether the block is a leaf block. @return whether leaves */
+    fn isLeaves(self) : bool { return self.leaves; }
+
+    /** Whether the block is a grass-family surface. @return whether grassy */
+    fn isGrassy(self) : bool { return self.grassy; }
+}
+
+/**
+ * Foliage for a block: the grass-family surfaces are grassy; the six log
+ * species' canopies plus cherry are leaves; everything else is neither.
+ * @param id  the block
+ * @return its foliage capability
+ */
+fn plantOf(id : Block) : Plant {
+    return match id {
+        Block::Grass | Block::GrassSavanna | Block::GrassJungle | Block::GrassSwamp | Block::GrassTaiga
+            => Plant { leaves: false, grassy: true },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Plant { leaves: true, grassy: false },
+        _ => Plant { leaves: false, grassy: false },
+    };
+}
+
+/** Gravity flag. */
+struct Weight : Weighted {
+    falling : bool,
+
+    /** Whether the block is subject to gravity. @return whether it falls */
+    fn falls(self) : bool { return self.falling; }
+}
+
+/**
+ * Weight for a block: sand, red sand and gravel drop when unsupported.
+ * @param id  the block
+ * @return its weight capability
+ */
+fn weightOf(id : Block) : Weight {
+    return match id {
+        Block::Sand | Block::RedSand | Block::Gravel => Weight { falling: true },
+        _ => Weight { falling: false },
+    };
+}
+
+/** Emitted-light level. */
+struct Emission : Emissive {
+    emit : i32,
+
+    /** Light the block emits (0 none, 1..15). @return emitted light */
+    fn lightEmission(self) : i32 { return self.emit; }
+}
+
+/**
+ * Emission for a block: glowstone is a full 15, a torch 14, all else dark.
+ * @param id  the block
+ * @return its emission capability
+ */
+fn emissionOf(id : Block) : Emission {
+    return match id {
+        Block::Glowstone => Emission { emit: 15 },
+        Block::Torch => Emission { emit: 14 },
+        _ => Emission { emit: 0 },
+    };
+}
+
+/** Sound material. */
+struct Sound : Audible {
+    matId : AudioMaterial,
+
+    /** Footstep / dig sound material. @return the material id */
+    fn material(self) : AudioMaterial { return self.matId; }
+}
+
+/**
+ * Sound for a block, grouped by material family; stone is the default for
+ * ores, bricks, terracotta, glowstone, torch, water, air and the snow layer.
+ * @param id  the block
+ * @return its sound capability
+ */
+fn soundOf(id : Block) : Sound {
+    return match id {
+        Block::Grass | Block::GrassSavanna | Block::GrassJungle | Block::GrassSwamp | Block::GrassTaiga
+        | Block::Podzol | Block::Mycelium | Block::Dirt | Block::CoarseDirt
+            => Sound { matId: AudioMaterial::Grass },
+        Block::Sand | Block::RedSand | Block::Sandstone | Block::RedSandstone
+            => Sound { matId: AudioMaterial::Sand },
+        Block::Gravel | Block::Clay
+            => Sound { matId: AudioMaterial::Gravel },
+        Block::Snow
+            => Sound { matId: AudioMaterial::Snow },
+        Block::Ice | Block::PackedIce
+            => Sound { matId: AudioMaterial::Glass },
+        Block::Wood | Block::Planks | Block::WoodBirch | Block::WoodSpruce | Block::WoodAcacia
+        | Block::WoodJungle | Block::WoodDarkOak | Block::Pumpkin | Block::Bamboo | Block::CherryLog
+            => Sound { matId: AudioMaterial::Wood },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+        | Block::Cactus | Block::Melon | Block::MushroomStem | Block::RedMushroom | Block::BrownMushroom
+            => Sound { matId: AudioMaterial::Foliage },
+        _ => Sound { matId: AudioMaterial::Stone },
+    };
+}
+
+/** Break resistance. */
+struct Toughness : Diggable {
+    hard : f64,
+
+    /** Break resistance (unused today; reserved for digging). @return hardness */
+    fn hardness(self) : f64 { return self.hard; }
+}
+
+/**
+ * Toughness for a block: air / water / torch break instantly (0.0), leaves are
+ * flimsy (0.2), the snow layer barely there (0.1), every full block is 1.0.
+ * @param id  the block
+ * @return its toughness capability
+ */
+fn toughnessOf(id : Block) : Toughness {
+    return match id {
+        Block::Air | Block::Torch
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+            => Toughness { hard: 0.0 },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Toughness { hard: 0.2 },
+        Block::SnowLayer => Toughness { hard: 0.1 },
+        _ => Toughness { hard: 1.0 },
+    };
+}
+
+/** Per-face atlas tiles + bounce albedo + fallback colour. */
+struct Surface : Textured {
+    albedoCol : i32,
+    baseCol : i32,
+    tTop : i32,
+    tBottom : i32,
+    tSide : i32,
+
+    /**
+     * Atlas tile for the given face. Top/bottom get their own tile on many
+     * blocks; the four sides share `tSide`.
+     * @param dir  the face direction
+     * @return the atlas tile index
+     */
+    fn tile(self, dir : FaceDir) : i32 {
+        return match dir {
+            FaceDir::Top => self.tTop,
+            FaceDir::Bottom => self.tBottom,
+            _ => self.tSide,
+        };
+    }
+
+    /** Approximate surface albedo for coloured indirect light. @return packed rgb */
+    fn albedo(self) : i32 { return self.albedoCol; }
+
+    /** Base RGB colour (fallback / hotbar swatch). @return packed rgb */
+    fn color(self) : i32 { return self.baseCol; }
+}
+
+// ── Surface archetypes ────────────────────────────────────────────────────
+// Common tile/colour shapes as one-line factories so each `surfaceOf` arm reads
+// as the data it is.
+
+/**
+ * A per-face solid: distinct top / bottom / side tiles.
+ * @param tTop     top-face tile
+ * @param tBottom  bottom-face tile
+ * @param tSide    side tile (all four sides)
+ * @param col      base colour
+ * @param albedo   bounce albedo
+ * @return the surface
+ */
+fn txSolid(tTop : i32, tBottom : i32, tSide : i32, col : i32, albedo : i32) : Surface {
+    return Surface { albedoCol: albedo, baseCol: col, tTop: tTop, tBottom: tBottom, tSide: tSide };
+}
+
+/** A surface with one tile on every face. */
+fn txUniform(tile : i32, col : i32, albedo : i32) : Surface {
+    return txSolid(tile, tile, tile, col, albedo);
+}
+
+/** A pillar surface: `top` on top/bottom, `side` on the four sides. */
+fn txColumn(top : i32, side : i32, col : i32, albedo : i32) : Surface {
+    return txSolid(top, top, side, col, albedo);
+}
+
+/** A grass-family surface: tinted top/side, dirt bottom, grass bounce albedo. */
+fn txGrass(tTop : i32, tSide : i32, col : i32) : Surface {
+    return Surface { albedoCol: rgb(112, 150, 72), baseCol: col, tTop: tTop, tBottom: config::tlDirt, tSide: tSide };
+}
+
+/** A leaf surface: one leaf tile on every face, canopy bounce albedo. */
+fn txLeaf(tile : i32, col : i32) : Surface {
+    return Surface { albedoCol: rgb(84, 122, 56), baseCol: col, tTop: tile, tBottom: tile, tSide: tile };
+}
+
+/** A water surface: the water tile everywhere, grey bounce albedo, given colour. */
+fn txWater(col : i32) : Surface {
+    return Surface { albedoCol: rgb(138, 138, 138), baseCol: col, tTop: config::tlWater, tBottom: config::tlWater, tSide: config::tlWater };
+}
+
+/**
+ * The one place per-block appearance lives: pick tiles / colour / albedo.
+ * @param id  the block
+ * @return its surface capability
+ */
+fn surfaceOf(id : Block) : Surface {
+    return match id {
+        Block::Air => Surface { albedoCol: rgb(138, 138, 138), baseCol: rgb(0, 0, 0), tTop: config::tlStone, tBottom: config::tlStone, tSide: config::tlStone },
+
+        // ── Grass family: tinted top, dirt bottom, tinted side ──
+        Block::Grass => txGrass(config::tlGrassTop, config::tlGrassSide, rgb(110, 170, 90)),
+        Block::GrassSavanna => txGrass(config::tlGrassTopSavanna, config::tlGrassSideSavanna, rgb(168, 156, 70)),
+        Block::GrassJungle => txGrass(config::tlGrassTopJungle, config::tlGrassSideJungle, rgb(80, 160, 56)),
+        Block::GrassSwamp => txGrass(config::tlGrassTopSwamp, config::tlGrassSideSwamp, rgb(96, 120, 80)),
+        Block::GrassTaiga => txGrass(config::tlGrassTopTaiga, config::tlGrassSideTaiga, rgb(120, 160, 130)),
+        Block::Podzol => txSolid(config::tlPodzolTop, config::tlDirt, config::tlPodzolSide, rgb(96, 68, 36), rgb(122, 92, 62)),
+        Block::Mycelium => txSolid(config::tlMyceliumTop, config::tlDirt, config::tlMyceliumSide, rgb(120, 104, 116), rgb(122, 92, 62)),
+
+        // ── Soils / loose ──
+        Block::Dirt => txUniform(config::tlDirt, rgb(140, 100, 64), rgb(122, 92, 62)),
+        Block::CoarseDirt => txUniform(config::tlCoarseDirt, rgb(122, 90, 58), rgb(122, 92, 62)),
+        Block::Sand => txUniform(config::tlSand, rgb(218, 205, 145), rgb(206, 188, 138)),
+        Block::RedSand => txUniform(config::tlRedSand, rgb(190, 110, 56), rgb(182, 112, 66)),
+        Block::Gravel => txUniform(config::tlGravel, rgb(122, 118, 112), rgb(138, 138, 138)),
+        Block::Clay => txUniform(config::tlClay, rgb(160, 165, 172), rgb(160, 164, 172)),
+        Block::Snow => txUniform(config::tlSnow, rgb(236, 240, 246), rgb(236, 240, 246)),
+        Block::Ice => txUniform(config::tlIce, rgb(150, 180, 235), rgb(168, 200, 224)),
+        Block::PackedIce => txUniform(config::tlPackedIce, rgb(140, 168, 222), rgb(168, 200, 224)),
+
+        // ── Stones / bricks ──
+        Block::Stone => txUniform(config::tlStone, rgb(128, 128, 132), rgb(138, 138, 138)),
+        Block::Cobble => txUniform(config::tlCobble, rgb(122, 120, 120), rgb(138, 138, 138)),
+        Block::MossyCobble => txUniform(config::tlMossyCobble, rgb(104, 116, 96), rgb(138, 138, 138)),
+        Block::Granite => txUniform(config::tlGranite, rgb(154, 110, 92), rgb(138, 138, 138)),
+        Block::Diorite => txUniform(config::tlDiorite, rgb(188, 188, 190), rgb(138, 138, 138)),
+        Block::Andesite => txUniform(config::tlAndesite, rgb(136, 138, 138), rgb(138, 138, 138)),
+        Block::StoneBricks => txUniform(config::tlStoneBricks, rgb(122, 122, 124), rgb(138, 138, 138)),
+        Block::Bricks => txUniform(config::tlBricks, rgb(150, 96, 80), rgb(138, 138, 138)),
+        Block::Sandstone => txSolid(config::tlSandstoneTop, config::tlSandstoneBottom, config::tlSandstoneSide, rgb(220, 208, 152), rgb(206, 188, 138)),
+        Block::RedSandstone => txSolid(config::tlRedSandstoneTop, config::tlRedSandstoneTop, config::tlRedSandstoneSide, rgb(184, 96, 38), rgb(182, 112, 66)),
+        Block::Terracotta => txUniform(config::tlTerracotta, rgb(150, 92, 66), rgb(138, 138, 138)),
+        Block::TerracottaOrange => txUniform(config::tlTerracottaOrange, rgb(162, 84, 38), rgb(138, 138, 138)),
+        Block::TerracottaWhite => txUniform(config::tlTerracottaWhite, rgb(208, 176, 156), rgb(138, 138, 138)),
+
+        // ── Logs (top/bottom = ring, side = bark) + leaves + planks ──
+        Block::Wood => txColumn(config::tlOakLogTop, config::tlOakLogSide, rgb(110, 78, 48), rgb(140, 106, 66)),
+        Block::Leaves => txLeaf(config::tlOakLeaves, rgb(58, 132, 60)),
+        Block::Planks => txUniform(config::tlPlanks, rgb(150, 112, 66), rgb(140, 106, 66)),
+        Block::WoodBirch => txColumn(config::tlBirchLogTop, config::tlBirchLogSide, rgb(196, 196, 188), rgb(140, 106, 66)),
+        Block::LeavesBirch => txLeaf(config::tlBirchLeaves, rgb(110, 150, 70)),
+        Block::WoodSpruce => txColumn(config::tlSpruceLogTop, config::tlSpruceLogSide, rgb(66, 48, 28), rgb(140, 106, 66)),
+        Block::LeavesSpruce => txLeaf(config::tlSpruceLeaves, rgb(54, 92, 64)),
+        Block::WoodAcacia => txColumn(config::tlAcaciaLogTop, config::tlAcaciaLogSide, rgb(104, 78, 64), rgb(140, 106, 66)),
+        Block::LeavesAcacia => txLeaf(config::tlAcaciaLeaves, rgb(100, 126, 46)),
+        Block::WoodJungle => txColumn(config::tlJungleLogTop, config::tlJungleLogSide, rgb(88, 68, 36), rgb(140, 106, 66)),
+        Block::LeavesJungle => txLeaf(config::tlJungleLeaves, rgb(50, 132, 38)),
+        Block::WoodDarkOak => txColumn(config::tlDarkOakLogTop, config::tlDarkOakLogSide, rgb(66, 50, 32), rgb(140, 106, 66)),
+        Block::LeavesDarkOak => txLeaf(config::tlDarkOakLeaves, rgb(62, 96, 48)),
+
+        // ── Decoration ──
+        Block::Cactus => txColumn(config::tlCactusTop, config::tlCactusSide, rgb(80, 118, 52), rgb(138, 138, 138)),
+        Block::Pumpkin => txColumn(config::tlPumpkinTop, config::tlPumpkinSide, rgb(190, 122, 38), rgb(196, 134, 48)),
+        Block::Melon => txColumn(config::tlMelonTop, config::tlMelonSide, rgb(110, 140, 40), rgb(196, 134, 48)),
+        Block::Glowstone => txUniform(config::tlGlowstone, rgb(180, 150, 92), rgb(138, 138, 138)),
+        Block::Torch => Surface { albedoCol: rgb(138, 138, 138), baseCol: rgb(240, 180, 70), tTop: config::tlTorch, tBottom: config::tlTorch, tSide: config::tlTorch },
+
+        // ── Water: still source (blue) + flowing levels (no fallback colour) ──
+        Block::Water => txWater(rgb(58, 110, 200)),
+        Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3 | Block::FlowWater4
+        | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+            => txWater(rgb(0, 0, 0)),
+
+        // ── Ores ──
+        Block::CoalOre => txUniform(config::tlCoalOre, rgb(70, 70, 72), rgb(138, 138, 138)),
+        Block::IronOre => txUniform(config::tlIronOre, rgb(150, 132, 116), rgb(138, 138, 138)),
+        Block::GoldOre => txUniform(config::tlGoldOre, rgb(160, 150, 96), rgb(138, 138, 138)),
+        Block::DiamondOre => txUniform(config::tlDiamondOre, rgb(120, 170, 170), rgb(138, 138, 138)),
+        Block::RedstoneOre => txUniform(config::tlRedstoneOre, rgb(140, 90, 88), rgb(138, 138, 138)),
+        Block::EmeraldOre => txUniform(config::tlEmeraldOre, rgb(90, 150, 104), rgb(138, 138, 138)),
+        Block::LapisOre => txUniform(config::tlLapisOre, rgb(90, 100, 140), rgb(138, 138, 138)),
+
+        // ── Expansion: bamboo, cherry, giant mushrooms ──
+        Block::Bamboo => txColumn(config::tlBambooTop, config::tlBambooSide, rgb(120, 160, 80), rgb(140, 106, 66)),
+        Block::CherryLog => txColumn(config::tlCherryLogTop, config::tlCherryLogSide, rgb(110, 80, 90), rgb(140, 106, 66)),
+        Block::CherryLeaves => txLeaf(config::tlCherryLeaves, rgb(236, 168, 206)),
+        Block::MushroomStem => txUniform(config::tlMushroomStem, rgb(206, 200, 186), rgb(138, 138, 138)),
+        Block::RedMushroom => txUniform(config::tlRedMushroom, rgb(180, 40, 40), rgb(138, 138, 138)),
+        Block::BrownMushroom => txUniform(config::tlBrownMushroom, rgb(150, 112, 76), rgb(138, 138, 138)),
+
+        // ── Partial-height snow layer ──
+        Block::SnowLayer => Surface { albedoCol: rgb(236, 240, 246), baseCol: rgb(236, 240, 246), tTop: config::tlSnow, tBottom: config::tlSnow, tSide: config::tlSnow },
+
+        // Fallback: a plain stone-like solid (matches the old per-fn defaults).
+        _ => txUniform(config::tlStone, rgb(0, 0, 0), rgb(138, 138, 138)),
+    };
+}
+
+// ── Free-function facade ──────────────────────────────────────────────────
+// Unchanged signatures, consumed across the kernels. Each is a thin delegate
+// onto the matching per-capability factory above.
+
+/**
+ * True when `id` is the air block.
+ * @param id  the block
+ * @return whether the block is air
+ */
+fn isAir(id : Block) : bool {
+    return emptyOf(id).isAir();
+}
+
+/**
+ * A face between a block and `id` is drawn when `id` lets light/air
+ * through. Air (and, later, glass) are non-occluding.
+ * @param id  the block
+ * @return whether the block is transparent
+ */
+fn isTransparent(id : Block) : bool {
+    return occlusionOf(id).isTransparent();
+}
+
+/** A thin partial-height snow layer that sits on the ground / canopy. */
+fn isSnowLayer(id : Block) : bool {
+    return shapeOf(id).isSnowLayer();
+}
+
+/**
+ * A block whose collision/visual box is SHORTER than a full cube but still
+ * rests on the cell floor and fills the whole XZ footprint (a thin snow layer
+ * today; bottom slabs later). Its real height comes from
+ * `ChunkManager.blockBoxHeight`. The general "partial block" category every
+ * system (physics, mesher, picker, selection) branches on instead of naming a
+ * concrete block — add a block id here and to `blockBoxHeight` and it Just Works.
+ * @param id  the block
+ * @return whether the block has a partial, floor-resting box
+ */
+fn isPartialShape(id : Block) : bool {
+    return shapeOf(id).isPartialShape();
+}
+
+/**
+ * THE single authority for a block's real box HEIGHT (its vertical extent within
+ * a cell): a full block is 1.0, a thin SnowLayer its noise-varied `snowDepth`.
+ * Every system — collision (collideFloorCell / supportHeight), meshing, the
+ * look-ray picker and the selection wireframe — resolves height through here (the
+ * manager's blockBoxHeight seam and the mesher both call it), so the box, the
+ * visual and the hitbox always agree. Adding a partial block (a slab, a carpet) =
+ * one new arm here (plus listing it in `isPartialShape`); nothing else hard-codes
+ * a height.
+ * @param id  the block id occupying the cell
+ * @param wx  the cell's world x (for the snow noise)
+ * @param wz  the cell's world z (for the snow noise)
+ * @return the cell box's real height in Y (1.0 full, snowDepth for snow)
+ */
+fn partialBoxHeight(id : Block, wx : f64, wz : f64) : f64 {
+    return match id {
+        Block::SnowLayer => snowDepth(wx, wz),
+        _ => 1.0,
+    };
+}
+
+/**
+ * Does the block carry a physical collision box you stand on / against? Every
+ * solid except torches (air and water have no box). Its HEIGHT (full cube vs a
+ * partial slab/snow) is read separately from `blockBoxHeight`.
+ * @param id  the block
+ * @return whether the block has a collision box
+ */
+fn hasCollisionBox(id : Block) : bool {
+    return collisionOf(id).hasCollisionBox();
+}
+
+/**
+ * True for any water — the still source and the flowing levels. Used by
+ * physics (swim / buoyancy) and the renderer (water shading / ripple).
+ * @param id  the block
+ * @return whether the block is water
+ */
+fn isWater(id : Block) : bool {
+    return flowOf(id).isWater();
+}
+
+/**
+ * A "real" block the look-ray can target and that occludes more than
+ * air: everything except air and water (still or flowing). Water is
+ * see-through for aiming and you swim through it.
+ * @param id  the block
+ * @return whether the block is solid
+ */
+fn isSolid(id : Block) : bool {
+    return collisionOf(id).isSolid();
+}
+
+/**
+ * A block subject to gravity in the block-update sim — it falls when the
+ * cell below is air or water (sand and gravel, like Minecraft).
+ * @param id  the block
+ * @return whether the block falls
+ */
+fn falls(id : Block) : bool {
+    return weightOf(id).falls();
+}
+
+/**
+ * The water "amount" of a cell: 8 for the still source, 7..1 for the flowing
+ * levels, 0 for non-water. Higher feeds lower in the flow sim.
+ * @param id  the block
+ * @return the fluid level (0 = not water)
+ */
+fn fluidLevel(id : Block) : i32 {
+    return flowOf(id).fluidLevel();
+}
+
+/**
+ * The flowing-water block of level `n` (clamped to 1..7). The still source
+ * (`Block::Water`) is only created by the generator / player, never by flow.
+ * @param n  the desired level
+ * @return the matching FlowWater block
+ */
+fn fluidOfLevel(n : i32) : Block {
+    return match n {
+        7 => Block::FlowWater7,
+        6 => Block::FlowWater6,
+        5 => Block::FlowWater5,
+        4 => Block::FlowWater4,
+        3 => Block::FlowWater3,
+        2 => Block::FlowWater2,
+        _ => Block::FlowWater1,
+    };
+}
+
+/**
+ * Is this the still water source (vs a flowing level)? The source never dries
+ * up; flowing water recedes when its feed is removed.
+ * @param id  the block
+ * @return whether the block is the water source
+ */
+fn isSource(id : Block) : bool {
+    return flowOf(id).isSource();
+}
+
+/**
+ * A block the player physically stands on / can't walk through — every
+ * real block (anything but air and water). Leaves included, like MC.
+ * @param id  the block
+ * @return whether the block is collidable
+ */
+fn isCollidable(id : Block) : bool {
+    return collisionOf(id).isCollidable();
+}
+
+/**
+ * Light a block emits into the world (0 = none, 1..15 = brightness). Torches
+ * and glowstone are the light sources; the engine floods this outward.
+ * @param id  the block
+ * @return the emitted light level (0..15)
+ */
+fn lightEmission(id : Block) : i32 {
+    return emissionOf(id).lightEmission();
+}
+
+/**
+ * True for the leaf blocks. They cull faces like solids (you can't see through
+ * a canopy) but let LIGHT through, so a tree doesn't stamp a hard black shadow
+ * on the ground.
+ * @param id  the block
+ * @return whether the block is leaves
+ */
+fn isLeaves(id : Block) : bool {
+    return plantOf(id).isLeaves();
+}
+
+/**
+ * Does a block stop light (and cast shade)? Air, water, torches and leaves let
+ * light through; every other full block blocks it.
+ * @param id  the block
+ * @return whether the block is opaque to light
+ */
+fn isOpaque(id : Block) : bool {
+    return occlusionOf(id).isOpaque();
+}
+
+/**
+ * True for the grass-family blocks (grass top/side + dirt bottom).
+ * @param id  the block
+ * @return whether the block is grassy
+ */
+fn isGrassy(id : Block) : bool {
+    return plantOf(id).isGrassy();
+}
+
+/**
+ * Sound material of a block (config::mat*), shared by footsteps and the
+ * dig / place sound.
+ * @param id  the block
+ * @return the material id (config::mat*)
+ */
+fn materialOf(id : Block) : AudioMaterial {
+    return soundOf(id).material();
+}
+
+/**
+ * Approximate surface albedo of a block, used for one-bounce coloured indirect
+ * light (the sky-AO rays sample the colour of what they hit).
+ * @param id  the block
+ * @return packed rgb albedo
+ */
+fn albedoFor(id : Block) : i32 {
+    return surfaceOf(id).albedo();
+}
+
+/**
+ * Atlas tile for a block on face `dir` (top / bottom get their own tile on
+ * many blocks; the four sides share one).
+ * @param id   the block
+ * @param dir  the face direction
+ * @return the atlas tile index
+ */
+fn tileFor(id : Block, dir : FaceDir) : i32 {
+    return surfaceOf(id).tile(dir);
+}
+
+/**
+ * Base RGB colour of a block (fallback / hotbar swatch).
+ * @param id  the block
+ * @return the packed RGB colour
+ */
+fn color(id : Block) : i32 {
+    return surfaceOf(id).color();
+}

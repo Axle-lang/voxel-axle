@@ -44,7 +44,7 @@ sun glow with god-rays and a graded atmospheric sky.*
 ## Prerequisites
 
 You need three things: this repo **with its submodule**, the **Axle compiler**
-(v0.2.22 or newer) and the **SDL2** library.
+(v0.4.4 or newer) and the **SDL2** library.
 
 ### 0. Clone the repo and its SDL2 platform submodule
 
@@ -64,18 +64,18 @@ git submodule update --init --recursive
 
 Later, to pull upstream platform-layer changes: `git submodule update --remote`.
 
-### 1. Install the Axle compiler (v0.2.22+)
+### 1. Install the Axle compiler (v0.4.4+)
 
-This project must be built with Axle **v0.2.22 or newer**. Check what you
+This project must be built with Axle **v0.4.4 or newer**. Check what you
 have:
 
 ```bash
-axle --version      # must print 0.2.22 or higher
+axle --version      # must print 0.4.4 or higher
 ```
 
 If it's missing or older:
 
-- **Windows** — install the Windows x64 `.msi` from the `v0.2.22` (or
+- **Windows** — install the Windows x64 `.msi` from the `v0.4.4` (or
   newer) release; it installs `axle.exe` to `C:\Program Files (x86)\Axle\`
   and onto your `PATH`. Or build from source from the `axle` compiler repo:
   ```powershell
@@ -116,7 +116,7 @@ runtime.
 ## Build & run
 
 From this directory, with the `vendor/sdl_platform` submodule initialised,
-`axle --version` reporting 0.2.22+ and SDL2 installed:
+`axle --version` reporting 0.4.4+ and SDL2 installed:
 
 ```bash
 axle run            # compile + run

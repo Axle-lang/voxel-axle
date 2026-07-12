@@ -1,0 +1,14 @@
+// Cow — big, slow grazer. Uses the base wander AI.
+
+use crate::kernel::kentity::mob::Mob;
+use crate::config;
+use crate::config::{ MobKind };
+
+class Cow : Mob {
+    /** Create a cow at (x, y, z). */
+    constructor(x : f64, y : f64, z : f64) {
+        super(x, y, z, MobKind::Cow, config::mobCowHp);
+        self.speed = config::mobCowSpeed;
+        self.height = 1.4;
+    }
+}

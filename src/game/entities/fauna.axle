@@ -1,0 +1,43 @@
+// fauna — the game's mob roster + spawn weights (application content). Implements
+// the kernel's `MobSpawner` seam so kworld/kentity's MobManager can populate the
+// world without ever naming a concrete species.
+
+use crate::kernel::kentity::mob::{ Mob, MobSpawner };
+use crate::game::entities::creeper::Creeper;
+use crate::game::entities::pig::Pig;
+use crate::game::entities::cow::Cow;
+use crate::game::entities::sheep::Sheep;
+use crate::game::entities::chicken::Chicken;
+
+/** The game's fauna: rolls a weighted species and builds it. */
+class Fauna : MobSpawner {
+    /** No per-spawner state — the roster is fixed. */
+    constructor() {
+    }
+
+    /**
+     * Roll a species and build it at (x, y, z). The cut points weight the herd
+     * toward chickens / sheep and keep creepers rare (~22% creeper, 18% pig,
+     * 18% cow, 21% sheep, 21% chicken).
+     * @param x    world x
+     * @param y    world y
+     * @param z    world z
+     * @param rnd  a fresh pseudo-random value in [0,1) for the roll
+     * @return the new creature as a base Mob
+     */
+    fn create(mut self, x : f64, y : f64, z : f64, rnd : f64) : Mob {
+        if (rnd > 0.78) {
+            return new Creeper(x, y, z);
+        }
+        if (rnd > 0.60) {
+            return new Pig(x, y, z);
+        }
+        if (rnd > 0.42) {
+            return new Cow(x, y, z);
+        }
+        if (rnd > 0.21) {
+            return new Sheep(x, y, z);
+        }
+        return new Chicken(x, y, z);
+    }
+}

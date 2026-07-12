@@ -1,0 +1,432 @@
+// sfx — the game's audio orchestrator. Owns the single software Mixer and every
+// sound bank, and exposes semantic play methods. Positional sounds (a mob's
+// voice, a dug block, the creeper's fuse / blast) carry their WORLD POSITION and
+// an audible range; the mixer attenuates them live against the listener set each
+// frame via `setListener`, so a sound fades as the player walks away — even
+// mid-playback. The player's own sounds (footstep, hurt, splash, ambience) are
+// non-positional and play at a fixed gain.
+//
+// The manager is split by capability into small components: a `BankLoader`
+// resolves the sounds/ prefix once and decodes banks; a `Cue` is a loaded bank
+// with its gain (and, for a 3D source, its range) that plays one random variant
+// — non-positional via `Voiced.play`, distance-attenuated via `Positional.playAt`.
+// Footstep / dig material banks and mob voices are modelled uniformly as Cues
+// (grouped by `MaterialSound` and `MobVoice`), so the manager holds no bespoke
+// per-sound fields — only cues it emits under the mixer lock. Clips live under
+// `assets/sounds/` (next to the binary or one dir up — the prefix is resolved
+// once). Missing files are silent.
+//
+// `audioLoop` pumps the device on its own OS thread so a slow render/bake frame
+// can't starve the queue and stutter the sound.
+
+use sdl_platform::{Mixer, SoundBank};
+use sdl_platform::fileExists;
+use crate::kernel::kblock::blocks::materialOf;
+use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3 };
+use crate::config;
+use crate::config::{ Block, AudioMaterial, MobKind };
+
+/**
+ * Folder name under `step/` and `dig/` for the material with discriminant `m`
+ * (0=Grass … 7=Glass, the AudioMaterial enum order). A single index→folder data
+ * map that folds the former `materialAt` (index→material) and `matFolder`
+ * (material→folder) pair into one lookup — the load loop walks discriminants
+ * directly, and the play path already indexes the cues by `material as i32`.
+ * @param m  the material discriminant
+ * @return the material's folder name
+ */
+fn matFolder(m : i32) : string {
+    return match m {
+        0 => "grass",
+        1 => "sand",
+        2 => "gravel",
+        3 => "snow",
+        4 => "stone",
+        5 => "wood",
+        6 => "foliage",
+        _ => "glass",
+    };
+}
+
+/**
+ * Load sound banks from disk. Resolves the `assets/sounds/` prefix once (next to
+ * the binary, or one directory up) and decodes banks relative to it — the sole
+ * owner of the on-disk layout, so the manager only deals in loaded cues.
+ */
+class BankLoader {
+    base : string,
+
+    /** Resolve the sounds prefix by probing a known clip. */
+    constructor() {
+        self.base = "assets/sounds/";
+        if (!fileExists("assets/sounds/step/grass/1.wav")) {
+            self.base = "../assets/sounds/";
+        }
+    }
+
+    /**
+     * A bank of the numbered variants `1.wav`..`8.wav` under `<base><rel>/`
+     * (missing files skipped silently).
+     * @param rel  the folder, relative to the sounds prefix
+     * @return the loaded bank
+     */
+    fn dir(self, rel : string) : SoundBank {
+        let b : SoundBank = new SoundBank(8);
+        let i : i32 = 1;
+        while (i <= 8) {
+            b.add(self.base + rel + "/" + i + ".wav");
+            i = i + 1;
+        }
+        return b;
+    }
+
+    /**
+     * A one-clip bank from the single file `<base><rel>` (a bespoke sound that
+     * is not a numbered variant folder, e.g. the creeper's charge / blast).
+     * @param rel  the file path, relative to the sounds prefix
+     * @return the loaded bank
+     */
+    fn file(self, rel : string) : SoundBank {
+        let b : SoundBank = new SoundBank(1);
+        b.add(self.base + rel);
+        return b;
+    }
+}
+
+/**
+ * Play one random variant of a sound group at a fixed, non-positional gain — the
+ * player's own sounds (footstep, hurt, splash, ambience), which are heard at the
+ * same level wherever they happen.
+ */
+trait Voiced {
+    fn play(self, mx : Mixer, rnd : f64) : void;
+}
+
+/**
+ * Play one random variant as a 3D world source, attenuated live by listener
+ * distance — a mob's voice, a dug block, the creeper's fuse / blast, which fade
+ * as the player walks away.
+ */
+trait Positional {
+    fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void;
+}
+
+/**
+ * A loaded sound group ready to play: its bank plus the playback `gain` and (for
+ * a positional source) the audible `range`. One Cue serves both capabilities —
+ * the caller chooses `play` (non-positional) or `playAt` (3D-attenuated) — so the
+ * same abstraction models every sound the game emits. Playing an empty bank (a
+ * species with no clip) is a silent no-op, folding the old "if loaded" guards
+ * into the play path. `bank.loaded()` is read directly for material fallback.
+ */
+struct Cue : Voiced, Positional {
+    bank : SoundBank,
+    gain : f64,
+    range : f64,
+
+    /** Play a random variant at the fixed gain (non-positional). */
+    fn play(self, mx : Mixer, rnd : f64) : void {
+        self.bank.playRand(mx, rnd, self.gain);
+    }
+
+    /** Play a random variant at `pos`, attenuated live by listener distance. */
+    fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void {
+        self.bank.playRandPos(mx, rnd, self.gain, pos.x, pos.y, pos.z, self.range);
+    }
+}
+
+/**
+ * A material's two ground sounds: the non-positional `step` under the listener's
+ * feet and the positional `dig` at the edited block. One per AudioMaterial,
+ * indexed by discriminant; a material with no clip falls back to stone's cue.
+ */
+struct MaterialSound {
+    step : Cue,
+    dig : Cue,
+}
+
+/**
+ * A mob species' positional voice: an idle `say` cue and a `hurt` cry cue, both
+ * attenuated live by distance. One per MobKind, indexed by discriminant — a
+ * species with no dedicated hurt clip reuses the shared player-hurt bank, and
+ * the creeper's say cue wraps an empty bank (a silent no-op).
+ */
+struct MobVoice {
+    say : Cue,
+    hurt : Cue,
+}
+
+/**
+ * Publish the listener (player) position each frame so positional cues attenuate
+ * live by distance. Implemented by AudioManager, which owns the mixer.
+ */
+trait Listener {
+    fn setListener(self, x : f64, y : f64, z : f64) : void;
+}
+
+class AudioManager : Listener {
+    mixer : Mixer,
+    lock : AtomicBoolean,    // spinlock guarding the mixer between the main
+                             // thread (play / setListener) and the audio thread
+                             // (pump) — see audioLoop. AtomicBoolean is the only
+                             // std lock primitive with a usable constructor.
+    running : AtomicBoolean, // false tells the audio thread to exit (on quit)
+    materials : MaterialSound[], // footstep + dig cues, indexed by AudioMaterial
+    voices : MobVoice[],     // one voice per MobKind, indexed by its discriminant
+    playerHurtCue : Cue,
+    splashCue : Cue,
+    ambientCue : Cue,
+    creeperFuseCue : Cue,
+    creeperBlastCue : Cue,
+
+    /** Open the mixer, resolve the sounds/ prefix and load every cue. */
+    constructor() {
+        self.mixer = new Mixer();
+        self.lock = new AtomicBoolean(false);
+        self.running = new AtomicBoolean(true);
+        let ld : BankLoader = new BankLoader();
+
+        // Per-material footstep + dig cues. `m` IS the AudioMaterial discriminant,
+        // so the cues land at the same index the play path reads them by
+        // (`material as i32`); variants are auto-discovered 1..8.
+        self.materials = malloc<MaterialSound>(config::matCount);
+        let m : i32 = 0;
+        while (m < config::matCount) {
+            self.materials[m] = MaterialSound {
+                step: Cue { bank: ld.dir("step/" + matFolder(m)), gain: config::volFootstep, range: 0.0 },
+                dig: Cue { bank: ld.dir("dig/" + matFolder(m)), gain: config::volBreak, range: config::sndBreakDist },
+            };
+            m = m + 1;
+        }
+
+        // The player's own non-positional sounds. The hurt bank is reused below as
+        // the shared fallback for species with no dedicated hurt cry.
+        let hurt : SoundBank = ld.dir("player/hurt");
+        self.playerHurtCue = Cue { bank: hurt, gain: config::volPlayer, range: 0.0 };
+        self.splashCue = Cue { bank: ld.dir("player/splash"), gain: config::volPlayer, range: 0.0 };
+        self.ambientCue = Cue { bank: ld.dir("ambient/underwater"), gain: config::volAmbient, range: 0.0 };
+
+        // One positional voice (idle say + hurt cry) per MobKind, at mob gain /
+        // range. Sheep / pig / creeper have no dedicated hurt clip, so their hurt
+        // cue reuses the shared player-hurt bank; the creeper has no idle voice,
+        // so its say cue wraps an empty bank (a silent no-op).
+        self.voices = malloc<MobVoice>(5);
+        let noSay : SoundBank = new SoundBank(1);
+        self.voices[MobKind::Chicken as i32] = MobVoice {
+            say: Cue { bank: ld.dir("mob/chicken/say"), gain: config::volMob, range: config::sndMobDist },
+            hurt: Cue { bank: ld.dir("mob/chicken/hurt"), gain: config::volMob, range: config::sndMobDist },
+        };
+        self.voices[MobKind::Sheep as i32] = MobVoice {
+            say: Cue { bank: ld.dir("mob/sheep/say"), gain: config::volMob, range: config::sndMobDist },
+            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+        };
+        self.voices[MobKind::Cow as i32] = MobVoice {
+            say: Cue { bank: ld.dir("mob/cow/say"), gain: config::volMob, range: config::sndMobDist },
+            hurt: Cue { bank: ld.dir("mob/cow/hurt"), gain: config::volMob, range: config::sndMobDist },
+        };
+        self.voices[MobKind::Creeper as i32] = MobVoice {
+            say: Cue { bank: noSay, gain: config::volMob, range: config::sndMobDist },
+            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+        };
+        self.voices[MobKind::Pig as i32] = MobVoice {
+            say: Cue { bank: ld.dir("mob/pig/say"), gain: config::volMob, range: config::sndMobDist },
+            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+        };
+
+        // The creeper's charge / blast are single bespoke files (not numbered
+        // variant folders), so load them directly.
+        self.creeperFuseCue = Cue { bank: ld.file("mob/creeper/charge.wav"), gain: config::volCreeper, range: config::sndCreeperDist };
+        self.creeperBlastCue = Cue { bank: ld.file("mob/creeper/exploded.wav"), gain: config::volCreeper, range: config::sndCreeperDist };
+    }
+
+    /**
+     * Set the listener (player) position for live distance attenuation.
+     * @param x  listener x
+     * @param y  listener y
+     * @param z  listener z
+     */
+    fn setListener(self, x : f64, y : f64, z : f64) : void {
+        self.acquire();
+        self.mixer.setListener(x, y, z);
+        self.release();
+    }
+
+    /** Spin until this thread owns the mixer lock (short critical sections). */
+    fn acquire(self) : void {
+        while (!self.lock.compareAndSet(false, true)) {
+        }
+    }
+
+    /** Release the mixer lock. */
+    fn release(self) : void {
+        self.lock.set(false);
+    }
+
+    /**
+     * Emit a non-positional cue under the mixer lock.
+     * @param cue  the cue to play
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn emit(self, cue : Cue, rnd : f64) : void {
+        self.acquire();
+        cue.play(self.mixer, rnd);
+        self.release();
+    }
+
+    /**
+     * Emit a positional cue at `pos` under the mixer lock.
+     * @param cue  the cue to play
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
+    fn emitAt(self, cue : Cue, rnd : f64, pos : Vec3) : void {
+        self.acquire();
+        cue.playAt(self.mixer, rnd, pos);
+        self.release();
+    }
+
+    /**
+     * Top up the audio device queue under the lock. Called by the dedicated
+     * audio thread (audioLoop), NOT per frame — so a slow render/bake frame can
+     * no longer starve the queue and make the sound stutter.
+     */
+    fn pumpTick(self) : void {
+        self.acquire();
+        self.mixer.pump();
+        self.release();
+    }
+
+    /** Signal the audio thread to stop (call before joining it on quit). */
+    fn stop(self) : void {
+        self.running.set(false);
+    }
+
+    /** Whether the audio thread should keep running. */
+    fn isRunning(self) : bool {
+        return self.running.get();
+    }
+
+    /**
+     * The footstep cue for material `mat`, falling back to stone where the
+     * material has no footfall clip (e.g. ice).
+     * @param mat  the surface material
+     * @return the cue to play
+     */
+    fn stepCue(self, mat : AudioMaterial) : Cue {
+        let c : Cue = self.materials[mat as i32].step;
+        if (!c.bank.loaded()) {
+            c = self.materials[AudioMaterial::Stone as i32].step;
+        }
+        return c;
+    }
+
+    /**
+     * The dig cue for material `mat`, falling back to stone where the material
+     * has no dig clip.
+     * @param mat  the edited block's material
+     * @return the cue to play
+     */
+    fn digCue(self, mat : AudioMaterial) : Cue {
+        let c : Cue = self.materials[mat as i32].dig;
+        if (!c.bank.loaded()) {
+            c = self.materials[AudioMaterial::Stone as i32].dig;
+        }
+        return c;
+    }
+
+    /**
+     * Footstep for the block underfoot (the listener's own step, fixed gain).
+     * @param blockId  the block stepped on
+     * @param rnd      variant selector in [0, 1)
+     */
+    fn footstep(self, blockId : Block, rnd : f64) : void {
+        self.emit(self.stepCue(materialOf(blockId)), rnd);
+    }
+
+    /**
+     * Dig / place sound at a block, attenuated live by distance.
+     * @param blockId  the block broken or placed
+     * @param cell     the block cell
+     * @param rnd      variant selector in [0, 1)
+     */
+    fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
+        let center : Vec3 = vec3((cell.x as f64) + 0.5, (cell.y as f64) + 0.5, (cell.z as f64) + 0.5);
+        self.emitAt(self.digCue(materialOf(blockId)), rnd, center);
+    }
+
+    /**
+     * A mob's idle voice at its world position, attenuated live by distance.
+     * @param kind  the mob kind
+     * @param pos   the source position
+     * @param rnd   variant selector in [0, 1)
+     */
+    fn mobSay(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+        self.emitAt(self.voices[kind as i32].say, rnd, pos);
+    }
+
+    /**
+     * A mob's hurt cry at its world position. Species without a dedicated clip
+     * fall back to the generic impact (player hurt) sound.
+     * @param kind  the mob kind
+     * @param pos   the source position
+     * @param rnd   variant selector in [0, 1)
+     */
+    fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+        self.emitAt(self.voices[kind as i32].hurt, rnd, pos);
+    }
+
+    /**
+     * The player taking damage (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn playerHurt(self, rnd : f64) : void {
+        self.emit(self.playerHurtCue, rnd);
+    }
+
+    /**
+     * A splash as the player enters water (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn splash(self, rnd : f64) : void {
+        self.emit(self.splashCue, rnd);
+    }
+
+    /**
+     * A soft underwater ambience while submerged (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn ambientUnderwater(self, rnd : f64) : void {
+        self.emit(self.ambientCue, rnd);
+    }
+
+    /**
+     * The creeper lighting its fuse, attenuated live by distance.
+     * @param pos  the creeper position
+     */
+    fn creeperFuse(self, pos : Vec3) : void {
+        self.emitAt(self.creeperFuseCue, 0.0, pos);
+    }
+
+    /**
+     * The creeper detonating, attenuated live by distance.
+     * @param pos  the creeper position
+     */
+    fn creeperBlast(self, pos : Vec3) : void {
+        self.emitAt(self.creeperBlastCue, 0.0, pos);
+    }
+}
+
+/**
+ * The audio thread body: top up the device queue continuously, decoupled from
+ * the frame loop, so heavy render/light-bake frames can't starve the sound. Runs
+ * on its own OS thread (spawned in main); exits when the manager is stopped.
+ * @param sfx  the audio manager to pump
+ * @return 0 (Task result unused)
+ */
+fn audioLoop(sfx : AudioManager) : i32 {
+    while (sfx.isRunning()) {
+        sfx.pumpTick();
+        System::sleep(4);
+    }
+    return 0;
+}

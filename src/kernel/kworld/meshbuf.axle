@@ -1,0 +1,38 @@
+// meshbuf — the shared render-mesh buffer layouts, in a leaf so both the world
+// manager (which owns/allocates them), the mesher (which writes them) and the
+// renderer (which reads them) can name the field layout regardless of module
+// order. Plain data: raw `i32[]` / `i64` buffers, no behaviour.
+
+/**
+ * The baked render-mesh faces, one set shared by the whole chunk ring: a
+ * per-slot face count plus SoA face attributes — world cell (fx/fy/fz), the
+ * packed (dir<<8|tile) and the per-corner smooth light / AO byte volumes. The
+ * mesher writes them, the renderer reads them; grouped so ChunkManager holds one
+ * field, not seven.
+ */
+struct FaceMesh {
+    fcount : i32[],  // face count per slot
+    fx : i32[],
+    fy : i32[],
+    fz : i32[],
+    ftile : i32[],   // packs (dir << 8) | tile — see ChunkMesher.addFace
+    flight : i64,    // per-face SMOOTH light: 4 bytes/face, one per corner,
+                     // packing (sky << 4) | block (Minecraft-style smooth light)
+    fao : i64,       // per-face ambient occlusion: 4 bytes/face, 0..3 per corner
+}
+
+/** Per-slot torch posts (drawn as thin columns, not cubes): world x/y/z + count. */
+struct TorchField {
+    tx : i32[],      // torch world x
+    ty : i32[],      // torch world y
+    tz : i32[],      // torch world z
+    tcount : i32[],  // torch count per slot
+}
+
+/** The chunk ring's per-slot ownership: chunk coords, loaded flag, collision top. */
+struct ColumnRing {
+    cxs : i32[],
+    czs : i32[],
+    loaded : i32[],
+    ctop : i32[],    // per-column highest collidable voxel + 1 (entity physics)
+}

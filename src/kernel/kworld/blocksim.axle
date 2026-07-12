@@ -1,0 +1,297 @@
+// blocksim — the block-update / "life" system. A bounded FIFO of world cells
+// that need re-evaluating, stepped on a fixed cadence (game::tick::dueSim) with
+// a per-step budget. Two behaviours today, both reusing ChunkManager.setVoxel
+// (which re-meshes the affected slots): blocks that FALL (sand / gravel drop
+// when the cell below is air or water) and WATER that FLOWS (a source spreads
+// down then sideways losing a level each block, and flowing water recedes when
+// its feed is cut). It is edit-driven: nothing is enqueued until the player
+// disturbs the world, so the generated oceans never simulate.
+//
+// Stability: the queue is a ring buffer that drops on overflow, the per-step
+// budget caps work per tick, horizontal spread is bounded to 7 levels and
+// falling to the world height — so every disturbance terminates.
+
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::kernel::kblock::blocks::{ isWater, isSolid, falls, fluidLevel, fluidOfLevel, isSource };
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::config;
+use crate::config::{ Block };
+
+class BlockSim {
+    pending : IVec3[],   // ring buffer of world cells awaiting re-evaluation
+    head : i32,
+    tail : i32,
+    count : i32,
+    cap : i32,
+
+    /** Allocate the pending-cell ring buffer. */
+    constructor() {
+        self.cap = config::simQueueCap;
+        self.pending = malloc<IVec3>(self.cap);
+        self.head = 0;
+        self.tail = 0;
+        self.count = 0;
+    }
+
+    /**
+     * Queue a cell for re-evaluation. Drops silently when full (keeps the sim
+     * bounded and stable rather than growing without limit).
+     * @param cell  the world cell
+     */
+    fn enqueue(mut self, cell : IVec3) : void {
+        if (self.count >= self.cap) {
+            return;
+        }
+        self.pending[self.tail] = IVec3 { x: cell.x, y: cell.y, z: cell.z };
+        self.tail = self.tail + 1;
+        if (self.tail >= self.cap) {
+            self.tail = 0;
+        }
+        self.count = self.count + 1;
+    }
+
+    /**
+     * Queue the four horizontal neighbours of a cell.
+     * @param cell  the world cell
+     */
+    fn enqueue4(mut self, cell : IVec3) : void {
+        self.enqueue(ivec3(cell.x + 1, cell.y, cell.z));
+        self.enqueue(ivec3(cell.x - 1, cell.y, cell.z));
+        self.enqueue(ivec3(cell.x, cell.y, cell.z + 1));
+        self.enqueue(ivec3(cell.x, cell.y, cell.z - 1));
+    }
+
+    /**
+     * Queue a cell and all six of its neighbours — the trigger after a world
+     * edit, so a dug hole, a placed block and the blocks/water around it all
+     * get a chance to react.
+     * @param cell  the world cell
+     */
+    fn enqueue6(mut self, cell : IVec3) : void {
+        self.enqueue(cell);
+        self.enqueue(ivec3(cell.x, cell.y + 1, cell.z));
+        self.enqueue(ivec3(cell.x, cell.y - 1, cell.z));
+        self.enqueue4(cell);
+    }
+
+    /**
+     * Process up to `config::simBudget` queued cells. Call on the sim cadence.
+     * @param man  the chunk manager whose voxels are read and written
+     */
+    fn step(mut self, man : ChunkManager) : void {
+        // Process only the cells already queued at the START of this step (one
+        // "generation"). Cells enqueued during processing (the next ring of
+        // spread / the next block of a fall) wait for the next step, so water
+        // advances exactly one block-ring per step and pours in calmly instead
+        // of filling all at once. The budget still caps a generation so a big
+        // flood can't spike one frame.
+        let gen : i32 = self.count;
+        if (gen > config::simBudget) {
+            gen = config::simBudget;
+        }
+        let i : i32 = 0;
+        while (i < gen) {
+            let cell : IVec3 = self.pending[self.head];
+            self.head = self.head + 1;
+            if (self.head >= self.cap) {
+                self.head = 0;
+            }
+            self.count = self.count - 1;
+            self.process(man, cell);
+            i = i + 1;
+        }
+    }
+
+    /**
+     * Re-evaluate one cell: fall, flow, or do nothing.
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     */
+    fn process(mut self, man : ChunkManager, cell : IVec3) : void {
+        let cur : Block = man.worldGet(cell);
+        if (falls(cur)) {
+            self.doFall(man, cell, cur);
+            return;
+        }
+        if (isWater(cur)) {
+            self.doFluid(man, cell, cur);
+        }
+    }
+
+    /**
+     * A falling block drops one cell when the space below is air or water.
+     * The block that was above it (which may now be unsupported) and the
+     * landing site are re-queued so a stack falls in sequence.
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param cur   the falling block id
+     */
+    fn doFall(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
+        let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
+        let below : Block = man.worldGet(belowCell);
+        if (below == Block::Air || isWater(below)) {
+            man.setVoxel(cell, Block::Air);
+            man.setVoxel(belowCell, cur);
+            self.enqueue(belowCell);                            // keep falling
+            self.enqueue(ivec3(cell.x, cell.y + 1, cell.z));    // whatever was above may now fall
+            self.enqueue4(belowCell);                           // displaced water around may flow
+        }
+    }
+
+    /**
+     * Water flow: a source or flowing cell pushes down into air, else spreads
+     * sideways at one level lower; a flowing cell with no feed recedes to air.
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param cur   the water block id
+     */
+    fn doFluid(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
+        let lvl : i32 = fluidLevel(cur);
+        let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
+        let below : Block = man.worldGet(belowCell);
+        if (below == Block::Air) {
+            // Gravity first: fall straight down as a full column. While it can
+            // drop it does NOT spread sideways — so a waterfall stays a clean
+            // vertical stream.
+            man.setVoxel(belowCell, Block::FlowWater7);
+            self.enqueue(belowCell);
+            self.enqueue4(belowCell);
+        } else if (isSolid(below)) {
+            // Only water RESTING on solid ground spreads (so the middle of a
+            // waterfall, which sits on water, never pools out). It flows toward
+            // the nearest drop, losing a level per block.
+            if (lvl >= 2) {
+                self.spreadOut(man, cell, lvl - 1);
+            }
+        }
+        // (below is water → part of a column/pool: neither falls nor spreads.)
+        // Flowing water with no feed (no higher neighbour, no water above) dries
+        // up; the source never does. This cascades a cut-off back to air.
+        if (!isSource(cur)) {
+            if (!self.fed(man, cell, lvl)) {
+                man.setVoxel(cell, Block::Air);
+                self.enqueue6(cell);
+            }
+        }
+    }
+
+    /**
+     * Spread a resting water cell to its horizontal neighbours at level `nl`,
+     * Minecraft-style: if any direction leads to a drop within `flowSearch`
+     * blocks, flow ONLY toward the nearest such drop(s); otherwise spread
+     * evenly. This makes water seek holes and form streams instead of flat
+     * sheets.
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param nl    the flow level to place into neighbours
+     */
+    fn spreadOut(mut self, man : ChunkManager, cell : IVec3, nl : i32) : void {
+        let dE : i32 = self.dropDist(man, cell, 1, 0);
+        let dW : i32 = self.dropDist(man, cell, 0 - 1, 0);
+        let dS : i32 = self.dropDist(man, cell, 0, 1);
+        let dN : i32 = self.dropDist(man, cell, 0, 0 - 1);
+        let best : i32 = dE;
+        if (dW < best) {
+            best = dW;
+        }
+        if (dS < best) {
+            best = dS;
+        }
+        if (dN < best) {
+            best = dN;
+        }
+        if (best <= config::flowSearch) {
+            // Flow only toward the nearest drop(s).
+            if (dE == best) {
+                self.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
+            }
+            if (dW == best) {
+                self.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
+            }
+            if (dS == best) {
+                self.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
+            }
+            if (dN == best) {
+                self.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
+            }
+        } else {
+            // No drop within reach: pool out evenly.
+            self.spreadInto(man, ivec3(cell.x + 1, cell.y, cell.z), nl);
+            self.spreadInto(man, ivec3(cell.x - 1, cell.y, cell.z), nl);
+            self.spreadInto(man, ivec3(cell.x, cell.y, cell.z + 1), nl);
+            self.spreadInto(man, ivec3(cell.x, cell.y, cell.z - 1), nl);
+        }
+    }
+
+    /**
+     * Distance (in blocks) until water flowing in (dirx, dirz) reaches a drop —
+     * a cell with air below — walking across air/water on this level, up to
+     * `flowSearch`. Returns flowSearch+1 if a solid wall blocks the way or no
+     * drop is found.
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param dirx  step in x (-1/0/1)
+     * @param dirz  step in z (-1/0/1)
+     * @return the drop distance, or flowSearch+1 if none / blocked
+     */
+    fn dropDist(self, man : ChunkManager, cell : IVec3, dirx : i32, dirz : i32) : i32 {
+        let maxD : i32 = config::flowSearch;
+        let d : i32 = 1;
+        while (d <= maxD) {
+            let nx : i32 = cell.x + dirx * d;
+            let nz : i32 = cell.z + dirz * d;
+            let here : Block = man.worldGet(ivec3(nx, cell.y, nz));
+            if (here != Block::Air && !isWater(here)) {
+                return maxD + 1;   // a solid wall blocks this direction
+            }
+            if (man.worldGet(ivec3(nx, cell.y - 1, nz)) == Block::Air) {
+                return d;          // a drop opens up here
+            }
+            d = d + 1;
+        }
+        return maxD + 1;
+    }
+
+    /**
+     * Fill an air cell with flowing water of level `nl` and queue it. Only air
+     * is overwritten, so existing water / solids are never disturbed (this is
+     * what lets the spread reach a fixed point and stop).
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param nl    the flow level to place
+     */
+    fn spreadInto(mut self, man : ChunkManager, cell : IVec3, nl : i32) : void {
+        if (man.worldGet(cell) == Block::Air) {
+            man.setVoxel(cell, fluidOfLevel(nl));
+            self.enqueue(cell);
+            self.enqueue(ivec3(cell.x, cell.y - 1, cell.z));   // it may then fall
+        }
+    }
+
+    /**
+     * Is this flowing cell still fed? True if water sits directly above it or a
+     * horizontally-adjacent cell holds a higher level (closer to the source).
+     * @param man   the chunk manager
+     * @param cell  the world cell
+     * @param lvl   this cell's level
+     * @return whether the cell has a feed
+     */
+    fn fed(self, man : ChunkManager, cell : IVec3, lvl : i32) : bool {
+        if (isWater(man.worldGet(ivec3(cell.x, cell.y + 1, cell.z)))) {
+            return true;
+        }
+        if (fluidLevel(man.worldGet(ivec3(cell.x + 1, cell.y, cell.z))) > lvl) {
+            return true;
+        }
+        if (fluidLevel(man.worldGet(ivec3(cell.x - 1, cell.y, cell.z))) > lvl) {
+            return true;
+        }
+        if (fluidLevel(man.worldGet(ivec3(cell.x, cell.y, cell.z + 1))) > lvl) {
+            return true;
+        }
+        if (fluidLevel(man.worldGet(ivec3(cell.x, cell.y, cell.z - 1))) > lvl) {
+            return true;
+        }
+        return false;
+    }
+}

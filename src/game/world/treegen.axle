@@ -1,0 +1,214 @@
+// treegen — the tree / mushroom STAMPER, split out of ChunkManager.
+//
+// A cohesive LEAF mini-manager for "decoration" voxels: it carves trunks, leaf
+// canopies, cactus stalks, giant mushrooms and bushy / conical / flat canopies.
+// Every function is a FREE function that writes straight into a slot through a
+// `VoxStore` (the raw voxel storage), never the owning ChunkManager. Both this
+// module and the manager depend on `voxstore` one-way, so there is NO import
+// cycle (Axle would otherwise drop the cycle edge and fail to resolve methods).
+//
+// Shapes are FIXED (no per-call RNG): the two chunks that share a border tree
+// stamp it identically, so a canopy straddling a seam is seamless. The manager
+// keeps `stampTrees` (it needs the per-biome registry) and the cold-biome
+// `snowCapTree` (it needs the heightmap + biome), and delegates the carving here.
+//
+// Cell coordinates travel as `IVec3` (an origin / centre / leaf cell) instead of
+// loose lx/ly/lz triples — the stampers derive their offsets from that one point.
+
+use crate::kernel::kworld::voxstore::VoxStore;
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::config;
+use crate::config::{ Block, TreeKind };
+
+/**
+ * Stamp one leaf voxel of `leafId`, but only into air (never carving terrain).
+ * Clipped to the slot's padded volume so a canopy straddling the border is
+ * trimmed cleanly.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param pos     the leaf cell (local coords)
+ * @param leafId  the leaf block id
+ */
+fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
+    let s : i32 = config::chunkSize;
+    if (pos.x < 0 - 1 || pos.x > s || pos.z < 0 - 1 || pos.z > s) {
+        return;
+    }
+    if (pos.y < 0 || pos.y >= config::worldHeight) {
+        return;
+    }
+    if (vs.getVox(slot, pos) == Block::Air) {
+        let v : Block = leafId;
+        vs.setVoxLocal(slot, pos, v);
+    }
+}
+
+/**
+ * Stamp a solid square leaf layer of half-size `rad` centred on `center`.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param center  the layer centre cell (local coords)
+ * @param rad     the half-size of the square
+ * @param leafId  the leaf block id
+ */
+fn leafLayer(vs : VoxStore, slot : i32, center : IVec3, rad : i32, leafId : Block) : void {
+    let dz : i32 = 0 - rad;
+    while (dz <= rad) {
+        let dx : i32 = 0 - rad;
+        while (dx <= rad) {
+            stampLeafId(vs, slot, ivec3(center.x + dx, center.y, center.z + dz), leafId);
+            dx = dx + 1;
+        }
+        dz = dz + 1;
+    }
+}
+
+/**
+ * Stamp a vertical trunk of `height` blocks and bump the slot's face-Y mark.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param origin  the trunk base cell (local coords)
+ * @param height  the trunk height
+ * @param woodId  the wood block id
+ */
+fn stampTrunk(vs : VoxStore, slot : i32, origin : IVec3, height : i32, woodId : Block) : void {
+    let t : i32 = 0;
+    while (t < height) {
+        vs.setVoxClip(slot, ivec3(origin.x, origin.y + t, origin.z), woodId);
+        t = t + 1;
+    }
+    vs.bumpFY(slot, origin.y + height + 1);
+}
+
+/**
+ * Stamp a tree of `kind` (config::tree*) with base cell `origin` and trunk
+ * `height` (the biome's `treeHt`). Leaves first, then the trunk overwrites its
+ * column. Shapes are fixed (no RNG) so the two chunks sharing a border tree
+ * stamp it identically.
+ * @param vs      the slot voxel storage
+ * @param kind    the tree kind id
+ * @param height  the trunk height (from the biome)
+ * @param slot    the slot index
+ * @param origin  the trunk base cell (local coords)
+ */
+fn stampTree(vs : VoxStore, kind : TreeKind, height : i32, slot : i32, origin : IVec3) : void {
+    match kind {
+        TreeKind::None => {
+            return;
+        }
+        TreeKind::Cactus => {
+            let c : i32 = 0;
+            while (c < height) {
+                vs.setVoxClip(slot, ivec3(origin.x, origin.y + c, origin.z), Block::Cactus);
+                c = c + 1;
+            }
+            vs.bumpFY(slot, origin.y + height);
+        }
+        TreeKind::Spruce => {
+            stampSpruce(vs, slot, origin, height);
+        }
+        TreeKind::Acacia => {
+            stampAcacia(vs, slot, origin, height);
+        }
+        TreeKind::Bamboo => {
+            // A tall, thin bamboo stalk.
+            let t : i32 = 0;
+            while (t < height) {
+                vs.setVoxClip(slot, ivec3(origin.x, origin.y + t, origin.z), Block::Bamboo);
+                t = t + 1;
+            }
+            vs.bumpFY(slot, origin.y + height);
+        }
+        TreeKind::RedMushroom => {
+            stampMushroom(vs, slot, origin, height, Block::RedMushroom);
+        }
+        TreeKind::BrownMushroom => {
+            stampMushroom(vs, slot, origin, height, Block::BrownMushroom);
+        }
+        // Oak / birch / jungle / cherry: a bushy round canopy; they differ
+        // only in wood / leaf species (the trunk height comes from the biome).
+        _ => {
+            let wood : Block = match kind {
+                TreeKind::Birch => Block::WoodBirch,
+                TreeKind::Jungle => Block::WoodJungle,
+                TreeKind::Cherry => Block::CherryLog,
+                _ => Block::Wood,
+            };
+            let leaf : Block = match kind {
+                TreeKind::Birch => Block::LeavesBirch,
+                TreeKind::Jungle => Block::LeavesJungle,
+                TreeKind::Cherry => Block::CherryLeaves,
+                _ => Block::Leaves,
+            };
+            stampBushy(vs, slot, origin, height, wood, leaf);
+        }
+    }
+}
+
+/**
+ * Giant mushroom: a pale stem topped by a flat round cap of `capId`.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param origin  the stem base cell (local coords)
+ * @param height  the stem height
+ * @param capId   the cap block id (red / brown mushroom block)
+ */
+fn stampMushroom(vs : VoxStore, slot : i32, origin : IVec3, height : i32, capId : Block) : void {
+    let cy : i32 = origin.y + height;
+    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 1, capId);
+    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z), capId);
+    stampTrunk(vs, slot, origin, height, Block::MushroomStem);
+}
+
+/**
+ * Round canopy (oak / birch / jungle / cherry): two wide rings, a narrow ring
+ * and a small crown atop the trunk.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param origin  the trunk base cell (local coords)
+ * @param height  the trunk height
+ * @param wood    the wood block id
+ * @param leaf    the leaf block id
+ */
+fn stampBushy(vs : VoxStore, slot : i32, origin : IVec3, height : i32, wood : Block, leaf : Block) : void {
+    let cy : i32 = origin.y + height;
+    leafLayer(vs, slot, ivec3(origin.x, cy - 2, origin.z), 2, leaf);
+    leafLayer(vs, slot, ivec3(origin.x, cy - 1, origin.z), 2, leaf);
+    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 1, leaf);
+    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z), leaf);
+    stampLeafId(vs, slot, ivec3(origin.x + 1, cy + 1, origin.z), leaf);
+    stampLeafId(vs, slot, ivec3(origin.x - 1, cy + 1, origin.z), leaf);
+    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z + 1), leaf);
+    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z - 1), leaf);
+    stampTrunk(vs, slot, origin, height, wood);
+}
+
+/**
+ * Conical spruce: shrinking square rings up a tall trunk, with a tip.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param origin  the trunk base cell (local coords)
+ * @param height  the trunk height
+ */
+fn stampSpruce(vs : VoxStore, slot : i32, origin : IVec3, height : i32) : void {
+    let cy : i32 = origin.y + height;
+    leafLayer(vs, slot, ivec3(origin.x, cy - 3, origin.z), 2, Block::LeavesSpruce);
+    leafLayer(vs, slot, ivec3(origin.x, cy - 2, origin.z), 1, Block::LeavesSpruce);
+    leafLayer(vs, slot, ivec3(origin.x, cy - 1, origin.z), 1, Block::LeavesSpruce);
+    stampLeafId(vs, slot, ivec3(origin.x, cy, origin.z), Block::LeavesSpruce);
+    stampTrunk(vs, slot, origin, height, Block::WoodSpruce);
+}
+
+/**
+ * Flat-topped acacia: a tall trunk and a wide thin canopy.
+ * @param vs      the slot voxel storage
+ * @param slot    the slot index
+ * @param origin  the trunk base cell (local coords)
+ * @param height  the trunk height
+ */
+fn stampAcacia(vs : VoxStore, slot : i32, origin : IVec3, height : i32) : void {
+    let cy : i32 = origin.y + height;
+    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 2, Block::LeavesAcacia);
+    leafLayer(vs, slot, ivec3(origin.x, cy + 1, origin.z), 1, Block::LeavesAcacia);
+    stampTrunk(vs, slot, origin, height, Block::WoodAcacia);
+}

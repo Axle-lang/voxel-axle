@@ -1,0 +1,142 @@
+// kernel::seams — the inter-kernel capability contracts ("coutures").
+//
+// Single source of truth for the boundaries between the kernels. Each seam is a
+// SMALL, well-named capability trait (one responsibility). Convenience "bundle"
+// super-traits (VoxelQuery / VoxelEdit / LightSample) compose the fine-grained
+// capabilities so a provider conforms once and a consumer can still depend on
+// the whole surface — while a consumer that needs only one capability depends on
+// just that trait (e.g. the picker takes `dyn BlockReader`, not all of VoxelQuery).
+//
+//   PROVIDER                    BUNDLE (fine-grained capabilities)
+//   kworld (ChunkManager)   ->  VoxelQuery  : BlockReader + CollisionField + Heightfield
+//                               VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
+//                                             + DayCycle + LightThread
+//                               LightSample : BlockLightField + SkyLightField
+//                                             + SunLightField + BounceLightField
+//   kentity (Mob)           ->  ActorVisual : Kinded + Animated (+ pose/flash/fuse)
+//
+// Rules: a kernel edits only its own files; implement the capabilities you
+// PROVIDE, and take the narrowest capability you CONSUME as a `dyn Capability`
+// parameter. Preserve these signatures verbatim or flag a change in your report.
+
+use crate::kernel::kmath::vec3::{ Vec3, IVec3 };
+use crate::config::{ Block, MobKind };
+
+// ─── Voxel read capabilities ────────────────────────────────────────────────
+
+/** Read the block id at a cell and test raw / targetable solidity. */
+trait BlockReader {
+    fn worldGet(self, cell : IVec3) : Block;
+    fn solidTarget(self, cell : IVec3) : bool;
+    fn solidAt(self, cell : IVec3) : bool;
+}
+
+/** Query the collision geometry an entity resolves its AABB against. */
+trait CollisionField {
+    fn collideFloorCell(self, cell : IVec3, py : f64) : bool;
+    fn supportHeight(self, cell : IVec3) : f64;
+    fn blockBoxHeight(self, cell : IVec3) : f64;
+    fn floorScanPad(self) : i32;
+}
+
+/** Sample per-column terrain / collision heights (spawn, footing, AI). */
+trait Heightfield {
+    fn columnHeight(self, wx : i32, wz : i32) : i32;
+    fn collisionHeight(self, wx : i32, wz : i32) : i32;
+}
+
+/** Bundle: the full read-only voxel surface (block reads + collision + heights). */
+trait VoxelQuery : BlockReader, CollisionField, Heightfield {
+}
+
+// ─── Voxel write + world lifecycle capabilities ─────────────────────────────
+
+/** Mutate the voxel field (edit / dig / place), re-meshing the touched slots. */
+trait VoxelWriter {
+    fn setVoxel(mut self, cell : IVec3, id : Block) : void;
+    fn breakAt(mut self, cell : IVec3) : void;
+    fn placeAt(mut self, cell : IVec3, block : Block) : void;
+}
+
+/** Kick a light re-bake around an edited cell. */
+trait LightMutator {
+    fn lightUpdate(mut self, cell : IVec3) : void;
+}
+
+/** Drive chunk streaming toward a camera column (budgeted per call). */
+trait ChunkStreamer {
+    fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32;
+}
+
+/** Publish the time of day the light thread bakes against. */
+trait DayCycle {
+    fn setDayTime(mut self, d : f64) : void;
+}
+
+/** Stop + join the background light thread at shutdown. */
+trait LightThread {
+    fn stopLight(mut self) : void;
+}
+
+/** Bundle: the full write + world-lifecycle surface the interaction layer drives. */
+trait VoxelEdit : VoxelWriter, LightMutator, ChunkStreamer, DayCycle, LightThread {
+}
+
+// ─── Baked light-sample capabilities (read by the renderer per face corner) ──
+
+/** Emissive block-light level at a cell. */
+trait BlockLightField {
+    fn blGetW(self, cell : IVec3) : i32;
+}
+
+/** Sky-light level + hemispherical sky access (ambient / GI term). */
+trait SkyLightField {
+    fn skGetW(self, cell : IVec3) : i32;
+    fn skyaccessGet(self, cell : IVec3) : i32;
+}
+
+/** Direct-sun visibility, with a soft-shadow corner tap for smooth edges. */
+trait SunLightField {
+    fn sunlitGet(self, cell : IVec3) : i32;
+    fn sunSoftCorner(self, base : IVec3, t1 : IVec3, t2 : IVec3) : i32;
+}
+
+/** One-bounce coloured light bleed at a cell. */
+trait BounceLightField {
+    fn bounceGet(self, cell : IVec3) : i32;
+}
+
+/** Bundle: every baked light term the face shader samples. */
+trait LightSample : BlockLightField, SkyLightField, SunLightField, BounceLightField {
+}
+
+// ─── Actor render-view capabilities (provided by kentity, read by krender) ───
+
+/** Which species an actor is (selects its billboard model). */
+trait Kinded {
+    fn kind(self) : MobKind;
+}
+
+/** Animation state driving the billboard pose. */
+trait Animated {
+    fn walkPhase(self) : f64;
+    fn deathProgress(self) : f64;
+}
+
+/**
+ * The render-facing view of a living actor. krender's billboard pass iterates
+ * `dyn ActorVisual` (via MobManager.actorCount() / actorAt(i)) instead of the
+ * old five per-species arrays.
+ */
+trait ActorVisual : Kinded, Animated {
+    fn pos(self) : Vec3;
+    fn heading(self) : f64;
+    fn hurtFlash(self) : i32;
+    fn fuseLevel(self) : i32;
+}
+
+// NOTE: the app→kernel INJECTION seams are NOT here — they live with the kernel
+// that consumes them, so each kernel stays self-contained/splittable:
+//   * Generator   (terrain gen)  -> kworld::manager   (held by ChunkManager)
+//   * MobSpawner  (mob roster)   -> kentity::mob      (held by MobManager)
+// This file holds only the kernel↔kernel capability contracts above.

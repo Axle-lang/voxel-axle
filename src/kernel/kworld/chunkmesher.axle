@@ -1,0 +1,411 @@
+// chunkmesher — turns a slot's voxel field into the render mesh, a leaf split
+// out of the world manager.
+//
+// It aliases the manager's per-slot face buffers (the renderer reads them
+// directly as `man.fx` etc., so they must stay owned by the manager — Axle arrays
+// are references, so the mesher writes the very same memory) plus the collision
+// top, and reads voxels through the shared VoxStore and baked light through the
+// LightEngine. Emitting a face for every block that borders air, it also bakes
+// each face's Minecraft-style smooth light + ambient occlusion and records each
+// column's highest collidable voxel for entity physics.
+
+use sdl_platform::{ writeU8 };
+use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, partialBoxHeight };
+use crate::kernel::kworld::voxstore::VoxStore;
+use crate::kernel::kworld::lightstore::{ LightEngine };
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::config;
+use crate::config::{ Block };
+use crate::config::{ FaceDir };
+
+/** Turn a freshly (re)generated / edited slot's voxels into a render mesh. */
+trait Mesher {
+    fn buildSlot(mut self, slot : i32, cx : i32, cz : i32) : void;
+}
+
+class ChunkMesher : Mesher {
+    store : VoxStore,
+    leng : LightEngine,
+    fcount : i32[],
+    fx : i32[],
+    fy : i32[],
+    fz : i32[],
+    ftile : i32[],
+    flight : i64,
+    fao : i64,
+    tx : i32[],
+    ty : i32[],
+    tz : i32[],
+    tcount : i32[],
+    ctop : i32[],
+    lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz);
+                     // MUST mirror Renderer.fillTable so baked corner k aligns.
+
+    /**
+     * Alias the manager's shared voxel store, light engine and face / torch /
+     * collision buffers, then build the face-corner offset table.
+     * @param m  the owning chunk manager (only its already-set fields are read)
+     */
+    constructor(m : ChunkManager) {
+        self.store = m.store;
+        self.leng = m.leng;
+        self.fcount = m.faces.fcount;
+        self.fx = m.faces.fx;
+        self.fy = m.faces.fy;
+        self.fz = m.faces.fz;
+        self.ftile = m.faces.ftile;
+        self.flight = m.faces.flight;
+        self.fao = m.faces.fao;
+        self.tx = m.torches.tx;
+        self.ty = m.torches.ty;
+        self.tz = m.torches.tz;
+        self.tcount = m.torches.tcount;
+        self.ctop = m.cols.ctop;
+        self.lcoff = malloc<i32>(72);
+        self.fillLightTable();
+    }
+
+    /**
+     * Mirror of Renderer.fillTable's corner block offsets. Stored as
+     * (dir*4+k)*3 → (ox, oy, oz), kept identical to the renderer so baked corner
+     * k lines up with the corner k it shades.
+     */
+    fn setLCorner(mut self, dir : i32, k : i32, ox : i32, oy : i32, oz : i32) : void {
+        let b : i32 = (dir * 4 + k) * 3;
+        self.lcoff[b] = ox;
+        self.lcoff[b + 1] = oy;
+        self.lcoff[b + 2] = oz;
+    }
+
+    /** Fill the face corner offset table (must match Renderer.fillTable). */
+    fn fillLightTable(mut self) : void {
+        self.setLCorner(0, 0, 1, 0, 0);
+        self.setLCorner(0, 1, 1, 0, 1);
+        self.setLCorner(0, 2, 1, 1, 1);
+        self.setLCorner(0, 3, 1, 1, 0);
+        self.setLCorner(1, 0, 0, 0, 0);
+        self.setLCorner(1, 1, 0, 1, 0);
+        self.setLCorner(1, 2, 0, 1, 1);
+        self.setLCorner(1, 3, 0, 0, 1);
+        self.setLCorner(2, 0, 0, 1, 0);
+        self.setLCorner(2, 1, 1, 1, 0);
+        self.setLCorner(2, 2, 1, 1, 1);
+        self.setLCorner(2, 3, 0, 1, 1);
+        self.setLCorner(3, 0, 0, 0, 0);
+        self.setLCorner(3, 1, 0, 0, 1);
+        self.setLCorner(3, 2, 1, 0, 1);
+        self.setLCorner(3, 3, 1, 0, 0);
+        self.setLCorner(4, 0, 0, 0, 1);
+        self.setLCorner(4, 1, 1, 0, 1);
+        self.setLCorner(4, 2, 1, 1, 1);
+        self.setLCorner(4, 3, 0, 1, 1);
+        self.setLCorner(5, 0, 0, 0, 0);
+        self.setLCorner(5, 1, 0, 1, 0);
+        self.setLCorner(5, 2, 1, 1, 0);
+        self.setLCorner(5, 3, 1, 0, 0);
+    }
+
+    /**
+     * Append a face to the slot's face buffer (dropped if at capacity), baking
+     * its 4 corners' smooth light + AO.
+     * @param slot  the slot index
+     * @param cell  the face's world voxel
+     * @param dir   the face direction
+     * @param tile  the atlas tile index
+     */
+    fn addFace(mut self, slot : i32, cell : IVec3, own dir : FaceDir, tile : i32) : void {
+        let fc : i32 = self.fcount[slot];
+        if (fc >= config::maxFacesPerChunk) {
+            return;
+        }
+        let i : i32 = slot * config::maxFacesPerChunk + fc;
+        self.fx[i] = cell.x;
+        self.fy[i] = cell.y;
+        self.fz[i] = cell.z;
+        // Pack the face direction (0..5) and atlas tile (< 256) into one slot.
+        // renderFace unpacks dir = ftile / 256, tile = ftile % 256.
+        let di : i32 = dir as i32;
+        self.ftile[i] = di * 256 + tile;
+        self.bakeFaceCorners(i, cell, di);
+        self.fcount[slot] = fc + 1;
+    }
+
+    /**
+     * Smooth-light + AO bake for one face's 4 corners into flight / fao. Light =
+     * average over the NON-opaque cells among the corner's air neighbours; AO =
+     * the classic vertex term 3-(side1+side2+corner), 0 when both sides blocked.
+     * @param i   the global face index (slot*maxFacesPerChunk + fc)
+     * @param w   the face block world voxel
+     * @param di  the face direction (0..5)
+     */
+    fn bakeFaceCorners(mut self, i : i32, w : IVec3, di : i32) : void {
+        // Normal offset to the air cell this face looks into (di = dir 0..5).
+        let nox : i32 = 0;
+        let noy : i32 = 0;
+        let noz : i32 = 0;
+        match di {
+            0 => { nox = 1; }
+            1 => { nox = 0 - 1; }
+            2 => { noy = 1; }
+            3 => { noy = 0 - 1; }
+            4 => { noz = 1; }
+            _ => { noz = 0 - 1; }
+        }
+        let nb : IVec3 = ivec3(w.x + nox, w.y + noy, w.z + noz);
+
+        // Normal axis: 0 = X (dir 0/1), 1 = Y (2/3), 2 = Z (4/5).
+        let naxis : i32 = di / 2;
+        let k : i32 = 0;
+        while (k < 4) {
+            let b : i32 = (di * 4 + k) * 3;
+            // Tangent signs from the corner block offset (0 → -1, 1 → +1).
+            let sx : i32 = self.lcoff[b] * 2 - 1;
+            let sy : i32 = self.lcoff[b + 1] * 2 - 1;
+            let sz : i32 = self.lcoff[b + 2] * 2 - 1;
+            // The two in-plane neighbour offsets t1, t2 (skip the normal axis).
+            let t1x : i32 = 0;
+            let t1y : i32 = 0;
+            let t1z : i32 = 0;
+            let t2x : i32 = 0;
+            let t2y : i32 = 0;
+            let t2z : i32 = 0;
+            match naxis {
+                0 => {
+                    t1y = sy;
+                    t2z = sz;
+                }
+                1 => {
+                    t1x = sx;
+                    t2z = sz;
+                }
+                _ => {
+                    t1x = sx;
+                    t2y = sy;
+                }
+            }
+            // The 4 cells meeting at this corner, all in the nb layer.
+            let c1 : IVec3 = ivec3(nb.x + t1x, nb.y + t1y, nb.z + t1z);
+            let c2 : IVec3 = ivec3(nb.x + t2x, nb.y + t2y, nb.z + t2z);
+            let c3 : IVec3 = ivec3(nb.x + t1x + t2x, nb.y + t1y + t2y, nb.z + t1z + t2z);
+
+            // Smooth light: average sky / block over the non-opaque cells.
+            let skSum : i32 = self.leng.skGetW(nb);
+            let blSum : i32 = self.leng.blGetW(nb);
+            let cnt : i32 = 1;
+            let o1 : bool = isOpaque(self.leng.worldGet(c1));
+            let o2 : bool = isOpaque(self.leng.worldGet(c2));
+            let o3 : bool = isOpaque(self.leng.worldGet(c3));
+            if (!o1) {
+                skSum = skSum + self.leng.skGetW(c1);
+                blSum = blSum + self.leng.blGetW(c1);
+                cnt = cnt + 1;
+            }
+            if (!o2) {
+                skSum = skSum + self.leng.skGetW(c2);
+                blSum = blSum + self.leng.blGetW(c2);
+                cnt = cnt + 1;
+            }
+            if (!o3) {
+                skSum = skSum + self.leng.skGetW(c3);
+                blSum = blSum + self.leng.blGetW(c3);
+                cnt = cnt + 1;
+            }
+
+            let skAvg : i32 = (skSum + cnt / 2) / cnt;
+            let blAvg : i32 = (blSum + cnt / 2) / cnt;
+            writeU8(self.flight, (i * 4 + k) as i64, skAvg * 16 + blAvg);
+
+            // Ambient occlusion (0..3): both sides blocked → fully dark corner.
+            let s1 : i32 = 0;
+            if (o1) {
+                s1 = 1;
+            }
+            let s2 : i32 = 0;
+            if (o2) {
+                s2 = 1;
+            }
+            let sc : i32 = 0;
+            if (o3) {
+                sc = 1;
+            }
+            let ao : i32 = 3 - (s1 + s2 + sc);
+            if (s1 == 1 && s2 == 1) {
+                ao = 0;
+            }
+            writeU8(self.fao, (i * 4 + k) as i64, ao);
+            k = k + 1;
+        }
+    }
+
+    /**
+     * Record a torch at a world voxel in this slot's torch list (dropped if at
+     * capacity). The renderer draws these as thin posts.
+     * @param slot  the slot index
+     * @param cell  the torch's world voxel
+     */
+    fn addTorch(mut self, slot : i32, cell : IVec3) : void {
+        let tc : i32 = self.tcount[slot];
+        if (tc >= config::maxTorchesPerChunk) {
+            return;
+        }
+        let i : i32 = slot * config::maxTorchesPerChunk + tc;
+        self.tx[i] = cell.x;
+        self.ty[i] = cell.y;
+        self.tz[i] = cell.z;
+        self.tcount[slot] = tc + 1;
+    }
+
+    /**
+     * Should a partial block of height `myH` emit a side wall toward the neighbour
+     * cell? Yes against air or a strictly LOWER partial block; no against a full
+     * block or an equal/higher partial (avoids an internal z-fighting grid).
+     * @param slot  the chunk slot
+     * @param nlx   neighbour local x
+     * @param nly   neighbour local/world y
+     * @param nlz   neighbour local z
+     * @param nwx   neighbour world x (for its box height)
+     * @param nwz   neighbour world z (for its box height)
+     * @param myH   this block's box height
+     * @return whether to emit the side wall toward the neighbour
+     */
+    fn partialSideOpen(self, slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myH : f64) : bool {
+        let nb : Block = self.store.getVox(slot, ivec3(nlx, nly, nlz));
+        if (nb == Block::Air) {
+            return true;
+        }
+        if (!isPartialShape(nb)) {
+            return false;
+        }
+        return partialBoxHeight(nb, nwx as f64, nwz as f64) < myH - 0.001;
+    }
+
+    /**
+     * Re-bake the chunk's faces from its voxels: every block emits a face on each
+     * side that borders air. Water draws only its top surface + air-bordering
+     * walls; a partial block its raised top + step walls; a solid block a face
+     * wherever its neighbour is transparent. Each column's `ctop` is the highest
+     * collidable voxel + 1. Directions match render.renderFace normals:
+     * 0:+x 1:-x 2:+y(top) 3:-y(bottom) 4:+z 5:-z.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn buildSlot(mut self, slot : i32, cx : i32, cz : i32) : void {
+        self.fcount[slot] = 0;
+        self.tcount[slot] = 0;
+        let s : i32 = config::chunkSize;
+        let top : i32 = self.store.maxFY[slot];
+        let air : Block = Block::Air;
+        let lz : i32 = 0;
+        while (lz < s) {
+            let lx : i32 = 0;
+            while (lx < s) {
+                let wx : i32 = cx * s + lx;
+                let wz : i32 = cz * s + lz;
+                let coll : i32 = 0;
+                let ly : i32 = 0;
+                while (ly <= top) {
+                    let id : Block = self.store.getVox(slot, ivec3(lx, ly, lz));
+                    // Non-air voxel: emit its faces; a collidable solid raises the
+                    // column's collision top.
+                    if (id != air && self.meshVoxel(slot, lx, ly, lz, wx, wz, id)) {
+                        coll = ly + 1;
+                    }
+                    ly = ly + 1;
+                }
+                self.ctop[slot * s * s + lz * s + lx] = coll;
+                lx = lx + 1;
+            }
+            lz = lz + 1;
+        }
+    }
+
+    /**
+     * Emit the mesh faces for one non-air voxel: a torch records a post (no cube
+     * faces), water shows its surface + air-bordering walls, a partial block its
+     * raised top + step walls toward lower neighbours, and a solid block a face
+     * wherever its neighbour is transparent.
+     * @param slot  the slot index
+     * @param lx    local x
+     * @param ly    local y
+     * @param lz    local z
+     * @param wx    world x
+     * @param wz    world z
+     * @param id    the voxel's block id (already known to be non-air)
+     * @return true if the voxel is collidable (so the caller raises the column top)
+     */
+    fn meshVoxel(mut self, slot : i32, lx : i32, ly : i32, lz : i32, wx : i32, wz : i32, id : Block) : bool {
+        let air : Block = Block::Air;
+        let cell : IVec3 = ivec3(wx, ly, wz);   // this voxel, for addFace / addTorch
+        if (id == Block::Torch) {
+            // Torches emit no cube faces; a thin post is drawn separately.
+            self.addTorch(slot, cell);
+            return false;
+        }
+        if (isWater(id)) {
+            // Water: top surface, plus side walls only where it borders air.
+            if (self.store.getVox(slot, ivec3(lx, ly + 1, lz)) == air) {
+                self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+            }
+            if (self.store.getVox(slot, ivec3(lx + 1, ly, lz)) == air) {
+                self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            }
+            if (self.store.getVox(slot, ivec3(lx - 1, ly, lz)) == air) {
+                self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            }
+            if (self.store.getVox(slot, ivec3(lx, ly, lz + 1)) == air) {
+                self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            }
+            if (self.store.getVox(slot, ivec3(lx, ly, lz - 1)) == air) {
+                self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            }
+            return false;
+        }
+        if (isPartialShape(id)) {
+            // A partial, floor-resting block at its real height. Emit the top, and
+            // a side wall toward a neighbour that is air OR a LOWER partial block.
+            self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+            let myH : f64 = partialBoxHeight(id, wx as f64, wz as f64);
+            if (self.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
+                self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            }
+            if (self.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
+                self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            }
+            if (self.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
+                self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            }
+            if (self.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
+                self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            }
+            return false;
+        }
+        // A solid block shows a face wherever its neighbour is TRANSPARENT — air
+        // or water — so submerged terrain stays visible through the water.
+        if (isTransparent(self.store.getVox(slot, ivec3(lx + 1, ly, lz)))) {
+            self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+        }
+        if (isTransparent(self.store.getVox(slot, ivec3(lx - 1, ly, lz)))) {
+            self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+        }
+        // A partial block above (snow, a slab) is transparent but seals this top
+        // from view (its own raised top renders double-sided). A normal
+        // transparent block above keeps this top.
+        let above : Block = self.store.getVox(slot, ivec3(lx, ly + 1, lz));
+        if (isTransparent(above) && !isPartialShape(above)) {
+            self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+        }
+        if (isTransparent(self.store.getVox(slot, ivec3(lx, ly - 1, lz)))) {
+            self.addFace(slot, cell, FaceDir::Bottom, tileFor(id, FaceDir::Bottom));
+        }
+        if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz + 1)))) {
+            self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+        }
+        if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz - 1)))) {
+            self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+        }
+        return isCollidable(id);
+    }
+}

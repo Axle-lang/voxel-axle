@@ -4,19 +4,19 @@
 // entry point stays a thin setup + loop. (Named `start`, not `spawn`,
 // because `spawn` is a reserved keyword.)
 
-use crate::world::manager::ChunkManager;
+use crate::kernel::seams::VoxelQuery;
 use crate::config;
 
 /**
  * A clearing to start in: the 3×3 columns around (gx, gz) are tree-free
  * and within one block of height, so the player begins on flat open
  * ground with a view rather than buried against a trunk.
- * @param man  the chunk manager to query heights from
+ * @param man  the voxel-query surface to read heights from
  * @param gx   grid x of the candidate column
  * @param gz   grid z of the candidate column
  * @return true if the 3×3 area is open and roughly flat
  */
-fn openSpot(man : ChunkManager, gx : i32, gz : i32) : bool {
+fn openSpot(man : dyn VoxelQuery, gx : i32, gz : i32) : bool {
     let h0 : i32 = man.columnHeight(gx, gz);
     let dz : i32 = 0 - 1;
     while (dz <= 1) {
@@ -46,13 +46,13 @@ fn openSpot(man : ChunkManager, gx : i32, gz : i32) : bool {
  * Pick the start yaw whose forward ray stays open (tree-free, not
  * rising) for the most blocks, so the player faces the clearing rather
  * than a trunk. Forward for a yaw is (-sin, cos).
- * @param man    the chunk manager to query heights from
+ * @param man    the voxel-query surface to read heights from
  * @param sx     start column x
  * @param sz     start column z
  * @param baseH  surface height at the start column
  * @return the yaw (radians) with the most open forward view
  */
-fn openYaw(man : ChunkManager, sx : i32, sz : i32, baseH : i32) : f64 {
+fn openYaw(man : dyn VoxelQuery, sx : i32, sz : i32, baseH : i32) : f64 {
     let best : f64 = 0.0;
     let bestScore : i32 = 0 - 1;
     let k : i32 = 0;
@@ -101,9 +101,9 @@ class Spawn {
     /**
      * Search an 81×81 area around the origin for the highest dry, open
      * hilltop. Falls back to sea level + 1 if nothing qualifies.
-     * @param man  the chunk manager to query heights from
+     * @param man  the voxel-query surface to read heights from
      */
-    fn find(mut self, man : ChunkManager) : void {
+    fn find(mut self, man : dyn VoxelQuery) : void {
         let bestH : i32 = 0 - 1;
         let gz : i32 = 0 - 40;
         while (gz <= 40) {

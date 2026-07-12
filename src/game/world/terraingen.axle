@@ -1,0 +1,331 @@
+// terraingen — the terrain generator, a leaf split out of the world manager.
+//
+// Owns the padded heightmap and the biome registry, and writes voxels straight
+// into the shared VoxStore (aliased from the manager — Axle arrays / classes are
+// references). It fills a chunk's stone / filler / surface bands by depth, water
+// up to sea level, a thin cold-biome snow layer, then stamps deterministic trees
+// (carving delegated to treegen's free functions) and dusts cold canopies with
+// snow. Tree placement is deterministic (treeHash), so a canopy straddling a
+// chunk border is stamped identically from both sides — seamless.
+
+use crate::kernel::kworld::manager::Generator;
+use crate::kernel::kworld::noise::{ terrainHeight, temperature, humidity, treeHash, hashI, snowDepth };
+use crate::game::world::biomes::{ biomeAt, biomeDef, biomeSurface, BiomeDef };
+use crate::kernel::kblock::blocks::{ isLeaves };
+use crate::kernel::kworld::voxstore::VoxStore;
+use crate::game::world::treegen::{ stampTree };
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::config;
+use crate::config::{ Block };
+use crate::config::{ BiomeId };
+
+class TerrainGen : Generator {
+    store : VoxStore,   // shared voxel storage (aliased from the manager)
+    hmap : i32[],       // padded per-slot terrain top (tree-free), owned here
+
+    /**
+     * Allocate the padded heightmap over a shared store. Biome parameters are a
+     * pure lookup (biomes.axle), so there is no per-biome state to own here.
+     * @param store  the shared voxel storage
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own store : VoxStore, slots : i32) {
+        let hSide : i32 = config::chunkSize + 2;
+        self.store = store;
+        self.hmap = malloc<i32>(slots * hSide * hSide);
+    }
+
+    /**
+     * Heightmap value at local coords (lx, lz) within `slot`.
+     * @param slot  the slot index
+     * @param lx    the local x coordinate
+     * @param lz    the local z coordinate
+     * @return the terrain top height
+     */
+    fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32 {
+        let hSide : i32 = config::chunkSize + 2;
+        return self.hmap[slot * hSide * hSide + (lz + 1) * hSide + (lx + 1)];
+    }
+
+    /**
+     * Generate a chunk: heightmap first, then the voxel field + trees.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn generate(mut self, slot : i32, cx : i32, cz : i32) : void {
+        self.genHeightmap(slot, cx, cz);
+        self.genVoxels(slot, cx, cz);
+    }
+
+    /**
+     * Fill the padded heightmap for a chunk, clamped to a valid band.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn genHeightmap(mut self, slot : i32, cx : i32, cz : i32) : void {
+        let s : i32 = config::chunkSize;
+        let hSide : i32 = s + 2;
+        let base : i32 = slot * hSide * hSide;
+        let lz : i32 = 0 - 1;
+        while (lz <= s) {
+            let lx : i32 = 0 - 1;
+            while (lx <= s) {
+                let wx : f64 = (cx * s + lx) as f64;
+                let wz : f64 = (cz * s + lz) as f64;
+                let h : i32 = Math::floorToInt(terrainHeight(wx, wz)) as i32;
+                if (h < 2) {
+                    h = 2;
+                }
+                if (h > config::maxHeight - 1) {
+                    h = config::maxHeight - 1;
+                }
+                self.hmap[base + (lz + 1) * hSide + (lx + 1)] = h;
+                lx = lx + 1;
+            }
+            lz = lz + 1;
+        }
+    }
+
+    /**
+     * Clamped terrain height for an arbitrary world column (for tree origins
+     * outside the heightmap border). Matches genHeightmap.
+     * @param wx  the world x coordinate
+     * @param wz  the world z coordinate
+     * @return the clamped terrain height
+     */
+    fn colHeightWorld(self, wx : i32, wz : i32) : i32 {
+        let h : i32 = Math::floorToInt(terrainHeight(wx as f64, wz as f64)) as i32;
+        if (h < 2) {
+            h = 2;
+        }
+        if (h > config::maxHeight - 1) {
+            h = config::maxHeight - 1;
+        }
+        return h;
+    }
+
+    /** True for the cold, snowy biomes whose trees + ground should carry snow. */
+    fn coldBiome(self, b : BiomeId) : bool {
+        return b == BiomeId::Snowy || b == BiomeId::Taiga || b == BiomeId::Mountain;
+    }
+
+    /**
+     * Deep stone, occasionally an ore — deterministic 3D scatter by depth.
+     * @param cell  the world voxel
+     * @return the block id (ore or stone)
+     */
+    fn oreAt(self, cell : IVec3) : Block {
+        let r : f64 = hashI(cell.x * 7 + cell.y * 131, cell.z * 13 + cell.y * 977, config::seedI + 9171);
+        if (cell.y < 14) {
+            if (r > 0.9930) {
+                return Block::DiamondOre;
+            }
+            if (r > 0.9870) {
+                return Block::EmeraldOre;
+            }
+            if (r > 0.9790) {
+                return Block::RedstoneOre;
+            }
+            if (r > 0.9680) {
+                return Block::GoldOre;
+            }
+        }
+        if (cell.y < 36 && r > 0.9700) {
+            return Block::LapisOre;
+        }
+        if (r > 0.9550) {
+            return Block::IronOre;
+        }
+        if (r > 0.9150) {
+            return Block::CoalOre;
+        }
+        return Block::Stone;
+    }
+
+    /**
+     * Fill the padded voxel field for a chunk: stone / filler / surface by depth,
+     * water up to sea level, a thin cold-biome snow layer, air above; then trees.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn genVoxels(mut self, slot : i32, cx : i32, cz : i32) : void {
+        let s : i32 = config::chunkSize;
+        self.store.maxFY[slot] = 0;
+        let lz : i32 = 0 - 1;
+        while (lz <= s) {
+            let lx : i32 = 0 - 1;
+            while (lx <= s) {
+                let wx : i32 = cx * s + lx;
+                let wz : i32 = cz * s + lz;
+                let h : i32 = self.heightAt(slot, lx, lz);
+                let biome : BiomeId = biomeAt(temperature(wx as f64, wz as f64),
+                    humidity(wx as f64, wz as f64), h);
+                let surf : Block = biomeSurface(biome, h);
+                let filler : Block = biomeDef(biome).filler;
+                let topY : i32 = h - 1;
+                if (h <= config::seaLevel) {
+                    topY = config::seaLevel;
+                }
+                self.store.bumpFY(slot, topY);
+                let ly : i32 = 0;
+                while (ly < config::worldHeight) {
+                    let id : Block = Block::Air;
+                    if (ly < h) {
+                        if (ly == h - 1) {
+                            id = surf;
+                        } else if (ly >= h - 3) {
+                            id = filler;
+                        } else {
+                            id = self.oreAt(ivec3(wx, ly, wz));
+                        }
+                    } else if (h <= config::seaLevel && ly <= config::seaLevel) {
+                        id = Block::Water;
+                        // Frozen ocean: the water surface freezes to ice.
+                        if (biome == BiomeId::FrozenOcean && ly == config::seaLevel) {
+                            id = Block::Ice;
+                        }
+                    }
+                    self.store.setVoxLocal(slot, ivec3(lx, ly, lz), id);
+                    ly = ly + 1;
+                }
+                // Cold-biome ground: a thin, noise-varied snow layer on top of the
+                // surface (bare patches where the noise is low, the odd full block
+                // where it's high) — so the ground carries snow like the trees.
+                if (self.coldBiome(biome) && h > config::seaLevel && h < config::worldHeight) {
+                    let frac : f64 = snowDepth(wx as f64, wz as f64);
+                    if (frac > 0.0) {
+                        let sb : Block = Block::SnowLayer;
+                        if (frac >= 0.95) {
+                            sb = Block::Snow;
+                        }
+                        self.store.setVoxLocal(slot, ivec3(lx, h, lz), sb);
+                        self.store.bumpFY(slot, h);
+                    }
+                }
+                lx = lx + 1;
+            }
+            lz = lz + 1;
+        }
+        self.stampTrees(slot, cx, cz);
+    }
+
+    /**
+     * Stamp every tree whose origin lies in this chunk's area (plus a 2-column
+     * margin so canopies straddling a border appear from both sides).
+     * Deterministic via `treeHash`, so the two chunks stamp the shared tree
+     * identically. Carving lives in treegen.axle; this drives it per-biome.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn stampTrees(mut self, slot : i32, cx : i32, cz : i32) : void {
+        let s : i32 = config::chunkSize;
+        let olz : i32 = 0 - 2;
+        while (olz <= s + 1) {
+            let olx : i32 = 0 - 2;
+            while (olx <= s + 1) {
+                let wx : i32 = cx * s + olx;
+                let wz : i32 = cz * s + olz;
+                let h : i32 = self.colHeightWorld(wx, wz);
+                if (h > config::seaLevel) {
+                    let biome : BiomeId = biomeAt(temperature(wx as f64, wz as f64),
+                        humidity(wx as f64, wz as f64), h);
+                    // Thin every biome's trees toward sparser, airier woods.
+                    let bd : BiomeDef = biomeDef(biome);
+                    let thr : f64 = bd.treeThresh;
+                    thr = thr + (1.0 - thr) * config::treeThin;
+                    if (treeHash(wx as f64, wz as f64) > thr) {
+                        stampTree(self.store, bd.treeKind, bd.treeHt, slot, ivec3(olx, h, olz));
+                        // Cold biomes: dust the canopy with a thin snow cap.
+                        if (self.coldBiome(biome)) {
+                            self.snowCapTree(slot, olx, olz, h, bd.treeHt, cx * s, cz * s);
+                        }
+                    }
+                }
+                olx = olx + 1;
+            }
+            olz = olz + 1;
+        }
+    }
+
+    /**
+     * Dust a freshly-stamped tree's canopy with a thin snow cap: over each column
+     * of the tree footprint, drop a single snow block onto the topmost leaf.
+     * @param slot    the slot index
+     * @param olx     the tree origin local x
+     * @param olz     the tree origin local z
+     * @param baseY   the trunk base Y
+     * @param height  the trunk height
+     * @param cx0     the chunk's world-x origin (cx * chunkSize)
+     * @param cz0     the chunk's world-z origin (cz * chunkSize)
+     */
+    fn snowCapTree(mut self, slot : i32, olx : i32, olz : i32, baseY : i32, height : i32, cx0 : i32, cz0 : i32) : void {
+        let s : i32 = config::chunkSize;
+        let topSearch : i32 = baseY + height + 4;
+        if (topSearch >= config::worldHeight) {
+            topSearch = config::worldHeight - 1;
+        }
+        let dz : i32 = 0 - 2;
+        while (dz <= 2) {
+            let dx : i32 = 0 - 2;
+            while (dx <= 2) {
+                let lx : i32 = olx + dx;
+                let lz : i32 = olz + dz;
+                if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
+                    self.snowCapColumn(slot, lx, lz, baseY, topSearch, cx0, cz0);
+                }
+                dx = dx + 1;
+            }
+            dz = dz + 1;
+        }
+    }
+
+    /**
+     * Dust one column of the tree footprint: find its topmost leaf and, if the
+     * cell above is open and the column's own ground biome is cold, drop a single
+     * snow block there (one block per column → a light dusting, not a slab).
+     * @param slot       the slot index
+     * @param lx         local x of the column
+     * @param lz         local z of the column
+     * @param baseY      the trunk base Y (search floor)
+     * @param topSearch  the top of the leaf search (clamped to the world top)
+     * @param cx0        the chunk's world-x origin (cx * chunkSize)
+     * @param cz0        the chunk's world-z origin (cz * chunkSize)
+     */
+    fn snowCapColumn(mut self, slot : i32, lx : i32, lz : i32, baseY : i32, topSearch : i32, cx0 : i32, cz0 : i32) : void {
+        // Walk down to the topmost leaf of this column.
+        let y : i32 = topSearch;
+        while (y > baseY && !isLeaves(self.store.getVox(slot, ivec3(lx, y, lz)))) {
+            y = y - 1;
+        }
+        if (y <= baseY) {
+            return;   // no leaf in this column
+        }
+        // The leaf needs open air directly above to hold the snow.
+        if (y + 1 >= config::worldHeight || self.store.getVox(slot, ivec3(lx, y + 1, lz)) != Block::Air) {
+            return;
+        }
+        // Only cap columns whose own ground biome is cold, so the canopy snow
+        // matches the ground snow.
+        let wx : i32 = cx0 + lx;
+        let wz : i32 = cz0 + lz;
+        let ch : i32 = self.colHeightWorld(wx, wz);
+        let cb : BiomeId = biomeAt(temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), ch);
+        if (!self.coldBiome(cb)) {
+            return;
+        }
+        let frac : f64 = snowDepth(wx as f64, wz as f64);
+        if (frac <= 0.0) {
+            return;
+        }
+        let sb : Block = Block::SnowLayer;
+        if (frac >= 0.95) {
+            sb = Block::Snow;
+        }
+        self.store.setVoxLocal(slot, ivec3(lx, y + 1, lz), sb);
+        self.store.bumpFY(slot, y + 1);
+    }
+}

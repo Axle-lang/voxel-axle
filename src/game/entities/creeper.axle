@@ -1,0 +1,176 @@
+// Creeper — the hostile mob. Homes in on a survival player (3D range),
+// lights a fuse, holds, then explodes; defuses if the player flees or
+// switches to creative. Overrides the passive base `think` with its own
+// hostile brain and is `Hostile` (which bundles the `Explodes` mechanism). The fuse countdown lives
+// here (not on the calm base Mob) — only the creeper charges.
+
+use crate::kernel::kentity::mob::{ Mob, atan2, Hostile, Explodes };
+use crate::kernel::kentity::player::Player;
+use crate::kernel::seams::{ VoxelQuery, VoxelEdit };
+use crate::kernel::kworld::blocksim::BlockSim;
+use crate::kernel::kio::sfx::AudioManager;
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::config;
+use crate::config::{ MobKind, Block };
+
+class Creeper : Mob, Hostile {
+    fuse : i32,         // charge countdown; < 0 = not charging
+
+    /** Create a creeper at (x, y, z). */
+    constructor(x : f64, y : f64, z : f64) {
+        super(x, y, z, MobKind::Creeper, config::mobCreeperHp);
+        self.speed = config::mobCreeperSpeed;
+        self.height = 1.5;
+        self.fuse = 0 - 1;
+    }
+
+    /**
+     * Live fuse level, or < 0 when not charging — overrides the calm base so
+     * the renderer can swell / strobe the model while the fuse burns.
+     * @return the fuse countdown, or a value below zero when idle
+     */
+    fn fuseLevel(self) : i32 {
+        return self.fuse;
+    }
+
+    /**
+     * Creeper AI for one frame (the hostile `think` — replaces the base wander).
+     * Aggression is fully 3D: the creeper only chases / charges / detonates when
+     * the player is close in straight-line distance AND within
+     * `creeperMaxVertical` of its own level, so a player flying or perched well
+     * above is out of reach and a lit fuse defuses. The fuse / blast sounds are
+     * played here, attenuated by 3D distance.
+     * @param world   the world the creeper moves through (read-only voxel query)
+     * @param player  the player to home in on
+     * @param sfx     the audio manager for the charge / blast sounds
+     * @param sim     the block-update sim woken around the blast crater
+     * @param rnd     unused (the creeper is deterministic toward its target)
+     */
+    fn think(mut self, world : dyn VoxelQuery, player : Player, sfx : AudioManager, sim : BlockSim, rnd : f64) : void {
+        if (self.timers.hurtTimer > 0) {
+            self.timers.hurtTimer = self.timers.hurtTimer - 1;
+        }
+        if (self.state == 1) {
+            if (self.timers.deathTimer > 0) {
+                self.timers.deathTimer = self.timers.deathTimer - 1;
+            }
+            self.tick(world, 0.0, 0.0);
+            return;
+        }
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
+        // 3D distance + an explicit vertical cap: a player flying or standing
+        // high overhead is NOT in range, so the creeper won't chase or blow up
+        // under an out-of-reach target.
+        let dist : f64 = Math::sqrt(dx * dx + dy * dy + dz * dz);
+        let vert : f64 = dy;
+        if (vert < 0.0) {
+            vert = 0.0 - vert;
+        }
+        self.heading = atan2(dz, dx);
+
+        // Hostile only toward a survival player who is near our own level. In
+        // creative / flight, or too far above/below, the creeper stands down
+        // (and any lit fuse is defused below).
+        let hostile : bool = player.creative == 0 && vert <= config::creeperMaxVertical;
+
+        if (self.fuse < 0) {
+            if (hostile && dist <= config::creeperTriggerDist) {
+                self.fuse = config::creeperFuseFrames;
+                self.tick(world, 0.0, 0.0);
+                sfx.creeperFuse(self.pos);
+                return;
+            }
+            if (hostile && dist <= config::creeperChaseDist) {
+                let spd : f64 = config::mobCreeperSpeed;
+                self.walkPhase = self.walkPhase + 0.35;
+                self.tick(world, Math::cos(self.heading) * spd, Math::sin(self.heading) * spd);
+            } else {
+                self.tick(world, 0.0, 0.0);
+            }
+            return;
+        }
+
+        // Fuse lit: defuse if the player escaped (3D / vertically) or switched
+        // to creative.
+        if (!hostile || dist > config::creeperTriggerDist * 2.4) {
+            self.fuse = 0 - 1;
+            self.tick(world, 0.0, 0.0);
+            return;
+        }
+        self.fuse = self.fuse - 1;
+        self.tick(world, 0.0, 0.0);
+        if (self.fuse <= 0) {
+            self.explode(world, player, sim);
+            sfx.creeperBlast(self.pos);
+        }
+    }
+
+    /**
+     * Detonate: distance-scaled damage to the player and a spherical
+     * crater of broken blocks, then mark the creeper for removal. The block
+     * edits go through the `VoxelEdit` capability of the same world object the
+     * query reads from (narrowed here from the read-only `VoxelQuery` view).
+     * @param world   the world (queried for blocks; narrowed to VoxelEdit to crater)
+     * @param player  the player to damage by the blast
+     * @param sim     the block-update sim woken (fluid / falling) around each broken cell
+     */
+    fn explode(mut self, world : dyn VoxelQuery, player : Player, sim : BlockSim) : void {
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
+        let d : f64 = Math::sqrt(dx * dx + dy * dy + dz * dz);
+        let reach : f64 = config::creeperBlastRadius * 2.0;
+        if (d < reach) {
+            let f : f64 = 1.0 - d / reach;
+            let dmg : i32 = Math::floorToInt(f * (config::creeperDamage as f64)) as i32;
+            if (dmg > 0) {
+                player.hurt(dmg);
+            }
+        }
+        // The crater writes blocks: run it only when the world exposes the
+        // VoxelEdit seam (its provider — ChunkManager — implements both). Narrow
+        // a throwaway alias so `world` stays a VoxelQuery for the crater probe.
+        let ed : dyn VoxelQuery = world;
+        if (ed is VoxelEdit) {
+            self.crater(world, ed as VoxelEdit, sim);
+        }
+        self.state = 1;
+        self.timers.deathTimer = 0;
+    }
+
+    /**
+     * Carve the spherical blast crater: break every non-air cell within the
+     * blast radius, re-light it, and wake the fluid / falling sim around it.
+     * @param query  the world read view (tests which cells are non-air)
+     * @param edit   the world write view (breaks + re-lights each crater cell)
+     * @param sim    the block-update sim woken around each broken cell
+     */
+    fn crater(mut self, query : dyn VoxelQuery, edit : dyn VoxelEdit, sim : BlockSim) : void {
+        let r : i32 = Math::floorToInt(config::creeperBlastRadius) as i32;
+        let cx : i32 = Math::floorToInt(self.pos.x) as i32;
+        let cy : i32 = Math::floorToInt(self.pos.y) as i32;
+        let cz : i32 = Math::floorToInt(self.pos.z) as i32;
+        let ox : i32 = 0 - r;
+        while (ox <= r) {
+            let oy : i32 = 0 - r;
+            while (oy <= r) {
+                let oz : i32 = 0 - r;
+                while (oz <= r) {
+                    if (ox * ox + oy * oy + oz * oz <= r * r) {
+                        let cell : IVec3 = ivec3(cx + ox, cy + oy, cz + oz);
+                        if (query.worldGet(cell) != Block::Air) {
+                            edit.breakAt(cell);
+                            edit.lightUpdate(cell);
+                            sim.enqueue6(cell);
+                        }
+                    }
+                    oz = oz + 1;
+                }
+                oy = oy + 1;
+            }
+            ox = ox + 1;
+        }
+    }
+}

@@ -30,23 +30,26 @@ use sdl_platform::{
 };
 use sdl_platform::{cfree, nullPtr, asPtr, isNull, allocBytes, readI32, readU8};
 use sdl_platform::loadAtlas;
-use crate::clock::GameClock;
-use crate::input::{
+use crate::kernel::kio::clock::GameClock;
+use crate::kernel::kio::input::{
     SC_W, SC_A, SC_S, SC_D, SC_SPACE, SC_LCTRL, SC_LSHIFT, SC_F3, SC_F4, SC_ESC, SC_1,
 };
-use crate::world::manager::{ ChunkManager, lightLoop };
-use crate::world::blocksim::BlockSim;
-use crate::entities::player::Player;
-use crate::entities::mobs::MobManager;
+use crate::kernel::kworld::manager::{ ChunkManager, lightLoop };
+use crate::game::world::terraingen::TerrainGen;
+use crate::kernel::kworld::blocksim::BlockSim;
+use crate::kernel::kentity::player::Player;
+use crate::kernel::kentity::mobs::MobManager;
+use crate::game::entities::fauna::Fauna;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::ray::{Picker, cellInPlayer};
-use crate::game::sfx::{ AudioManager, audioLoop };
-use crate::vec3::{ IVec3, ivec3 };
+use crate::kernel::kio::sfx::{ AudioManager, audioLoop };
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::game::tick::TickManager;
-use crate::gfx::render::Renderer;
-use crate::gfx::raster::FrameBuf;
-use crate::gfx::hud::drawHud;
-use crate::gfx::menu::{drawPauseMenu, menuHit};
+use crate::kernel::krender::render::Renderer;
+use crate::kernel::krender::raster::FrameBuf;
+use crate::kernel::krender::hud::drawHud;
+use crate::kernel::krender::menu::{drawPauseMenu, menuHit};
+use crate::kernel::krender::color::Canvas;
 use crate::config;
 use crate::config::{ Block };
 
@@ -121,6 +124,10 @@ fn main() : void {
 
     Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
     let man : ChunkManager = new ChunkManager();
+    // Inject the game's concrete terrain generator (biome tables + ore / tree
+    // rules — all app content) over the manager's shared voxel store. The kernel
+    // drives it through the `Generator` seam and never names TerrainGen.
+    man.attachGenerator(new TerrainGen(man.store, config::span * config::span));
     // Initial load: drive the per-call budget to completion so the whole spawn
     // view is ready before play (no popping in at the start).
     while (man.ensureLoaded(0, 0) > 0) {
@@ -136,6 +143,9 @@ fn main() : void {
     }
 
     let mobs : MobManager = new MobManager();
+    // Inject the game's fauna (which species exist + spawn weights — app content);
+    // the kernel's MobManager builds mobs through the MobSpawner seam.
+    mobs.attachSpawner(new Fauna());
     let renderer : Renderer = new Renderer();
 
     // Block + mob texture atlas, loaded at runtime from `atlas.raw`.
@@ -486,15 +496,16 @@ fn main() : void {
             }
             // Soft warm glow on bright pixels (sun, halo, shafts, water, snow).
             renderer.bloomPass(fb);
+            let cv : Canvas = Canvas { base: pixels, w: w, h: h };
             if (!paused) {
                 if (picker.hit == 1) {
                     renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
                         man.blockBoxHeight(ivec3(picker.bx, picker.by, picker.bz)));
                 }
-                drawHud(pixels, w, h, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
+                drawHud(cv, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
                 renderer.crosshair(fb);
             } else {
-                drawPauseMenu(pixels, w, h, hover);
+                drawPauseMenu(cv, hover);
             }
 
             SDL_UpdateTexture(tex, nullPtr(), asPtr(pixels), w * 4);

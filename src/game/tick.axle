@@ -14,7 +14,19 @@
 
 use crate::config;
 
-class TickManager {
+/**
+ * The isochronous scheduling capability over the fixed simulation step:
+ * `advance` ticks the counter, and the `due*` predicates edge-latch which heavy,
+ * low-urgency systems (maintenance, block sim, chunk streaming) run this tick.
+ */
+trait Scheduler {
+    fn advance(mut self) : void;
+    fn dueMaintain(mut self) : bool;
+    fn dueSim(mut self) : bool;
+    fn dueStream(mut self, cx : i32, cz : i32) : bool;
+}
+
+class TickManager : Scheduler {
     tick : i32,          // monotonic fixed-step counter (advance() once per step)
     maintainEvery : i32, // mob cull + spawn-scan cadence, in ticks
     lastMaintain : i32,  // tick the maintenance pass last fired on

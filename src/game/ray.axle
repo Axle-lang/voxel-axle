@@ -4,13 +4,31 @@
 // small "would this block trap the player?" test used to refuse placing
 // inside yourself.
 
-use crate::world::manager::ChunkManager;
-use crate::entities::player::Player;
-use crate::vec3::{ Vec3, vec3, ivec3 };
+use crate::kernel::seams::VoxelQuery;
+use crate::kernel::kentity::player::Player;
+use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 use crate::config;
 
+/**
+ * Cast the player's look-ray into the voxel world and record what it targets.
+ * The picker's own capability, named so the interaction layer depends on "a thing
+ * that can cast a pick" rather than the concrete Picker.
+ *
+ * NOTE on the world param: the DDA reads only block solidity (`BlockReader`) and
+ * partial-block box heights (`CollisionField`), so it would ideally take a
+ * two-capability bundle rather than the whole `dyn VoxelQuery` (it never touches
+ * `Heightfield`). A single `dyn` param must name ONE declared trait, though, and
+ * the only bundle ChunkManager (kworld-owned, read-only here) declares that
+ * spans both leaves is `VoxelQuery`. Narrowing further would need kworld to
+ * declare a `BlockReader + CollisionField` bundle on ChunkManager, so the param
+ * stays `dyn VoxelQuery` for now.
+ */
+trait RayCaster {
+    fn cast(mut self, man : dyn VoxelQuery, p : Player) : void;
+}
+
 /** Result of casting the player's look-ray into the voxel world. */
-class Picker {
+class Picker : RayCaster {
     hit : i32,
     bx : i32,
     by : i32,
@@ -36,10 +54,10 @@ class Picker {
      * Voxel DDA from the eye along the look direction
      * `(-siny·cosp, sinp, cosy·cosp)`, up to `reachDist` blocks. Records
      * the first solid voxel and the air cell stepped from.
-     * @param man  the chunk manager providing voxel queries
+     * @param man  the voxel-query surface (any `VoxelQuery`; ChunkManager conforms)
      * @param p    the player whose eye and look angles drive the ray
      */
-    fn cast(mut self, man : ChunkManager, p : Player) : void {
+    fn cast(mut self, man : dyn VoxelQuery, p : Player) : void {
         self.hit = 0;
         let ox : f64 = p.eye.x;
         let oy : f64 = p.eye.y;

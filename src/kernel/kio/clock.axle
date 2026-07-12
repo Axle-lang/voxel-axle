@@ -1,0 +1,81 @@
+// clock — fixed-timestep pacing, so the simulation advances by real
+// elapsed time instead of once per displayed frame.
+//
+// `steps()` accumulates the wall-clock time since the last call and
+// returns how many fixed `1000/tickHz`-ms simulation steps are due this
+// frame: 1 at the target rate, more to catch up after a slow frame, 0 if
+// the frame came early — so jumping/walking run at the same real speed
+// whatever the frame rate (the accumulator is clamped so a long stall
+// can't trigger a "spiral of death" of hundreds of steps).
+//
+// `cap()` then sleeps any leftover frame budget so the loop doesn't spin
+// the CPU at hundreds of fps when v-sync is missing or disabled
+// (`SDL_RenderPresent` alone is not a guaranteed cap).
+//
+// Timing primitives come from the `sdl_platform` crate; the tick rate is a
+// game tunable, so this stays in the game rather than the platform layer.
+
+use sdl_platform::{ticks, delay};
+use crate::config;
+
+/**
+ * Fixed-timestep pacing capability: how many simulation steps are due this frame
+ * (`steps`) and sleeping the leftover budget (`cap`). Lets the main loop drive
+ * pacing through a capability rather than a concrete clock type.
+ */
+trait Clock {
+    fn steps(mut self) : i32;
+    fn cap(mut self) : void;
+}
+
+class GameClock : Clock {
+    msPerTick : i32,
+    maxAccum : i32,
+    accLast : i32,
+    acc : i32,
+    capLast : i32,
+
+    /**
+     * Start the clock at the current time with an empty accumulator.
+     */
+    constructor() {
+        self.msPerTick = 1000 / config::tickHz;
+        self.maxAccum = self.msPerTick * 8;   // cap catch-up to 8 steps
+        self.accLast = ticks();
+        self.acc = 0;
+        self.capLast = ticks();
+    }
+
+    /**
+     * Number of fixed simulation steps to run this frame.
+     * @return how many fixed simulation steps are due this frame
+     */
+    fn steps(mut self) : i32 {
+        let now : i32 = ticks();
+        let dt : i32 = now - self.accLast;
+        self.accLast = now;
+        if (dt < 0) {
+            dt = 0;
+        }
+        self.acc = self.acc + dt;
+        if (self.acc > self.maxAccum) {
+            self.acc = self.maxAccum;
+        }
+        let n : i32 = self.acc / self.msPerTick;
+        self.acc = self.acc - n * self.msPerTick;
+        return n;
+    }
+
+    /**
+     * Sleep any unused frame budget to hold the loop near `tickHz` and
+     * keep the CPU idle between frames.
+     */
+    fn cap(mut self) : void {
+        let now : i32 = ticks();
+        let dt : i32 = now - self.capLast;
+        if (dt >= 0 && dt < self.msPerTick) {
+            delay(self.msPerTick - dt);
+        }
+        self.capLast = ticks();
+    }
+}

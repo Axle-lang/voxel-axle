@@ -1,0 +1,206 @@
+// vec3 — tiny value-type 3D vectors, copied on assignment. Groups the
+// coordinates that used to be passed and stored as loose `x` / `y` / `z`
+// scalars (entity positions, ray directions, voxel cells, …) into one named
+// shape. `Vec3` is the float vector (positions / directions); `IVec3` is the
+// integer one (voxel / block coordinates) — the single home both leaf modules
+// and the renderer import.
+
+/**
+ * Anything that has a world-space position. A minimal capability so callers can
+ * treat entities, particles or the camera uniformly when all they need is
+ * "where is it". Implement by returning your own `Vec3` position.
+ */
+trait Spatial {
+    fn position(self) : Vec3;
+}
+
+/** A 3D vector / point in world space (floats). Plain data, value semantics. */
+struct Vec3 : Spatial {
+    x : f64,
+    y : f64,
+    z : f64,
+
+    /**
+     * Component-wise sum.
+     * @param o  the vector to add
+     * @return self + o
+     */
+    fn add(self, o : Vec3) : Vec3 {
+        return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z };
+    }
+
+    /**
+     * Component-wise difference.
+     * @param o  the vector to subtract
+     * @return self - o
+     */
+    fn sub(self, o : Vec3) : Vec3 {
+        return Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z };
+    }
+
+    /**
+     * Uniform scale by a scalar.
+     * @param s  the factor
+     * @return self * s
+     */
+    fn scale(self, s : f64) : Vec3 {
+        return Vec3 { x: self.x * s, y: self.y * s, z: self.z * s };
+    }
+
+    /**
+     * Dot (scalar) product.
+     * @param o  the other vector
+     * @return self · o
+     */
+    fn dot(self, o : Vec3) : f64 {
+        return self.x * o.x + self.y * o.y + self.z * o.z;
+    }
+
+    /**
+     * Cross (vector) product.
+     * @param o  the other vector
+     * @return self × o
+     */
+    fn cross(self, o : Vec3) : Vec3 {
+        return Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        };
+    }
+
+    /**
+     * Squared length (avoids the sqrt; use for comparisons).
+     * @return |self|²
+     */
+    fn lengthSq(self) : f64 {
+        return self.x * self.x + self.y * self.y + self.z * self.z;
+    }
+
+    /**
+     * Euclidean length / magnitude.
+     * @return |self|
+     */
+    fn length(self) : f64 {
+        return Math::sqrt(self.lengthSq());
+    }
+
+    /**
+     * Unit vector in the same direction. A zero vector is returned unchanged
+     * (no divide-by-zero).
+     * @return self / |self|, or self if it has zero length
+     */
+    fn normalize(self) : Vec3 {
+        let len : f64 = self.length();
+        if (len == 0.0) {
+            return Vec3 { x: self.x, y: self.y, z: self.z };
+        }
+        let inv : f64 = 1.0 / len;
+        return Vec3 { x: self.x * inv, y: self.y * inv, z: self.z * inv };
+    }
+
+    /**
+     * Squared distance to another point (avoids the sqrt).
+     * @param o  the other point
+     * @return |self - o|²
+     */
+    fn distanceSq(self, o : Vec3) : f64 {
+        let dx : f64 = self.x - o.x;
+        let dy : f64 = self.y - o.y;
+        let dz : f64 = self.z - o.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    /**
+     * Euclidean distance to another point.
+     * @param o  the other point
+     * @return |self - o|
+     */
+    fn distance(self, o : Vec3) : f64 {
+        return Math::sqrt(self.distanceSq(o));
+    }
+
+    /**
+     * Own world-space position (Spatial capability); a point is its own place.
+     * @return self
+     */
+    fn position(self) : Vec3 {
+        return Vec3 { x: self.x, y: self.y, z: self.z };
+    }
+}
+
+/** A 3D integer coordinate (a voxel / block cell). Plain data, value semantics. */
+struct IVec3 {
+    x : i32,
+    y : i32,
+    z : i32,
+
+    /**
+     * Component-wise sum.
+     * @param o  the cell offset to add
+     * @return self + o
+     */
+    fn add(self, o : IVec3) : IVec3 {
+        return IVec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z };
+    }
+
+    /**
+     * Component-wise difference.
+     * @param o  the cell offset to subtract
+     * @return self - o
+     */
+    fn sub(self, o : IVec3) : IVec3 {
+        return IVec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z };
+    }
+
+    /**
+     * Exact cell equality.
+     * @param o  the other cell
+     * @return true when all three components match
+     */
+    fn equals(self, o : IVec3) : bool {
+        return self.x == o.x && self.y == o.y && self.z == o.z;
+    }
+
+    /**
+     * The cell's corner as a float vector (its minimum x/y/z).
+     * @return the corner point
+     */
+    fn toVec3(self) : Vec3 {
+        return Vec3 { x: self.x as f64, y: self.y as f64, z: self.z as f64 };
+    }
+
+    /**
+     * The cell's center point (corner + 0.5 on each axis).
+     * @return the center point
+     */
+    fn center(self) : Vec3 {
+        return Vec3 {
+            x: self.x as f64 + 0.5,
+            y: self.y as f64 + 0.5,
+            z: self.z as f64 + 0.5,
+        };
+    }
+}
+
+/**
+ * Build a Vec3 from its components.
+ * @param x  the x component
+ * @param y  the y component
+ * @param z  the z component
+ * @return the vector
+ */
+fn vec3(x : f64, y : f64, z : f64) : Vec3 {
+    return Vec3 { x: x, y: y, z: z };
+}
+
+/**
+ * Build an IVec3 from its components.
+ * @param x  the x component
+ * @param y  the y component
+ * @param z  the z component
+ * @return the integer coordinate
+ */
+fn ivec3(x : i32, y : i32, z : i32) : IVec3 {
+    return IVec3 { x: x, y: y, z: z };
+}
