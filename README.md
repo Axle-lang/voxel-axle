@@ -8,7 +8,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 
 <p align="center">
   <a href="https://axle-lang.dev"><img alt="Powered by Axle" src="https://img.shields.io/badge/powered%20by-Axle-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
-  <a href="https://axle-lang.dev"><img alt="Axle 0.4.4+" src="https://img.shields.io/badge/axle-0.4.4%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://axle-lang.dev"><img alt="Axle 0.7.0+" src="https://img.shields.io/badge/axle-0.7.0%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
   <img alt="Rendering: 100% CPU" src="https://img.shields.io/badge/rendering-100%25%20CPU-FF7A45?style=flat-square&labelColor=1b1b2b">
@@ -81,11 +81,11 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 ```bash
 git clone --recurse-submodules <repo-url>   # the SDL2 platform layer is a submodule
 cd voxel-axle
-axle --version                              # must print 0.4.4 or newer
+axle --version                              # must print 0.7.0 or newer
 axle run                                    # compile + run
 ```
 
-That's it if you already have **Axle 0.4.4+** and **SDL2**. If not, the two sections below get you there.
+That's it if you already have **Axle 0.7.0+** and **SDL2**. If not, the two sections below get you there.
 
 ## 🧩 Built with Axle
 
@@ -95,7 +95,7 @@ This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern 
 
 ## 📦 Prerequisites
 
-You need three things: this repo **with its submodule**, the **Axle compiler** (v0.4.4+) and **SDL2**.
+You need three things: this repo **with its submodule**, the **Axle compiler** (v0.7.0+) and **SDL2**.
 
 ### 0. Clone the repo and its SDL2 platform submodule
 
@@ -111,12 +111,12 @@ git submodule update --init --recursive
 
 Later, to pull upstream platform-layer changes: `git submodule update --remote`.
 
-### 1. Install the Axle compiler (v0.4.4+)
+### 1. Install the Axle compiler (v0.7.0+)
 
-This project must be built with Axle **v0.4.4 or newer** — codegen and the stdlib evolve between releases. Check what you have:
+This project must be built with Axle **v0.7.0 or newer** — codegen and the stdlib evolve between releases. Check what you have:
 
 ```bash
-axle --version      # must print 0.4.4 or higher
+axle --version      # must print 0.7.0 or higher
 ```
 
 <details>
@@ -133,7 +133,7 @@ axle --version      # must print 0.4.4 or higher
       | sudo tee /etc/apt/sources.list.d/axle.list
   sudo apt update && sudo apt install axle   # LLVM 18 + lld pulled in automatically
   ```
-- **Windows** — install the Windows x64 `.msi` from the `v0.4.4` (or newer) release; it installs `axle.exe` to `C:\Program Files (x86)\Axle\` and onto your `PATH`. Or build from source from the `axle` compiler repo:
+- **Windows** — install the Windows x64 `.msi` from the `v0.7.0` (or newer) release; it installs `axle.exe` to `C:\Program Files (x86)\Axle\` and onto your `PATH`. Or build from source from the `axle` compiler repo:
   ```powershell
   # needs Visual C++ Build Tools + LLVM 18 (see the axle repo's SETUP-WINDOWS.md)
   $env:LLVM_SYS_181_PREFIX = "C:\Program Files\LLVM"
@@ -164,7 +164,7 @@ The engine links against SDL2 and needs `SDL2.dll` next to the binary at runtime
 
 ## 🛠️ Build & run
 
-From this directory, with the `vendor/sdl_platform` submodule initialised, `axle --version` reporting 0.4.4+ and SDL2 installed:
+From this directory, with the `vendor/sdl_platform` submodule initialised, `axle --version` reporting 0.7.0+ and SDL2 installed:
 
 ```bash
 axle run            # compile + run

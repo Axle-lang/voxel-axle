@@ -59,7 +59,9 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     cols : ColumnRing,    // per-slot chunk ownership + collision top
     store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
     leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
-    gen : dyn Generator,  // terrain generation seam (concrete impl injected by the app)
+    gen : dyn Generator[], // terrain generation seam (concrete impl injected by
+                          // the app), held in a one-slot array: a trait-typed
+                          // field cannot store a class implementer (E0709)
     mesher : ChunkMesher, // voxel → face/torch/collision-top mesher
 
     /**
@@ -88,6 +90,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
             loaded: malloc<i32>(slots), ctop: malloc<i32>(slots * s * s),
         };
         self.store = new VoxStore(slots);
+        self.gen = malloc<dyn Generator>(1);
         // The light engine + generator alias the shared voxel field + ring
         // ownership; the mesher aliases the face buffers it fills (built last, so
         // every field it reads is already assigned).
@@ -108,7 +111,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param g  the generator implementation (ownership taken)
      */
     fn attachGenerator(mut self, own g : dyn Generator) : void {
-        self.gen = g;
+        self.gen[0] = g;
     }
 
     // ── Grid math ───────────────────────────────────────────────
@@ -211,7 +214,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
             return config::seaLevel;
         }
-        return self.gen.heightAt(slot, wx - cx * s, wz - cz * s);
+        return self.gen[0].heightAt(slot, wx - cx * s, wz - cz * s);
     }
 
     /**
@@ -384,7 +387,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.cols.cxs[slot] = cx;
         self.cols.czs[slot] = cz;
         self.cols.loaded[slot] = 1;
-        self.gen.generate(slot, cx, cz);
+        self.gen[0].generate(slot, cx, cz);
         self.leng.clearLight(slot);
         self.leng.seedSky(slot, cx, cz);
         // Don't mesh here — ensureLoaded meshes in a second pass once every

@@ -23,11 +23,14 @@ class MobManager {
                             // by viewing each element as `dyn Actor`
     n : i32,                // live count (actors[0..n) are valid)
     rc : f64,
-    spawner : dyn MobSpawner, // app factory that builds the concrete species
+    spawner : dyn MobSpawner[], // app factory that builds the concrete species,
+                            // held in a one-slot array: a trait-typed field
+                            // cannot store a class implementer (E0709)
 
     /** Create an empty mob manager with the single actor pool allocated. */
     constructor() {
         self.actors = malloc<Mob>(config::mobCap);
+        self.spawner = malloc<dyn MobSpawner>(1);
         self.n = 0;
         self.rc = 9.0;
     }
@@ -39,7 +42,7 @@ class MobManager {
      * @param s  the spawner implementation (ownership taken)
      */
     fn attachSpawner(mut self, own s : dyn MobSpawner) : void {
-        self.spawner = s;
+        self.spawner[0] = s;
     }
 
     // ── RNG (the world has no RNG of its own) ──
@@ -124,7 +127,7 @@ class MobManager {
         // creepers kept rare) and builds it. Newborns get a randomised first
         // voice delay so a fresh herd doesn't all vocalise on the same frame (a
         // hostile mob keeps it too but never vocalises, so it's harmless there).
-        let m : Mob = self.spawner.create(worldX, spawnY, worldZ, self.rand());
+        let m : Mob = self.spawner[0].create(worldX, spawnY, worldZ, self.rand());
         m.rearmVoice(self.nextVocalDelay());
         self.actors[self.n] = m;
         self.n = self.n + 1;

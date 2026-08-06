@@ -160,7 +160,7 @@ fn glyphBits(gi : i32) : string {
  * @return the rendered width in pixels.
  */
 fn textWidth(s : string, scale : i32) : i32 {
-    let n : i32 = s.length() as i32;
+    let n : i32 = s.length;
     if (n <= 0) {
         return 0;
     }
@@ -201,7 +201,7 @@ fn drawGlyph(cv : Canvas, x : i32, y : i32, scale : i32, color : i32, gi : i32) 
  * @param s      the text.
  */
 fn drawText(cv : Canvas, x : i32, y : i32, scale : i32, color : i32, s : string) : void {
-    let n : i32 = s.length() as i32;
+    let n : i32 = s.length;
     let cx : i32 = x;
     let i : i32 = 0;
     while (i < n) {
