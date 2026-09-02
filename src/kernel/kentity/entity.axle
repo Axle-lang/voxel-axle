@@ -16,7 +16,7 @@
 
 use crate::kernel::seams::VoxelQuery;
 use crate::kernel::kblock::blocks::{ isWater, fluidLevel };
-use crate::config;
+use crate::configs::motion::{ Motion };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 
 /**
@@ -67,7 +67,7 @@ trait Damageable {
 /**
  * Compétence: resolves a body AABB against the solid voxel field — the overlap
  * test, the support surface under the feet, and horizontal movement that blocks
- * on faces while auto-stepping a ≤ stepHeight ledge.
+ * on faces while auto-stepping a ≤ `Motion::STEP_HEIGHT` ledge.
  */
 trait Collides {
     fn collidesAt(self, world : dyn VoxelQuery, px : f64, py : f64, pz : f64) : bool;
@@ -96,32 +96,32 @@ trait Physics : Collides, Falls, Swims {
 }
 
 class Entity : Damageable, Physics {
-    pos : Vec3,          // body centre on X/Z, foot height on Y
-    velY : f64,
-    radius : f64,
-    height : f64,        // body AABB height (feet at posY, head at posY+height)
-    gravityScale : f64,
-    hp : i32,
-    maxHp : i32,
-    onGround : i32,
-    impact : f64,
-    grav : f64,          // downward acceleration per tick (× gravityScale)
-    apexY : f64,         // highest Y since leaving the ground (for fall distance)
-    stepUp : f64,        // pending visual step-up offset (camera eases it to 0)
-    inWater : bool,      // body is in water this step → buoyant physics + step-out
+    pub(crate) pos : Vec3,       // body centre on X/Z, foot height on Y
+    pub(crate) velY : f64,
+    pub(derived) radius : f64,
+    pub(derived) height : f64,   // body AABB height (feet at posY, head at posY+height)
+    pub(derived) gravityScale : f64,
+    pub(crate) hp : i32,
+    pub(crate) maxHp : i32,
+    pub(crate) onGround : bool,
+    pub(derived) impact : f64,
+    pub(derived) grav : f64,     // downward acceleration per tick (× gravityScale)
+    pub(derived) apexY : f64,    // highest Y since leaving the ground (for fall distance)
+    pub(derived) stepUp : f64,   // pending visual step-up offset (camera eases it to 0)
+    pub(derived) inWater : bool, // body is in water this step → buoyant physics + step-out
 
     /** Construct an entity at (x, y, z) with the given max (and current) HP. */
     constructor(x : f64, y : f64, z : f64, maxHp : i32) {
         self.pos = vec3(x, y, z);
         self.velY = 0.0;
-        self.radius = config::playerRadius;
-        self.height = config::playerHeight;
+        self.radius = Motion::PLAYER_RADIUS;
+        self.height = Motion::PLAYER_HEIGHT;
         self.gravityScale = 1.0;
         self.hp = maxHp;
         self.maxHp = maxHp;
-        self.onGround = 0;
+        self.onGround = false;
         self.impact = 0.0;
-        self.grav = config::gravity;
+        self.grav = Motion::GRAVITY;
         self.apexY = y;
         self.stepUp = 0.0;
         self.inWater = false;
@@ -168,15 +168,15 @@ class Entity : Damageable, Physics {
      * @param pz     candidate body-centre Z
      * @return true if any voxel under the body footprint blocks the body box
      */
-    fn collidesAt(self, world : dyn VoxelQuery, px : f64, py : f64, pz : f64) : bool {
+    pub(derived) fn collidesAt(self, world : dyn VoxelQuery, px : f64, py : f64, pz : f64) : bool {
         let r : f64 = self.radius;
         let eps : f64 = 0.0001;
-        let x0 : i32 = Math::floorToInt(px - r) as i32;
-        let x1 : i32 = Math::floorToInt(px + r - eps) as i32;
-        let z0 : i32 = Math::floorToInt(pz - r) as i32;
-        let z1 : i32 = Math::floorToInt(pz + r - eps) as i32;
-        let y0 : i32 = Math::floorToInt(py) as i32;
-        let y1 : i32 = Math::floorToInt(py + self.height - eps) as i32;
+        let x0 : i32 = (px - r).floorToInt() as i32;
+        let x1 : i32 = (px + r - eps).floorToInt() as i32;
+        let z0 : i32 = (pz - r).floorToInt() as i32;
+        let z1 : i32 = (pz + r - eps).floorToInt() as i32;
+        let y0 : i32 = py.floorToInt() as i32;
+        let y1 : i32 = (py + self.height - eps).floorToInt() as i32;
         let y : i32 = y0;
         while (y <= y1) {
             let x : i32 = x0;
@@ -206,13 +206,13 @@ class Entity : Damageable, Physics {
      * @param yHi    highest world-Y row to scan
      * @return top surface Y of the highest support, or a very low value if none
      */
-    fn supportTop(self, world : dyn VoxelQuery, px : f64, pz : f64, yLo : i32, yHi : i32) : f64 {
+    pub(derived) fn supportTop(self, world : dyn VoxelQuery, px : f64, pz : f64, yLo : i32, yHi : i32) : f64 {
         let r : f64 = self.radius;
         let eps : f64 = 0.0001;
-        let x0 : i32 = Math::floorToInt(px - r) as i32;
-        let x1 : i32 = Math::floorToInt(px + r - eps) as i32;
-        let z0 : i32 = Math::floorToInt(pz - r) as i32;
-        let z1 : i32 = Math::floorToInt(pz + r - eps) as i32;
+        let x0 : i32 = (px - r).floorToInt() as i32;
+        let x1 : i32 = (px + r - eps).floorToInt() as i32;
+        let z0 : i32 = (pz - r).floorToInt() as i32;
+        let z1 : i32 = (pz + r - eps).floorToInt() as i32;
         let best : f64 = 0.0 - 1000000.0;
         let x : i32 = x0;
         while (x <= x1) {
@@ -238,12 +238,12 @@ class Entity : Damageable, Physics {
     }
 
     /**
-     * Move along X, blocked by solid voxels; auto-step a ≤ stepHeight
+     * Move along X, blocked by solid voxels; auto-step a ≤ `Motion::STEP_HEIGHT`
      * ledge when grounded.
      * @param world  chunk manager queried for solid voxels
      * @param dx     signed X displacement to apply
      */
-    fn moveX(mut self, world : dyn VoxelQuery, dx : f64) : void {
+    pub(derived) fn moveX(mut self, world : dyn VoxelQuery, dx : f64) : void {
         if (dx == 0.0) {
             return;
         }
@@ -251,33 +251,33 @@ class Entity : Damageable, Physics {
         if (!self.collidesAt(world, nx, self.pos.y, self.pos.z)) {
             self.pos.x = nx;
             // Step-down assist: while grounded, glue the feet to a slightly lower
-            // support (≤ stepDownAssist, i.e. a partial-block / snow-level drop)
+            // support (≤ `Motion::STEP_DOWN_ASSIST`, i.e. a partial-block / snow-level drop)
             // and ease the camera with a negative stepUp — so leaving a thin snow
             // layer glides down instead of a saccading micro free-fall. A real
-            // full-block ledge (> stepDownAssist) is left to fall normally.
-            if (self.onGround == 1 && !self.inWater) {
+            // full-block ledge (> `Motion::STEP_DOWN_ASSIST`) is left to fall normally.
+            if (self.onGround && !self.inWater) {
                 let dTop : f64 = self.supportTop(world, nx, self.pos.z,
-                    Math::floorToInt(self.pos.y - config::stepDownAssist) as i32,
-                    Math::floorToInt(self.pos.y) as i32);
+                    (self.pos.y - Motion::STEP_DOWN_ASSIST).floorToInt() as i32,
+                    self.pos.y.floorToInt() as i32);
                 let descent : f64 = self.pos.y - dTop;
-                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= config::stepDownAssist) {
+                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= Motion::STEP_DOWN_ASSIST) {
                     self.stepUp = self.stepUp + (dTop - self.pos.y);
                     self.pos.y = dTop;
                 }
             }
             return;
         }
-        if (self.onGround == 1 || self.inWater) {
+        if (self.onGround || self.inWater) {
             // The auto-step allowance is padded by floorScanPad: on a surface
             // that can dip below its nominal cell top, the same 1-block ledge
             // measures taller from inside the dip, so without the pad you stop
             // dead. On the classic surface floorScanPad is 0, so this is exactly
-            // config::stepHeight (unchanged) — the knob lives in ChunkManager.
-            let stepAllow : f64 = config::stepHeight + (world.floorScanPad() as f64) * 0.55;
+            // Motion::STEP_HEIGHT (unchanged) — the knob lives in ChunkManager.
+            let stepAllow : f64 = Motion::STEP_HEIGHT + (world.floorScanPad() as f64) * 0.55;
             let stepY : f64 = self.pos.y + stepAllow;
             if (!self.collidesAt(world, nx, stepY, self.pos.z)) {
                 let top : f64 = self.supportTop(world, nx, self.pos.z,
-                    Math::floorToInt(self.pos.y) as i32, Math::floorToInt(stepY) as i32);
+                    self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
                 if (top > self.pos.y && top - self.pos.y <= stepAllow
                     && !self.collidesAt(world, nx, top, self.pos.z)) {
                     self.stepUp = self.stepUp + (top - self.pos.y);
@@ -289,12 +289,12 @@ class Entity : Damageable, Physics {
     }
 
     /**
-     * Move along Z, blocked by solid voxels; auto-step a ≤ stepHeight
+     * Move along Z, blocked by solid voxels; auto-step a ≤ `Motion::STEP_HEIGHT`
      * ledge when grounded.
      * @param world  chunk manager queried for solid voxels
      * @param dz     signed Z displacement to apply
      */
-    fn moveZ(mut self, world : dyn VoxelQuery, dz : f64) : void {
+    pub(derived) fn moveZ(mut self, world : dyn VoxelQuery, dz : f64) : void {
         if (dz == 0.0) {
             return;
         }
@@ -303,26 +303,26 @@ class Entity : Damageable, Physics {
             self.pos.z = nz;
             // Step-down assist (see moveX): glide down a partial-block drop while
             // grounded instead of a saccading micro free-fall off thin snow.
-            if (self.onGround == 1 && !self.inWater) {
+            if (self.onGround && !self.inWater) {
                 let dTop : f64 = self.supportTop(world, self.pos.x, nz,
-                    Math::floorToInt(self.pos.y - config::stepDownAssist) as i32,
-                    Math::floorToInt(self.pos.y) as i32);
+                    (self.pos.y - Motion::STEP_DOWN_ASSIST).floorToInt() as i32,
+                    self.pos.y.floorToInt() as i32);
                 let descent : f64 = self.pos.y - dTop;
-                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= config::stepDownAssist) {
+                if (dTop > 0.0 - 900000.0 && descent > 0.001 && descent <= Motion::STEP_DOWN_ASSIST) {
                     self.stepUp = self.stepUp + (dTop - self.pos.y);
                     self.pos.y = dTop;
                 }
             }
             return;
         }
-        if (self.onGround == 1 || self.inWater) {
+        if (self.onGround || self.inWater) {
             // Padded auto-step allowance (see moveX): floorScanPad is 0 on the
-            // classic surface, so stepAllow == config::stepHeight.
-            let stepAllow : f64 = config::stepHeight + (world.floorScanPad() as f64) * 0.55;
+            // classic surface, so stepAllow == Motion::STEP_HEIGHT.
+            let stepAllow : f64 = Motion::STEP_HEIGHT + (world.floorScanPad() as f64) * 0.55;
             let stepY : f64 = self.pos.y + stepAllow;
             if (!self.collidesAt(world, self.pos.x, stepY, nz)) {
                 let top : f64 = self.supportTop(world, self.pos.x, nz,
-                    Math::floorToInt(self.pos.y) as i32, Math::floorToInt(stepY) as i32);
+                    self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
                 if (top > self.pos.y && top - self.pos.y <= stepAllow
                     && !self.collidesAt(world, self.pos.x, top, nz)) {
                     self.stepUp = self.stepUp + (top - self.pos.y);
@@ -340,24 +340,24 @@ class Entity : Damageable, Physics {
      * fallen from the apex) drives fall damage.
      * @param world  chunk manager queried for solid voxels
      */
-    fn fall(mut self, world : dyn VoxelQuery) : void {
+    pub(derived) fn fall(mut self, world : dyn VoxelQuery) : void {
         self.impact = 0.0;
         if (self.inWater) {
             // Water drags hard: you sink slowly under heavily damped gravity
             // (no auto-float), and rise only while Space is held (Player.update
             // adds the upward thrust). Sink and rise speeds are capped so the
             // body eases rather than plummeting or rocketing out.
-            self.velY = self.velY - self.grav * self.gravityScale * config::waterGravityScale;
-            let sink : f64 = 0.0 - config::waterSinkMax;
+            self.velY = self.velY - self.grav * self.gravityScale * Motion::WATER_GRAVITY_SCALE;
+            let sink : f64 = 0.0 - Motion::WATER_SINK_MAX;
             if (self.velY < sink) {
                 self.velY = sink;
             }
-            if (self.velY > config::swimUpMax) {
-                self.velY = config::swimUpMax;
+            if (self.velY > Motion::SWIM_UP_MAX) {
+                self.velY = Motion::SWIM_UP_MAX;
             }
         } else {
             self.velY = self.velY - self.grav * self.gravityScale;
-            let term : f64 = 0.0 - config::terminalVel;
+            let term : f64 = 0.0 - Motion::TERMINAL_VEL;
             if (self.velY < term) {
                 self.velY = term;
             }
@@ -368,7 +368,7 @@ class Entity : Damageable, Physics {
             // floor, not a full cube): you rest on the snow at its true height.
             if (self.collidesAt(world, self.pos.x, ny, self.pos.z)) {
                 let top : f64 = self.supportTop(world, self.pos.x, self.pos.z,
-                    Math::floorToInt(ny) as i32, Math::floorToInt(self.pos.y) as i32);
+                    ny.floorToInt() as i32, self.pos.y.floorToInt() as i32);
                 // Rising a little onto a higher floor (stepping up onto snow / a
                 // partial block) is smoothed by the camera stepUp so it reads as
                 // a glide, not a jump.
@@ -379,22 +379,22 @@ class Entity : Damageable, Physics {
                 self.impact = self.apexY - top;
                 self.pos.y = top;
                 self.velY = 0.0;
-                self.onGround = 1;
+                self.onGround = true;
                 self.apexY = top;
             } else {
                 self.pos.y = ny;
-                self.onGround = 0;
+                self.onGround = false;
             }
         } else {
             if (self.collidesAt(world, self.pos.x, ny, self.pos.z)) {
                 self.velY = 0.0;
-                self.onGround = 0;
+                self.onGround = false;
             } else {
                 self.pos.y = ny;
                 if (self.pos.y > self.apexY) {
                     self.apexY = self.pos.y;
                 }
-                self.onGround = 0;
+                self.onGround = false;
             }
         }
     }
@@ -406,11 +406,11 @@ class Entity : Damageable, Physics {
      * @param world  the chunk manager queried for the body's voxels
      * @return whether the body is in water
      */
-    fn bodyInWater(self, world : dyn VoxelQuery) : bool {
-        let bx : i32 = Math::floorToInt(self.pos.x) as i32;
-        let bz : i32 = Math::floorToInt(self.pos.z) as i32;
-        let fy : i32 = Math::floorToInt(self.pos.y + 0.1) as i32;
-        let my : i32 = Math::floorToInt(self.pos.y + self.height * 0.5) as i32;
+    pub(derived) fn bodyInWater(self, world : dyn VoxelQuery) : bool {
+        let bx : i32 = self.pos.x.floorToInt() as i32;
+        let bz : i32 = self.pos.z.floorToInt() as i32;
+        let fy : i32 = (self.pos.y + 0.1).floorToInt() as i32;
+        let my : i32 = (self.pos.y + self.height * 0.5).floorToInt() as i32;
         return isWater(world.worldGet(ivec3(bx, fy, bz))) || isWater(world.worldGet(ivec3(bx, my, bz)));
     }
 
@@ -424,10 +424,10 @@ class Entity : Damageable, Physics {
      * @param dx     signed X displacement intent for this step
      * @param dz     signed Z displacement intent for this step
      */
-    fn tick(mut self, world : dyn VoxelQuery, dx : f64, dz : f64) : void {
+    pub(derived) fn tick(mut self, world : dyn VoxelQuery, dx : f64, dz : f64) : void {
         // stepUp eases both up-steps (positive) and step-down assists (negative),
         // so snap to zero by magnitude, not sign.
-        self.stepUp = self.stepUp * config::stepSmoothDecay;
+        self.stepUp = self.stepUp * Motion::STEP_SMOOTH_DECAY;
         if (self.stepUp < 0.02 && self.stepUp > 0.0 - 0.02) {
             self.stepUp = 0.0;
         }
@@ -437,9 +437,9 @@ class Entity : Damageable, Physics {
         if (self.inWater) {
             // Current: flowing water carries the body along its level gradient
             // (high → low). Clamped and gentle so it nudges rather than ejects.
-            let fbx : i32 = Math::floorToInt(self.pos.x) as i32;
-            let fby : i32 = Math::floorToInt(self.pos.y + 0.2) as i32;
-            let fbz : i32 = Math::floorToInt(self.pos.z) as i32;
+            let fbx : i32 = self.pos.x.floorToInt() as i32;
+            let fby : i32 = (self.pos.y + 0.2).floorToInt() as i32;
+            let fbz : i32 = self.pos.z.floorToInt() as i32;
             let gx : i32 = fluidLevel(world.worldGet(ivec3(fbx - 1, fby, fbz))) - fluidLevel(world.worldGet(ivec3(fbx + 1, fby, fbz)));
             let gz : i32 = fluidLevel(world.worldGet(ivec3(fbx, fby, fbz - 1))) - fluidLevel(world.worldGet(ivec3(fbx, fby, fbz + 1)));
             if (gx > 2) {
@@ -452,8 +452,8 @@ class Entity : Damageable, Physics {
             } else if (gz < 0 - 2) {
                 gz = 0 - 2;
             }
-            mx = mx + (gx as f64) * config::waterPush;
-            mz = mz + (gz as f64) * config::waterPush;
+            mx = mx + (gx as f64) * Motion::WATER_PUSH;
+            mz = mz + (gz as f64) * Motion::WATER_PUSH;
         }
         self.moveX(world, mx);
         self.moveZ(world, mz);

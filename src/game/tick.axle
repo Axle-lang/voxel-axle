@@ -12,7 +12,7 @@
 //
 // Kept in the game layer (like `clock.axle`) since the cadences are tunables.
 
-use crate::config;
+use crate::configs::world::{ World };
 
 /**
  * The isochronous scheduling capability over the fixed simulation step:
@@ -27,22 +27,22 @@ trait Scheduler {
 }
 
 class TickManager : Scheduler {
-    tick : i32,          // monotonic fixed-step counter (advance() once per step)
-    maintainEvery : i32, // mob cull + spawn-scan cadence, in ticks
-    lastMaintain : i32,  // tick the maintenance pass last fired on
-    simEvery : i32,      // block-update sim cadence, in ticks
-    lastSim : i32,       // tick the sim last stepped on
-    lastCX : i32,        // last player chunk X seen by dueStream
-    lastCZ : i32,        // last player chunk Z seen by dueStream
-    hasLast : i32,       // 0/1 — whether lastC{X,Z} are valid yet
+    pub(crate) tick : i32, // monotonic fixed-step counter (advance() once per step)
+    maintainEvery : i32,   // mob cull + spawn-scan cadence, in ticks
+    lastMaintain : i32,    // tick the maintenance pass last fired on
+    simEvery : i32,        // block-update sim cadence, in ticks
+    lastSim : i32,         // tick the sim last stepped on
+    lastCX : i32,          // last player chunk X seen by dueStream
+    lastCZ : i32,          // last player chunk Z seen by dueStream
+    hasLast : i32,         // 0/1 — whether lastC{X,Z} are valid yet
 
     /** Start at tick 0 with the cadences pulled from config. */
     constructor() {
         self.tick = 0;
-        self.maintainEvery = config::maintainTicks;
+        self.maintainEvery = World::MAINTAIN_TICKS;
         // Bias so the first dueMaintain fires immediately (prompt first spawn).
-        self.lastMaintain = 0 - config::maintainTicks;
-        self.simEvery = config::simTicks;
+        self.lastMaintain = 0 - World::MAINTAIN_TICKS;
+        self.simEvery = World::SIM_TICKS;
         self.lastSim = 0;
         self.lastCX = 0;
         self.lastCZ = 0;

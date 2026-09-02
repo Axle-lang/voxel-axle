@@ -9,16 +9,16 @@
 // each face's Minecraft-style smooth light + ambient occlusion and records each
 // column's highest collidable voxel for entity physics.
 
-use sdl_platform::{ writeU8 };
+use smalt::Mem;
 use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, partialBoxHeight };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::manager::ChunkManager;
 use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::config;
-use crate::config::{ Block };
-use crate::config::{ FaceDir };
+use crate::configs::blocks::{ Block };
+use crate::configs::face::{ FaceDir };
+use crate::configs::world::{ World };
 
 /** Turn a freshly (re)generated / edited slot's voxels into a render mesh. */
 trait Mesher {
@@ -117,10 +117,10 @@ class ChunkMesher : Mesher {
      */
     fn addFace(mut self, slot : i32, cell : IVec3, own dir : FaceDir, tile : i32) : void {
         let fc : i32 = self.fcount[slot];
-        if (fc >= config::maxFacesPerChunk) {
+        if (fc >= World::MAX_FACES_PER_CHUNK) {
             return;
         }
-        let i : i32 = slot * config::maxFacesPerChunk + fc;
+        let i : i32 = slot * World::MAX_FACES_PER_CHUNK + fc;
         self.fx[i] = cell.x;
         self.fy[i] = cell.y;
         self.fz[i] = cell.z;
@@ -215,7 +215,7 @@ class ChunkMesher : Mesher {
 
             let skAvg : i32 = (skSum + cnt / 2) / cnt;
             let blAvg : i32 = (blSum + cnt / 2) / cnt;
-            writeU8(self.flight, (i * 4 + k) as i64, skAvg * 16 + blAvg);
+            Mem::putByte(self.flight, (i * 4 + k) as i64, skAvg * 16 + blAvg);
 
             // Ambient occlusion (0..3): both sides blocked → fully dark corner.
             let s1 : i32 = 0;
@@ -234,7 +234,7 @@ class ChunkMesher : Mesher {
             if (s1 == 1 && s2 == 1) {
                 ao = 0;
             }
-            writeU8(self.fao, (i * 4 + k) as i64, ao);
+            Mem::putByte(self.fao, (i * 4 + k) as i64, ao);
             k = k + 1;
         }
     }
@@ -247,10 +247,10 @@ class ChunkMesher : Mesher {
      */
     fn addTorch(mut self, slot : i32, cell : IVec3) : void {
         let tc : i32 = self.tcount[slot];
-        if (tc >= config::maxTorchesPerChunk) {
+        if (tc >= World::MAX_TORCHES_PER_CHUNK) {
             return;
         }
-        let i : i32 = slot * config::maxTorchesPerChunk + tc;
+        let i : i32 = slot * World::MAX_TORCHES_PER_CHUNK + tc;
         self.tx[i] = cell.x;
         self.ty[i] = cell.y;
         self.tz[i] = cell.z;
@@ -295,7 +295,7 @@ class ChunkMesher : Mesher {
     fn buildSlot(mut self, slot : i32, cx : i32, cz : i32) : void {
         self.fcount[slot] = 0;
         self.tcount[slot] = 0;
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let top : i32 = self.store.maxFY[slot];
         let air : Block = Block::Air;
         let lz : i32 = 0;

@@ -20,7 +20,8 @@
 // parameter. Preserve these signatures verbatim or flag a change in your report.
 
 use crate::kernel::kmath::vec3::{ Vec3, IVec3 };
-use crate::config::{ Block, MobKind };
+use crate::configs::blocks::{ Block };
+use crate::configs::mobs::{ MobKind };
 
 // ─── Voxel read capabilities ────────────────────────────────────────────────
 

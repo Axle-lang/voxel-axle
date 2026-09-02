@@ -2,14 +2,13 @@
 // the others.
 
 use crate::kernel::kentity::mob::Mob;
-use crate::config;
-use crate::config::{ MobKind };
+use crate::configs::mobs::{ MobKind, Mobs };
 
 class Pig : Mob {
     /** Create a pig at (x, y, z). */
     constructor(x : f64, y : f64, z : f64) {
-        super(x, y, z, MobKind::Pig, config::mobPigHp);
-        self.speed = config::mobPigSpeed;
+        super(x, y, z, MobKind::Pig, Mobs::PIG_HP);
+        self.speed = Mobs::PIG_SPEED;
         self.height = 0.9;
     }
 }

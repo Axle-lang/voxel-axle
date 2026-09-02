@@ -3,18 +3,21 @@
 // -downscaled into the cell; the active slot is ringed in white. Drawn at a
 // caller-supplied origin so the HUD can lay it out.
 
-use sdl_platform::{rgb, readI32, putPixel};
+use smalt::Mem;
+use smalt::Color;
 use crate::kernel::krender::color::{fillRect, Canvas};
 use crate::kernel::kblock::blocks::tileFor;
-use crate::config;
-use crate::config::{ Block, FaceDir };
+use crate::configs::atlas::{ Atlas };
+use crate::configs::blocks::{ Block };
+use crate::configs::face::{ FaceDir };
+use crate::configs::hud::{ Hotbar };
 
 /**
  * Pixel width of the hotbar panel.
  * @return the panel width in pixels.
  */
 fn hotbarPanelW() : i32 {
-    return config::hotbarSize * config::hotbarCell + (config::hotbarSize + 1) * config::hotbarPad;
+    return Hotbar::SIZE * Hotbar::CELL + (Hotbar::SIZE + 1) * Hotbar::PAD;
 }
 
 /**
@@ -22,7 +25,7 @@ fn hotbarPanelW() : i32 {
  * @return the panel height in pixels.
  */
 fn hotbarPanelH() : i32 {
-    return config::hotbarCell + 2 * config::hotbarPad;
+    return Hotbar::CELL + 2 * Hotbar::PAD;
 }
 
 /**
@@ -36,7 +39,7 @@ fn hotbarPanelH() : i32 {
  * @param size   box side length.
  */
 fn drawTileIcon(cv : Canvas, atlas : i64, tile : i32, x : i32, y : i32, size : i32) : void {
-    let tp : i32 = config::tilePx;
+    let tp : i32 = Atlas::TILE_PX;
     let py : i32 = 0;
     while (py < size) {
         let ty : i32 = py * tp / size;
@@ -45,7 +48,7 @@ fn drawTileIcon(cv : Canvas, atlas : i64, tile : i32, x : i32, y : i32, size : i
         let px : i32 = 0;
         while (px < size) {
             let tx : i32 = px * tp / size;
-            putPixel(cv.base, dy + x + px, readI32(atlas, ((row + tx) as i64) * 4));
+            Mem::putWordOf(cv.base, dy + x + px, Mem::dwordAt(atlas, ((row + tx) as i64) * 4));
             px = px + 1;
         }
         py = py + 1;
@@ -62,20 +65,20 @@ fn drawTileIcon(cv : Canvas, atlas : i64, tile : i32, x : i32, y : i32, size : i
  * @param selected  index of the active hotbar slot.
  */
 fn drawHotbar(cv : Canvas, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], selected : i32) : void {
-    let cell : i32 = config::hotbarCell;
-    let pad : i32 = config::hotbarPad;
-    let n : i32 = config::hotbarSize;
+    let cell : i32 = Hotbar::CELL;
+    let pad : i32 = Hotbar::PAD;
+    let n : i32 = Hotbar::SIZE;
     let panelW : i32 = hotbarPanelW();
     let panelH : i32 = hotbarPanelH();
 
-    fillRect(cv, x0 - 2, y0 - 2, panelW + 4, panelH + 4, rgb(12, 12, 16));
-    fillRect(cv, x0, y0, panelW, panelH, rgb(28, 28, 34));
+    fillRect(cv, x0 - 2, y0 - 2, panelW + 4, panelH + 4, Color::packBytes(12, 12, 16));
+    fillRect(cv, x0, y0, panelW, panelH, Color::packBytes(28, 28, 34));
 
     let i : i32 = 0;
     while (i < n) {
         let cx : i32 = x0 + pad + i * (cell + pad);
         let cy : i32 = y0 + pad;
-        fillRect(cv, cx, cy, cell, cell, rgb(48, 48, 56));
+        fillRect(cv, cx, cy, cell, cell, Color::packBytes(48, 48, 56));
         drawTileIcon(cv, atlas, tileFor(hotbar[i], FaceDir::Top), cx + 2, cy + 2, cell - 4);
         i = i + 1;
     }
@@ -83,7 +86,7 @@ fn drawHotbar(cv : Canvas, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], se
     // White ring around the active slot.
     let sx : i32 = x0 + pad + selected * (cell + pad);
     let sy : i32 = y0 + pad;
-    let white : i32 = rgb(255, 255, 255);
+    let white : i32 = Color::packBytes(255, 255, 255);
     let t : i32 = 2;
     fillRect(cv, sx - 2, sy - 2, cell + 4, t, white);
     fillRect(cv, sx - 2, sy + cell, cell + 4, t, white);

@@ -7,7 +7,8 @@
 use crate::kernel::seams::VoxelQuery;
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
-use crate::config;
+use crate::configs::gameplay::{ Gameplay };
+use crate::configs::motion::{ Motion };
 
 /**
  * Cast the player's look-ray into the voxel world and record what it targets.
@@ -29,13 +30,13 @@ trait RayCaster {
 
 /** Result of casting the player's look-ray into the voxel world. */
 class Picker : RayCaster {
-    hit : i32,
-    bx : i32,
-    by : i32,
-    bz : i32,
-    px : i32,
-    py : i32,
-    pz : i32,
+    pub(crate) hit : i32,
+    pub(crate) bx : i32,
+    pub(crate) by : i32,
+    pub(crate) bz : i32,
+    pub(crate) px : i32,
+    pub(crate) py : i32,
+    pub(crate) pz : i32,
 
     /**
      * Initialise an empty pick result (nothing hit yet).
@@ -52,7 +53,7 @@ class Picker : RayCaster {
 
     /**
      * Voxel DDA from the eye along the look direction
-     * `(-siny·cosp, sinp, cosy·cosp)`, up to `reachDist` blocks. Records
+     * `(-siny·cosp, sinp, cosy·cosp)`, up to `Gameplay::REACH_DIST` blocks. Records
      * the first solid voxel and the air cell stepped from.
      * @param man  the voxel-query surface (any `VoxelQuery`; ChunkManager conforms)
      * @param p    the player whose eye and look angles drive the ray
@@ -67,9 +68,9 @@ class Picker : RayCaster {
         let dz : f64 = p.cosy * p.cosp;
         let big : f64 = 1.0e30;
 
-        let x : i32 = Math::floorToInt(ox) as i32;
-        let y : i32 = Math::floorToInt(oy) as i32;
-        let z : i32 = Math::floorToInt(oz) as i32;
+        let x : i32 = ox.floorToInt() as i32;
+        let y : i32 = oy.floorToInt() as i32;
+        let z : i32 = oz.floorToInt() as i32;
 
         let stepX : i32 = 0;
         let tMaxX : f64 = big;
@@ -114,7 +115,7 @@ class Picker : RayCaster {
         let prevy : i32 = y;
         let prevz : i32 = z;
         let t : f64 = 0.0;
-        while (t <= config::reachDist && self.hit == 0) {
+        while (t <= Gameplay::REACH_DIST && self.hit == 0) {
             prevx = x;
             prevy = y;
             prevz = z;
@@ -148,7 +149,7 @@ class Picker : RayCaster {
                     // and the place cell is derived from the FACE actually struck,
                     // not the coarse DDA step-from cell (which for a thin box is
                     // usually a side cell, so the block popped out sideways).
-                    let face : i32 = rayCellBoxFace(p.eye, vec3(dx, dy, dz), x, y, z, boxH, config::reachDist);
+                    let face : i32 = rayCellBoxFace(p.eye, vec3(dx, dy, dz), x, y, z, boxH, Gameplay::REACH_DIST);
                     if (face != 0) {
                         self.hit = 1;
                         self.bx = x;
@@ -261,7 +262,7 @@ fn rayCellBoxFace(origin : Vec3, dir : Vec3,
 
 /**
  * True if the unit cube at (cx, cy, cz) overlaps the player's body
- * (a `playerRadius` disc, ~1.8 blocks tall) — used to refuse placing a
+ * (a `Motion::PLAYER_RADIUS` disc, ~1.8 blocks tall) — used to refuse placing a
  * block inside yourself.
  * @param p   the player to test against
  * @param cx  cell x
@@ -270,7 +271,7 @@ fn rayCellBoxFace(origin : Vec3, dir : Vec3,
  * @return true if the cell overlaps the player's body box
  */
 fn cellInPlayer(p : Player, cx : i32, cy : i32, cz : i32) : bool {
-    let r : f64 = config::playerRadius;
+    let r : f64 = Motion::PLAYER_RADIUS;
     let minX : f64 = p.pos.x - r;
     let maxX : f64 = p.pos.x + r;
     let minZ : f64 = p.pos.z - r;

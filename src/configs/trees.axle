@@ -1,7 +1,7 @@
-// configs::trees — tree kinds stamped by world::manager. A biome picks one
-// kind (and a per-biome trunk height; see world::biomes::Biome.treeHt).
+// configs::trees — tree kinds stamped by `game::world::treegen`. A biome picks
+// one kind (and a per-biome trunk height; see `BiomeDef.treeHt`).
 
-// The kind of tree (if any) a biome stamps. `None` is the no-tree case.
+/** The kind of tree (if any) a biome stamps. `None` is the no-tree case. */
 enum TreeKind : i32 {
     None,
     Oak,
@@ -16,7 +16,10 @@ enum TreeKind : i32 {
     BrownMushroom,
 }
 
-// Global thinning applied to every biome's tree threshold (0 = as authored,
-// →1 = no trees). Raises each threshold toward 1 proportionally, so forests
-// stay forests but woods are airier and less cluttered.
-const treeThin : f64 = 0.6;
+/** Tree placement tuning shared by every biome. */
+class Trees {
+    // Global thinning applied to every biome's tree threshold (0 = as authored,
+    // →1 = no trees). Raises each threshold toward 1 proportionally, so forests
+    // stay forests but woods are airier and less cluttered.
+    static THIN : f64 = 0.6;
+}

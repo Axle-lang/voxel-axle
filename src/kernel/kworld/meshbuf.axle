@@ -11,28 +11,28 @@
  * field, not seven.
  */
 struct FaceMesh {
-    fcount : i32[],  // face count per slot
-    fx : i32[],
-    fy : i32[],
-    fz : i32[],
-    ftile : i32[],   // packs (dir << 8) | tile — see ChunkMesher.addFace
-    flight : i64,    // per-face SMOOTH light: 4 bytes/face, one per corner,
-                     // packing (sky << 4) | block (Minecraft-style smooth light)
-    fao : i64,       // per-face ambient occlusion: 4 bytes/face, 0..3 per corner
+    pub(crate) fcount : i32[], // face count per slot
+    pub(crate) fx : i32[],
+    pub(crate) fy : i32[],
+    pub(crate) fz : i32[],
+    pub(crate) ftile : i32[],  // packs (dir << 8) | tile — see ChunkMesher.addFace
+    pub(crate) flight : i64,   // per-face SMOOTH light: 4 bytes/face, one per corner,
+                               // packing (sky << 4) | block (Minecraft-style smooth light)
+    pub(crate) fao : i64,      // per-face ambient occlusion: 4 bytes/face, 0..3 per corner
 }
 
 /** Per-slot torch posts (drawn as thin columns, not cubes): world x/y/z + count. */
 struct TorchField {
-    tx : i32[],      // torch world x
-    ty : i32[],      // torch world y
-    tz : i32[],      // torch world z
-    tcount : i32[],  // torch count per slot
+    pub(crate) tx : i32[],     // torch world x
+    pub(crate) ty : i32[],     // torch world y
+    pub(crate) tz : i32[],     // torch world z
+    pub(crate) tcount : i32[], // torch count per slot
 }
 
 /** The chunk ring's per-slot ownership: chunk coords, loaded flag, collision top. */
 struct ColumnRing {
-    cxs : i32[],
-    czs : i32[],
-    loaded : i32[],
-    ctop : i32[],    // per-column highest collidable voxel + 1 (entity physics)
+    pub(crate) cxs : i32[],
+    pub(crate) czs : i32[],
+    pub(crate) loaded : i32[],
+    pub(crate) ctop : i32[],    // per-column highest collidable voxel + 1 (entity physics)
 }

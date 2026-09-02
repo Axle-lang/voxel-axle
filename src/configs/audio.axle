@@ -1,11 +1,13 @@
 // configs::audio — step/dig material ids, audible ranges, per-channel master
 // volumes and the timing of footsteps / mob voices / ambience. The audio
-// engine (game::sfx) reads everything here; world::blocks::materialOf maps a
-// block id to one of the `mat*` ids below.
+// engine (`kio::sfx`) reads everything here; `kblock::blocks::materialOf` maps a
+// block id to one of the `AudioMaterial` variants below.
 
-// ── Footstep / dig materials (index into game::sfx banks) ───
-// How a block sounds underfoot and when dug. The discriminants are the bank
-// index in game::sfx, so the order here matches the loaded folders.
+/**
+ * How a block sounds underfoot and when dug — one bank of footstep / dig
+ * clips per variant. The discriminants ARE the bank index in `kio::sfx`, so
+ * the order here matches the order the folders are loaded in.
+ */
 enum AudioMaterial : i32 {
     Grass,
     Sand,
@@ -13,28 +15,32 @@ enum AudioMaterial : i32 {
     Snow,
     Stone,
     Wood,
-    Foliage,    // leaves — soft "cloth" footfall
-    Glass,      // ice digs with a glassy crack
+    Foliage, // leaves — soft "cloth" footfall
+    Glass,   // ice digs with a glassy crack
 }
-const matCount : i32 = 8;
 
-// ── Audible ranges (blocks): a positional sound fades to silence here ──
-const sndMobDist : f64 = 26.0;
-const sndCreeperDist : f64 = 32.0;
-const sndBreakDist : f64 = 24.0;
+/** Audible ranges, per-channel volumes, and the cadence of footsteps, voices and ambience. */
+class Audio {
+    static MATERIAL_COUNT : i32 = 8;
 
-// ── Per-channel master volume (0..1, scales the distance attenuation) ──
-const volFootstep : f64 = 0.45;
-const volBreak : f64 = 0.70;
-const volMob : f64 = 0.75;
-const volCreeper : f64 = 1.0;
-const volPlayer : f64 = 0.85;
-const volAmbient : f64 = 0.55;
+    // ── Audible ranges (blocks): a positional sound fades to silence here ──
+    static MOB_DIST : f64 = 26.0;
+    static CREEPER_DIST : f64 = 32.0;
+    static BREAK_DIST : f64 = 24.0;
 
-// ── Timing ──────────────────────────────────────────────────
-const footWalkFrames : i32 = 18;    // frames between footfalls when walking
-const footSprintFrames : i32 = 12;  // …when sprinting
-const mobVocalMin : i32 = 150;      // min frames between a mob's idle voices
-const mobVocalRand : i32 = 360;     // extra random spread on top of the min
-const ambientMin : i32 = 220;       // min frames between underwater ambiences
-const ambientRand : i32 = 300;
+    // ── Per-channel master volume (0..1, scales the distance attenuation) ──
+    static VOL_FOOTSTEP : f64 = 0.45;
+    static VOL_BREAK : f64 = 0.70;
+    static VOL_MOB : f64 = 0.75;
+    static VOL_CREEPER : f64 = 1.0;
+    static VOL_PLAYER : f64 = 0.85;
+    static VOL_AMBIENT : f64 = 0.55;
+
+    // ── Timing ──────────────────────────────────────────────────
+    static FOOT_WALK_FRAMES : i32 = 18;   // frames between footfalls when walking
+    static FOOT_SPRINT_FRAMES : i32 = 12; // …when sprinting
+    static MOB_VOCAL_MIN : i32 = 150;     // min frames between a mob's idle voices
+    static MOB_VOCAL_RAND : i32 = 360;    // extra random spread on top of the min
+    static AMBIENT_MIN : i32 = 220;       // min frames between underwater ambiences
+    static AMBIENT_RAND : i32 = 300;
+}

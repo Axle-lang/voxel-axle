@@ -1,5 +1,5 @@
 // voxel — a Minecraft-style survival world in Axle, software-rendered into
-// an SDL2 window. You are a real entity: gravity pulls you down, you stand
+// a window smalt opened. You are a real entity: gravity pulls you down, you stand
 // and walk on the solid streamed terrain, jump, swim, take fall / drowning
 // damage with regenerating health, and can dig and place blocks in a full
 // voxel world. The land is split into Minecraft-like biomes with trees,
@@ -10,34 +10,29 @@
 //            Left-click dig / attack, Right-click place block,
 //            1-9 select hotbar slot, Esc pause menu, close quit.
 //
-// Build & run:  axle run      (SDL2.dll + atlas.raw must sit by the binary)
+// Build & run:  axle build && ./target/voxel   (atlas.raw beside the binary)
+//
+// The platform layer is `smalt`: the window, the event queue, the
+// monotonic clock, the blit and the audio device. It is Axle calling
+// Win32 or X11 + ALSA depending on the build target, so there is
+// no shared library to ship and nothing to install.
 //
 // This entry point stays thin: create the window + buffers, build the
-// world, place the player (see `game::spawn`), then run the
+// world, place the player (see `game::start`), then run the
 // input → simulate → render loop paced by the frame clock. Block picking
-// lives in `game::ray`, the HUD in `gfx::hud`.
+// lives in `game::ray`, the HUD in `krender::hud`.
 
-use sdl_platform::{
-    SDL_Quit, SDL_DestroyWindow, SDL_DestroyRenderer, SDL_DestroyTexture,
-    SDL_UpdateTexture, SDL_RenderClear, SDL_RenderCopy, SDL_RenderPresent,
-    SDL_PollEvent, SDL_SetRelativeMouseMode, SDL_GetRelativeMouseState,
-    SDL_GetMouseState, SDL_GetWindowSize,
+use smalt::{
+    AssetFile, Clock, Event, EventKind, Events, Mem, MouseButton, Platform, PlatformError,
+    Scancode, Surface, Window, WINDOW_RESIZABLE,
 };
-use sdl_platform::{
-    sdlInitVideoAudio, sdlCreateWindow, sdlCreateVsyncRenderer,
-    sdlCreateStreamTexture, sdlIsQuit, sdlIsMouseWheel, sdlLeftHeld,
-    sdlRightHeld, keyboardBase,
-};
-use sdl_platform::{cfree, nullPtr, asPtr, isNull, allocBytes, readI32, readU8};
-use sdl_platform::loadAtlas;
 use crate::kernel::kio::clock::GameClock;
-use crate::kernel::kio::input::{
-    SC_W, SC_A, SC_S, SC_D, SC_SPACE, SC_LCTRL, SC_LSHIFT, SC_F3, SC_F4, SC_ESC, SC_1,
-};
+use crate::kernel::kio::input::Keys;
+use crate::kernel::kio::assets::Assets;
 use crate::kernel::kworld::manager::{ ChunkManager, lightLoop };
 use crate::game::world::terraingen::TerrainGen;
 use crate::kernel::kworld::blocksim::BlockSim;
-use crate::kernel::kentity::player::Player;
+use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::start::{Spawn, openYaw};
@@ -50,22 +45,37 @@ use crate::kernel::krender::raster::FrameBuf;
 use crate::kernel::krender::hud::drawHud;
 use crate::kernel::krender::menu::{drawPauseMenu, menuHit};
 use crate::kernel::krender::color::Canvas;
-use crate::config;
-use crate::config::{ Block };
+use crate::configs::atlas::{ Atlas };
+use crate::configs::audio::{ Audio };
+use crate::configs::blocks::{ Block };
+use crate::configs::gameplay::{ Gameplay };
+use crate::configs::health::{ Health };
+use crate::configs::hud::{ Hotbar };
+use crate::configs::motion::{ Motion };
+use crate::configs::screen::{ Screen };
+use crate::configs::time::{ Daylight };
+use crate::configs::water::{ Water };
+use crate::configs::world::{ World };
+use std::numeric::math;
 
 /**
- * Reads two keyboard scancodes as a -1/0/+1 movement axis.
- * @param kb     base address of the SDL keyboard state array
- * @param plus   scancode that contributes +1 when held
- * @param minus  scancode that contributes -1 when held
+ * Reads two keys as a -1/0/+1 movement axis.
+ *
+ * The keys are physical positions, so `Keys::forward()` is the key above
+ * `Keys::back()` on every layout — a WASD binding on an AZERTY board
+ * lands under the same three fingers.
+ *
+ * @param events the pump holding the current key state
+ * @param plus   the key that contributes +1 when held
+ * @param minus  the key that contributes -1 when held
  * @return the combined axis value (-1.0, 0.0, or 1.0)
  */
-fn axis(kb : i64, plus : i32, minus : i32) : f64 {
+fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
     let v : f64 = 0.0;
-    if (readU8(kb, plus as i64) != 0) {
+    if (events.isKeyDown(plus)) {
         v = v + 1.0;
     }
-    if (readU8(kb, minus as i64) != 0) {
+    if (events.isKeyDown(minus)) {
         v = v - 1.0;
     }
     return v;
@@ -77,57 +87,57 @@ fn axis(kb : i64, plus : i32, minus : i32) : f64 {
  * @return the chunk index that contains that coordinate
  */
 fn chunkOf(p : f64) : i32 {
-    return Math::floorToInt(p / (config::chunkSize as f64)) as i32;
+    return (p / (World::CHUNK_SIZE as f64)).floorToInt() as i32;
 }
 
 /**
  * Program entry point: builds the window, world and player, then runs the
  * input → simulate → render loop until the player quits.
  */
-fn main() : void {
-    let w : i32 = config::renderW;
-    let h : i32 = config::renderH;
-    let winW : i32 = config::screenW;
-    let winH : i32 = config::screenH;
-    if (sdlInitVideoAudio() != 0) {
-        Console::println("SDL_Init failed");
-        return;
+fn main() : i32 {
+    try {
+        return run();
+    } catch e : PlatformError {
+        Console::println("voxel: ${e.message}");
+        return 1;
     }
-    let win : ptr = sdlCreateWindow("Axle Voxel — survival", winW, winH);
-    if (isNull(win)) {
-        Console::println("window failed");
-        SDL_Quit();
-        return;
-    }
-    let ren : ptr = sdlCreateVsyncRenderer(win);
-    if (isNull(ren)) {
-        Console::println("renderer failed");
-        SDL_DestroyWindow(win);
-        SDL_Quit();
-        return;
-    }
-    let tex : ptr = sdlCreateStreamTexture(ren, w, h);
-    if (isNull(tex)) {
-        Console::println("texture failed");
-        SDL_Quit();
-        return;
-    }
+}
 
-    let pixels : i64 = allocBytes((w as i64) * (h as i64) * 4);
-    let zbuf : i64 = allocBytes((w as i64) * (h as i64) * 8);
-    let ev : i64 = allocBytes(128);
-    let mrel : i64 = allocBytes(16);
-    let mabs : i64 = allocBytes(16);   // absolute cursor for the pause menu
-    let wsz : i64 = allocBytes(16);    // current window size (for resize scaling)
-    let kb : i64 = keyboardBase();
-    SDL_SetRelativeMouseMode(1);
+/**
+ * The game proper. Every startup failure leaves through the throwing
+ * contract, so nothing below tests a half-built subsystem: a `Platform`
+ * that exists is initialised, and a `Window` that exists is open.
+ */
+fn run() : i32 ! PlatformError {
+    let w : i32 = Screen::RENDER_W;
+    let h : i32 = Screen::RENDER_H;
+    let winW : i32 = Screen::WINDOW_W;
+    let winH : i32 = Screen::WINDOW_H;
+
+    let platform : Platform = new Platform()?;
+    let win : Window = platform.createWindow(
+        "Axle Voxel — survival", winW, winH, WINDOW_RESIZABLE)?;
+    let events : Events = new Events();
+
+    // The framebuffer this game's own renderer fills. `base()` is its
+    // address, which every drawing path walks through `Mem` — and it is
+    // taken again after each resize, because a reallocation moves it.
+    let screen : Surface = new Surface(w, h);
+    let pixels : i64 = screen.base();
+    let zbuf : i64 = Mem::take((w as i64) * (h as i64) * 8);
+    events.setRelativeMouse(true);
+    // Set when the pointer is grabbed, so the frame that follows
+    // discards its look delta: the grab warps the pointer to the middle
+    // of the window, and turning by however far it had wandered is a
+    // camera that snaps on every un-pause.
+    let swallowLook : bool = true;
 
     Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
     let man : ChunkManager = new ChunkManager();
     // Inject the game's concrete terrain generator (biome tables + ore / tree
     // rules — all app content) over the manager's shared voxel store. The kernel
     // drives it through the `Generator` seam and never names TerrainGen.
-    man.attachGenerator(new TerrainGen(man.store, config::span * config::span));
+    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
     // Initial load: drive the per-call budget to completion so the whole spawn
     // view is ready before play (no popping in at the start).
     while (man.ensureLoaded(0, 0) > 0) {
@@ -149,22 +159,22 @@ fn main() : void {
     let renderer : Renderer = new Renderer();
 
     // Block + mob texture atlas, loaded at runtime from `atlas.raw`.
-    let tpx : i64 = config::tilePx as i64;
-    let atlasBytes : i64 = tpx * tpx * 4 * (config::atlasTiles as i64);
-    let atlas : i64 = allocBytes(atlasBytes);
-    if (loadAtlas(atlas, atlasBytes) != atlasBytes) {
+    let tpx : i64 = Atlas::TILE_PX as i64;
+    let atlasBytes : i64 = tpx * tpx * 4 * (Atlas::TILE_COUNT as i64);
+    let atlas : i64 = Mem::take(atlasBytes);
+    if (Assets::loadAtlas(atlas, atlasBytes) != atlasBytes) {
         Console::println("warning: atlas.raw not found next to the binary — textures will be blank");
     }
     renderer.setAtlas(atlas);
     // The mip chain's level 0 is a full copy of the atlas, so the standalone
     // atlas buffer is now redundant; free it and read tile texels from the
     // renderer (mip level 0) wherever they're still needed (the HUD hotbar).
-    cfree(asPtr(atlas));
+    Mem::release(atlas);
 
     let clock : GameClock = new GameClock();
     // Isochronous scheduler: physics runs every tick, while chunk streaming
     // (on chunk-border cross) and the mob cull/spawn scan run on a coarser
-    // uniform cadence to cut wasted CPU. See game::tick.
+    // uniform cadence to cut wasted CPU. See `game::tick`.
     let sched : TickManager = new TickManager();
     // Block-update sim: falling sand/gravel + edit-driven water flow. Stepped
     // on the sim cadence; only what the player disturbs is enqueued.
@@ -185,8 +195,8 @@ fn main() : void {
     // never blocks on it. Stopped + joined at quit.
     let lightTask : Task<i32> = spawn lightLoop(man);
     let attackCd : i32 = 0;
-    let footTimer : i32 = 0;       // frames until the next footfall
-    let prevHp : i32 = player.hp;  // to detect the player taking damage
+    let footTimer : i32 = 0;      // frames until the next footfall
+    let prevHp : i32 = player.hp; // to detect the player taking damage
     let wasUnderwater : bool = false;
     let ambientTimer : i32 = 0;
     let wasGmToggle : bool = false;
@@ -201,13 +211,14 @@ fn main() : void {
     let lastHover : i32 = 0 - 2;
     let running : bool = true;
     while (running) {
-        while (SDL_PollEvent(asPtr(ev)) != 0) {
-            let etype : i32 = readI32(ev, 0);
-            if (sdlIsQuit(etype)) {
+        events.pump(win, clock.sys);
+        while (events.hasNext()) {
+            let e : Event = events.next();
+            if (e.kind == EventKind::Quit) {
                 running = false;
-            } else if (sdlIsMouseWheel(etype)) {
+            } else if (e.kind == EventKind::MouseWheel) {
                 // Scroll the hotbar: wheel up = previous slot, down = next.
-                let wy : i32 = readI32(ev, 20);
+                let wy : i32 = e.wheel;
                 if (wy != 0) {
                     let ns : i32 = player.selected;
                     if (wy > 0) {
@@ -216,9 +227,9 @@ fn main() : void {
                         ns = ns + 1;
                     }
                     if (ns < 0) {
-                        ns = config::hotbarSize - 1;
+                        ns = Hotbar::SIZE - 1;
                     }
-                    if (ns >= config::hotbarSize) {
+                    if (ns >= Hotbar::SIZE) {
                         ns = 0;
                     }
                     player.selectSlot(ns);
@@ -229,9 +240,8 @@ fn main() : void {
         // Keep the framebuffer's aspect matched to the (resizable) window:
         // render height is fixed, width tracks the window ratio, so the
         // view scales without stretching and the FOV stays correct.
-        SDL_GetWindowSize(win, asPtr(wsz), asPtr(wsz + 4));
-        let winCW : i32 = readI32(wsz, 0);
-        let winCH : i32 = readI32(wsz, 4);
+        let winCW : i32 = win.width();
+        let winCH : i32 = win.height();
         if (winCW >= 1 && winCH >= 1) {
             let desiredW : i32 = h * winCW / winCH;
             if (desiredW < 256) {
@@ -241,13 +251,14 @@ fn main() : void {
                 desiredW = 1280;
             }
             if (desiredW != w) {
-                cfree(asPtr(pixels));
-                cfree(asPtr(zbuf));
+                Mem::release(zbuf);
                 w = desiredW;
-                pixels = allocBytes((w as i64) * (h as i64) * 4);
-                zbuf = allocBytes((w as i64) * (h as i64) * 8);
-                SDL_DestroyTexture(tex);
-                tex = sdlCreateStreamTexture(ren, w, h);
+                screen.resize(w, h);
+                // The reallocation moved the pixels, so every address
+                // taken from the old buffer is dead — which is why this
+                // is read again rather than kept.
+                pixels = screen.base();
+                zbuf = Mem::take((w as i64) * (h as i64) * 8);
                 renderer.setViewWidth(w);
                 lastHover = 0 - 2;   // framebuffer changed — force a redraw
             }
@@ -256,15 +267,15 @@ fn main() : void {
         // Esc toggles the pause menu (edge-triggered). Pausing frees the
         // cursor for the menu; resuming re-grabs it and discards the
         // accumulated look delta so the camera doesn't jump.
-        let escDown : bool = readU8(kb, SC_ESC as i64) != 0;
+        let escDown : bool = events.isKeyDown(Keys::pause());
         if (escDown && !wasEsc) {
             paused = !paused;
             if (paused) {
-                SDL_SetRelativeMouseMode(0);
+                events.setRelativeMouse(false);
                 lastHover = 0 - 2;   // force the menu to draw on entry
             } else {
-                SDL_SetRelativeMouseMode(1);
-                SDL_GetRelativeMouseState(asPtr(mrel), asPtr(mrel + 4));
+                events.setRelativeMouse(true);
+                swallowLook = true;
             }
         }
         wasEsc = escDown;
@@ -273,10 +284,11 @@ fn main() : void {
         if (!paused) {
             // ── Running: input → fixed-timestep simulation → editing ──
             // F3 + F4 together toggles survival ↔ creative (edge-latched).
-            let gmBoth : bool = readU8(kb, SC_F3 as i64) != 0 && readU8(kb, SC_F4 as i64) != 0;
+            let gmBoth : bool = events.isKeyDown(Keys::gameModeA())
+                && events.isKeyDown(Keys::gameModeB());
             if (gmBoth && !wasGmToggle) {
                 player.toggleGameMode();
-                if (player.creative == 1) {
+                if (player.mode == GameMode::Creative) {
                     Console::println("Creative — fly: Space up, Shift down, Ctrl boost.");
                 } else {
                     Console::println("Survival.");
@@ -284,30 +296,36 @@ fn main() : void {
             }
             wasGmToggle = gmBoth;
 
-            let btn : i32 = SDL_GetRelativeMouseState(asPtr(mrel), asPtr(mrel + 4));
-            let mdx : i32 = readI32(mrel, 0);
-            let mdy : i32 = readI32(mrel, 4);
-            player.look(0.0 - (mdx as f64) * config::mouseSens, 0.0 - (mdy as f64) * config::mouseSens);
+            let mdx : i32 = events.mouseDX();
+            let mdy : i32 = events.mouseDY();
+            // The frame after a grab carries the warp to the middle of
+            // the window, which is motion the player did not make.
+            if (swallowLook) {
+                mdx = 0;
+                mdy = 0;
+                swallowLook = false;
+            }
+            player.look(0.0 - (mdx as f64) * Motion::MOUSE_SENS, 0.0 - (mdy as f64) * Motion::MOUSE_SENS);
 
-            let fwd : f64 = axis(kb, SC_W, SC_S);
-            let strafe : f64 = axis(kb, SC_D, SC_A);
+            let fwd : f64 = axis(events, Keys::forward(), Keys::back());
+            let strafe : f64 = axis(events, Keys::right(), Keys::left());
             // Sprint latches on with Ctrl and stays on while you keep
             // moving — releasing Ctrl doesn't stop the run, releasing the
             // movement keys does.
-            if (readU8(kb, SC_LCTRL as i64) != 0) {
+            if (events.isKeyDown(Keys::sprint())) {
                 sprintLatch = true;
             }
             if (fwd == 0.0 && strafe == 0.0) {
                 sprintLatch = false;
             }
             let sprint : bool = sprintLatch;
-            let up : bool = readU8(kb, SC_SPACE as i64) != 0;
-            let down : bool = readU8(kb, SC_LSHIFT as i64) != 0;
+            let up : bool = events.isKeyDown(Keys::up());
+            let down : bool = events.isKeyDown(Keys::down());
 
             // Hotbar selection (number row 1–9).
             let slot : i32 = 0;
-            while (slot < config::hotbarSize) {
-                if (readU8(kb, (SC_1 + slot) as i64) != 0) {
+            while (slot < Hotbar::SIZE) {
+                if (events.isKeyDown(Keys::hotbar(slot))) {
                     player.selectSlot(slot);
                 }
                 slot = slot + 1;
@@ -334,20 +352,20 @@ fn main() : void {
 
                 // Footstep timer: keyed to the block underfoot, paced by walk
                 // / sprint, decremented once per tick.
-                if (player.creative == 0 && player.onGround == 1 && movingNow && !player.isUnderwater()) {
+                if (player.mode == GameMode::Survival && player.onGround && movingNow && !player.isUnderwater()) {
                     footTimer = footTimer - 1;
                     if (footTimer <= 0) {
-                        let fbx : i32 = Math::floorToInt(player.pos.x) as i32;
-                        let fby : i32 = (Math::floorToInt(player.pos.y) as i32) - 1;
-                        let fbz : i32 = Math::floorToInt(player.pos.z) as i32;
+                        let fbx : i32 = player.pos.x.floorToInt() as i32;
+                        let fby : i32 = (player.pos.y.floorToInt() as i32) - 1;
+                        let fbz : i32 = player.pos.z.floorToInt() as i32;
                         let under : Block = man.worldGet(ivec3(fbx, fby, fbz));
                         if (under != Block::Air && under != Block::Water) {
                             sfx.footstep(under, mobs.rand());
                         }
                         if (sprint) {
-                            footTimer = config::footSprintFrames;
+                            footTimer = Audio::FOOT_SPRINT_FRAMES;
                         } else {
-                            footTimer = config::footWalkFrames;
+                            footTimer = Audio::FOOT_WALK_FRAMES;
                         }
                     }
                 } else {
@@ -359,7 +377,7 @@ fn main() : void {
                     ambientTimer = ambientTimer - 1;
                     if (ambientTimer <= 0) {
                         sfx.ambientUnderwater(mobs.rand());
-                        ambientTimer = config::ambientMin + Math::floorToInt(mobs.rand() * (config::ambientRand as f64)) as i32;
+                        ambientTimer = Audio::AMBIENT_MIN + (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
                     }
                 } else {
                     ambientTimer = 0;
@@ -397,7 +415,7 @@ fn main() : void {
 
             // Aim once; left-click breaks / attacks, right-click places.
             picker.cast(man, player);
-            if (sdlLeftHeld(btn) && attackCd == 0) {
+            if (events.isButtonDown(MouseButton::Left) && attackCd == 0) {
                 let kind : i32 = mobs.attackNearest(player, sfx);
                 if (kind < 0 && picker.hit == 1) {
                     let bcell : IVec3 = ivec3(picker.bx, picker.by, picker.bz);
@@ -407,9 +425,9 @@ fn main() : void {
                     blocksim.enqueue6(bcell);
                     man.lightUpdate(bcell);
                 }
-                attackCd = config::editCooldown;
+                attackCd = Gameplay::EDIT_COOLDOWN;
             }
-            let rightDown : bool = sdlRightHeld(btn);
+            let rightDown : bool = events.isButtonDown(MouseButton::Right);
             if (rightDown && !wasRight && picker.hit == 1) {
                 if (!cellInPlayer(player, picker.px, picker.py, picker.pz)) {
                     let pcell : IVec3 = ivec3(picker.px, picker.py, picker.pz);
@@ -424,11 +442,11 @@ fn main() : void {
 
             // Death → respawn at full health on the nearest ground.
             if (player.hp <= 0) {
-                player.hp = config::playerMaxHp;
+                player.hp = Health::PLAYER_MAX_HP;
                 player.velY = 0.0;
                 player.airTicks = 0;
                 player.sinceHurt = 0;
-                player.pos.y = man.columnHeight(Math::floorToInt(player.pos.x) as i32, Math::floorToInt(player.pos.z) as i32) as f64;
+                player.pos.y = man.columnHeight(player.pos.x.floorToInt() as i32, player.pos.z.floorToInt() as i32) as f64;
                 player.refresh();
                 Console::println("You died — respawned.");
             }
@@ -436,25 +454,23 @@ fn main() : void {
             // ── Paused: drive the menu with the free cursor. The window is
             // resizable, so map the window-space cursor into the 640×400
             // framebuffer the menu is laid out in. ──
-            let mbtn : i32 = SDL_GetMouseState(asPtr(mabs), asPtr(mabs + 4));
-            SDL_GetWindowSize(win, asPtr(wsz), asPtr(wsz + 4));
-            let cwW : i32 = readI32(wsz, 0);
-            let cwH : i32 = readI32(wsz, 4);
+            let cwW : i32 = win.width();
+            let cwH : i32 = win.height();
             if (cwW < 1) {
                 cwW = 1;
             }
             if (cwH < 1) {
                 cwH = 1;
             }
-            let fbx : i32 = readI32(mabs, 0) * w / cwW;
-            let fby : i32 = readI32(mabs, 4) * h / cwH;
+            let fbx : i32 = events.mouseX() * w / cwW;
+            let fby : i32 = events.mouseY() * h / cwH;
             hover = menuHit(w, h, fbx, fby);
-            let click : bool = (mbtn & 1) != 0;
+            let click : bool = events.isButtonDown(MouseButton::Left);
             if (click && !wasMenuClick && hover >= 0) {
                 if (hover == 0) {
                     paused = false;
-                    SDL_SetRelativeMouseMode(1);
-                    SDL_GetRelativeMouseState(asPtr(mrel), asPtr(mrel + 4));
+                    events.setRelativeMouse(true);
+                    swallowLook = true;
                 } else {
                     running = false;
                 }
@@ -473,10 +489,10 @@ fn main() : void {
         }
         if (drawFrame) {
             let underwater : bool = player.isUnderwater();
-            let phase : f64 = (sched.tick as f64) * config::waterRippleSpeed;
+            let phase : f64 = (sched.tick as f64) * Water::RIPPLE_SPEED;
             // Day clock: advances with the fixed-step tick, wrapped to [0, 1).
-            let dayTime : f64 = config::dayStart + (sched.tick as f64) / (config::dayLengthTicks as f64);
-            dayTime = dayTime - (Math::floorToInt(dayTime) as f64);
+            let dayTime : f64 = Daylight::START + (sched.tick as f64) / (Daylight::LENGTH_TICKS as f64);
+            dayTime = dayTime - (dayTime.floorToInt() as f64);
             // Publish the time of day for the dedicated light thread (it bakes
             // the sun shadows + sky access continuously off the render path); the
             // render just reads the latest light maps.
@@ -508,10 +524,9 @@ fn main() : void {
                 drawPauseMenu(cv, hover);
             }
 
-            SDL_UpdateTexture(tex, nullPtr(), asPtr(pixels), w * 4);
-            SDL_RenderClear(ren);
-            SDL_RenderCopy(ren, tex, nullPtr(), nullPtr());
-            SDL_RenderPresent(ren);
+            // One blit, scaled to the client area — the framebuffer keeps
+            // a fixed height and follows the window aspect in width.
+            screen.present(win);
         }
         // Update the listener at the player so positional sounds attenuate live;
         // the dedicated audio thread does the actual device feeding (pumpTick).
@@ -520,20 +535,26 @@ fn main() : void {
         clock.cap();
     }
 
-    // Stop the worker threads (audio + lighting) and wait for them before SDL teardown.
+    // Stop the worker threads (audio + lighting) and wait for them before
+    // anything they touch is released.
     sfx.stop();
     man.stopLight();
     let audioDone : i32 = audioTask.join();
     let lightDone : i32 = lightTask.join();
+    // The pump ran on the audio thread, so the device is released only
+    // once that thread has been joined — closing it under a live pump is
+    // a mixer reading a handle that has been given back.
+    sfx.close();
 
-    cfree(asPtr(pixels));
-    cfree(asPtr(zbuf));
-    cfree(asPtr(ev));
-    cfree(asPtr(mrel));
-    cfree(asPtr(mabs));
-    cfree(asPtr(wsz));
-    SDL_DestroyTexture(tex);
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
-    SDL_Quit();
+    // Closed in the reverse order of construction. The framebuffer goes
+    // after the last present and before the window, because the blit
+    // reads its pixels: a surface released while a present were still in
+    // flight would hand the OS an address nobody owns.
+    Mem::release(zbuf);
+    screen.close();
+    events.close();
+    win.close();
+    platform.close();
+    clock.close();
+    return 0;
 }

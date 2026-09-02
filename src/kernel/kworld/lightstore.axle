@@ -1,7 +1,7 @@
 // lightstore — the per-voxel LIGHT data of the chunk ring, split out of
 // ChunkManager.
 //
-// A LEAF mini-manager (imports only `sdl_platform` + `config`) holding the
+// A LEAF mini-manager (imports only `smalt` + `configs`) holding the
 // per-voxel byte light volumes — block light, sky light, soft sun visibility,
 // hemispherical sky access and the one-bounce coloured tint — all indexed by the
 // shared `VoxStore.voxIdx` layout, plus the block-light flood stacks, the sky-AO
@@ -13,13 +13,15 @@
 // the same voxel field + ring ownership the manager holds, so the background
 // light thread reaches the live world with no copy — the data has a focused home.
 
-use sdl_platform::{allocBytes, setF64, readU8, writeU8, getF64};
+use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightEmission, albedoFor };
 use crate::kernel::seams::{ BlockLightField, SkyLightField, SunLightField, BounceLightField };
-use crate::config;
-use crate::config::{ Block };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+use crate::configs::time::{ Daylight };
+use crate::configs::world::{ World };
 
 /** One entry of the block-light removal stack: a voxel + its old light level. */
 struct LightRemoval {
@@ -54,16 +56,16 @@ struct HemiRays {
 }
 
 class LightStore {
-    vols : LightVolumes, // the 7 per-voxel light volumes
-    rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
-    sunCursor : i32,    // round-robin slot index for the throttled shadow refresh
-    skyAOcursor : i32,  // round-robin slot index for the throttled sky-AO bake
-    skyAOdirty : i32[], // per-slot "sky-access needs (re)baking" flag
-    ldirty : i32[],     // per-slot "light changed → re-mesh" flag
-    lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
-    lqn : i32,           // its depth
-    rq : LightRemoval[], // block-light removal stack — voxel + its old level
-    rqn : i32,           // its depth
+    pub(file) vols : LightVolumes, // the 7 per-voxel light volumes
+    pub(file) rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
+    pub(file) sunCursor : i32,     // round-robin slot index for the throttled shadow refresh
+    pub(file) skyAOcursor : i32,   // round-robin slot index for the throttled sky-AO bake
+    pub(file) skyAOdirty : i32[],  // per-slot "sky-access needs (re)baking" flag
+    pub(file) ldirty : i32[],      // per-slot "light changed → re-mesh" flag
+    pub(file) lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
+    pub(file) lqn : i32,           // its depth
+    pub(file) rq : LightRemoval[], // block-light removal stack — voxel + its old level
+    pub(file) rqn : i32,           // its depth
 
     /**
      * Allocate the per-voxel light volumes (block / sky / sun / sky-access /
@@ -72,36 +74,36 @@ class LightStore {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let hSide : i32 = config::chunkSize + 2;
-        let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (config::worldHeight as i64);
+        let hSide : i32 = World::CHUNK_SIZE + 2;
+        let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (World::HEIGHT as i64);
         self.vols = LightVolumes {
-            light: allocBytes(vol), skylight: allocBytes(vol), sunlit: allocBytes(vol),
-            skyaccess: allocBytes(vol),
-            bnR: allocBytes(vol), bnG: allocBytes(vol), bnB: allocBytes(vol),
+            light: Mem::take(vol), skylight: Mem::take(vol), sunlit: Mem::take(vol),
+            skyaccess: Mem::take(vol),
+            bnR: Mem::take(vol), bnG: Mem::take(vol), bnB: Mem::take(vol),
         };
         self.sunCursor = 0;
         self.skyAOcursor = 0;
         // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
         // for the sky-access bake.
-        let m : i32 = config::skyAOSamples;
+        let m : i32 = Light::SKY_AO_SAMPLES;
         self.rays = HemiRays {
-            hemiX: allocBytes((m as i64) * 8),
-            hemiY: allocBytes((m as i64) * 8),
-            hemiZ: allocBytes((m as i64) * 8),
+            hemiX: Mem::take((m as i64) * 8),
+            hemiY: Mem::take((m as i64) * 8),
+            hemiZ: Mem::take((m as i64) * 8),
         };
         let hi : i32 = 0;
         while (hi < m) {
-            let yy : f64 = ((hi as f64) + 0.5) / (m as f64);   // 0..1 toward up
-            let rr : f64 = Math::sqrt(1.0 - yy * yy);
-            let th : f64 = (hi as f64) * 2.399963;             // golden angle
-            setF64(self.rays.hemiX, hi, rr * Math::cos(th));
-            setF64(self.rays.hemiY, hi, yy);
-            setF64(self.rays.hemiZ, hi, rr * Math::sin(th));
+            let yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
+            let rr : f64 = (1.0 - yy * yy).sqrt();
+            let th : f64 = (hi as f64) * 2.399963;           // golden angle
+            Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
+            Mem::putRealOf(self.rays.hemiY, hi, yy);
+            Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
             hi = hi + 1;
         }
         self.skyAOdirty = malloc<i32>(slots);
         self.ldirty = malloc<i32>(slots);
-        let lcap : i32 = config::lightQueueCap;
+        let lcap : i32 = Light::QUEUE_CAP;
         self.lq = malloc<IVec3>(lcap);
         self.lqn = 0;
         self.rq = malloc<LightRemoval>(lcap);
@@ -132,12 +134,12 @@ trait LightBaker {
  * whole lighting system finally has a focused, self-contained home.
  */
 class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightField, LightBaker {
-    store : VoxStore,   // shared voxel field (aliased from the manager)
-    lights : LightStore, // per-voxel light volumes + flood stacks (owned here)
-    loaded : i32[],     // per-slot loaded flag (aliased)
-    cxs : i32[],        // per-slot chunk x   (aliased)
-    czs : i32[],        // per-slot chunk z   (aliased)
-    curDayTime : f64,       // latest time-of-day, published by the main loop
+    store : VoxStore,             // shared voxel field (aliased from the manager)
+    lights : LightStore,          // per-voxel light volumes + flood stacks (owned here)
+    loaded : i32[],               // per-slot loaded flag (aliased)
+    cxs : i32[],                  // per-slot chunk x   (aliased)
+    czs : i32[],                  // per-slot chunk z   (aliased)
+    curDayTime : f64,             // latest time-of-day, published by the main loop
     lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
 
     /**
@@ -154,7 +156,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         self.cxs = cxs;
         self.czs = czs;
         self.lights = new LightStore(slots);
-        self.curDayTime = config::dayStart;
+        self.curDayTime = Daylight::START;
         self.lightRunning = new AtomicBoolean(true);
     }
 
@@ -171,7 +173,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
 
     /** Wrap a chunk coordinate into [0, span) for slot addressing. */
     fn wrap(self, v : i32) : i32 {
-        let s : i32 = config::span;
+        let s : i32 = World::SPAN;
         let m : i32 = v - (v / s) * s;
         if (m < 0) {
             m = m + s;
@@ -181,7 +183,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
 
     /** Slot index for chunk coords (cx, cz). */
     fn slotFor(self, cx : i32, cz : i32) : i32 {
-        return self.wrap(cz) * config::span + self.wrap(cx);
+        return self.wrap(cz) * World::SPAN + self.wrap(cx);
     }
 
     /** True if `slot` currently holds chunk (cx, cz). */
@@ -190,14 +192,14 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     }
 
     /** Block id at a world voxel; bedrock below 0, air above / unloaded. */
-    fn worldGet(self, cell : IVec3) : Block {
+    pub(crate) fn worldGet(self, cell : IVec3) : Block {
         if (cell.y < 0) {
             return Block::Stone;
         }
-        if (cell.y >= config::worldHeight) {
+        if (cell.y >= World::HEIGHT) {
             return Block::Air;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
@@ -210,12 +212,12 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     // ── Per-slot mesh-dirty bridge (read back by the manager's flush) ──
 
     /** Flag a slot's light as changed so the manager re-meshes it. */
-    fn markDirty(mut self, slot : i32) : void {
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
         self.lights.ldirty[slot] = 1;
     }
 
     /** Flag a chunk dirty, but only if it is currently loaded at (cx, cz). */
-    fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
+    pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
         let slot : i32 = self.slotFor(cx, cz);
         if (self.owns(slot, cx, cz)) {
             self.lights.ldirty[slot] = 1;
@@ -223,7 +225,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     }
 
     /** Consume a slot's dirty flag: return whether it was set, clearing it. */
-    fn takeDirty(mut self, slot : i32) : bool {
+    pub(crate) fn takeDirty(mut self, slot : i32) : bool {
         if (self.lights.ldirty[slot] == 1) {
             self.lights.ldirty[slot] = 0;
             return true;
@@ -232,7 +234,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     }
 
     /** Flag a slot for a sky-access re-bake (after its geometry/light changed). */
-    fn flagSkyAO(mut self, slot : i32) : void {
+    pub(crate) fn flagSkyAO(mut self, slot : i32) : void {
         self.lights.skyAOdirty[slot] = 1;
     }
 
@@ -246,17 +248,17 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @return the level 0..15
      */
     fn lvGetW(self, vol : i64, cell : IVec3) : i32 {
-        if (cell.y < 0 || cell.y >= config::worldHeight) {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 0;
         }
-        return readU8(vol, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+        return Mem::byteAt(vol, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
     }
 
     /**
@@ -267,10 +269,10 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param v     the new level 0..15
      */
     fn lvSetW(mut self, vol : i64, cell : IVec3, v : i32) : void {
-        if (cell.y < 0 || cell.y >= config::worldHeight) {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
@@ -278,8 +280,8 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
             return;
         }
         let off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
-        if (readU8(vol, off) != v) {
-            writeU8(vol, off, v);
+        if (Mem::byteAt(vol, off) != v) {
+            Mem::putByte(vol, off, v);
             self.lights.ldirty[slot] = 1;
         }
     }
@@ -311,7 +313,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param wz  world z
      */
     fn skyColumn(mut self, wx : i32, wz : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(wx, s);
         let cz : i32 = self.floorDiv(wz, s);
         let slot : i32 = self.slotFor(cx, cz);
@@ -321,14 +323,14 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         let lx : i32 = wx - cx * s;
         let lz : i32 = wz - cz * s;
         let lit : i32 = 15;
-        let y : i32 = config::worldHeight - 1;
+        let y : i32 = World::HEIGHT - 1;
         while (y >= 0) {
             if (lit > 0 && isOpaque(self.store.getVox(slot, ivec3(lx, y, lz)))) {
                 lit = 0;
             }
             let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-            if (readU8(self.lights.vols.skylight, off) != lit) {
-                writeU8(self.lights.vols.skylight, off, lit);
+            if (Mem::byteAt(self.lights.vols.skylight, off) != lit) {
+                Mem::putByte(self.lights.vols.skylight, off, lit);
                 self.lights.ldirty[slot] = 1;
             }
             y = y - 1;
@@ -343,8 +345,8 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param cx    the chunk x coordinate
      * @param cz    the chunk z coordinate
      */
-    fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
-        let s : i32 = config::chunkSize;
+    pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
+        let s : i32 = World::CHUNK_SIZE;
         let lz : i32 = 0;
         while (lz < s) {
             let lx : i32 = 0;
@@ -356,8 +358,8 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         }
         self.lights.lqn = 0;
         let top : i32 = self.store.maxFY[slot] + 1;
-        if (top > config::worldHeight - 1) {
-            top = config::worldHeight - 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
         }
         let bz : i32 = 0;
         while (bz < s) {
@@ -365,7 +367,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
             while (bx < s) {
                 let by : i32 = 0;
                 while (by <= top) {
-                    if (readU8(self.lights.vols.skylight, self.store.voxIdx(slot, bx, by, bz) as i64) == 15) {
+                    if (Mem::byteAt(self.lights.vols.skylight, self.store.voxIdx(slot, bx, by, bz) as i64) == 15) {
                         self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
                     }
                     by = by + 1;
@@ -455,7 +457,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
 
     /** Push a cell onto the (shared block/sky) light add-stack; dropped if full. */
     fn lpush(mut self, cell : IVec3) : void {
-        if (self.lights.lqn >= config::lightQueueCap) {
+        if (self.lights.lqn >= Light::QUEUE_CAP) {
             return;
         }
         self.lights.lq[self.lights.lqn] = IVec3 { x: cell.x, y: cell.y, z: cell.z };
@@ -464,7 +466,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
 
     /** Push a cell plus its old level onto the light removal-stack; dropped if full. */
     fn rpush(mut self, cell : IVec3, lvl : i32) : void {
-        if (self.lights.rqn >= config::lightQueueCap) {
+        if (self.lights.rqn >= Light::QUEUE_CAP) {
             return;
         }
         self.lights.rq[self.lights.rqn] = LightRemoval { x: cell.x, y: cell.y, z: cell.z, lvl: lvl };
@@ -479,7 +481,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * dirty — the MANAGER runs the actual re-mesh flush afterwards.
      * @param cell  the edited world voxel
      */
-    fn lightUpdate(mut self, cell : IVec3) : void {
+    pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
         let wx : i32 = cell.x;
         let wy : i32 = cell.y;
         let wz : i32 = cell.z;
@@ -509,26 +511,26 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         // flood both, so sky light recedes as well as fills.
         self.lights.lqn = 0;
         self.lights.rqn = 0;
-        let scx : i32 = self.floorDiv(wx, config::chunkSize);
-        let scz : i32 = self.floorDiv(wz, config::chunkSize);
+        let scx : i32 = self.floorDiv(wx, World::CHUNK_SIZE);
+        let scz : i32 = self.floorDiv(wz, World::CHUNK_SIZE);
         let sslot : i32 = self.slotFor(scx, scz);
         if (self.owns(sslot, scx, scz)) {
-            let slx : i32 = wx - scx * config::chunkSize;
-            let slz : i32 = wz - scz * config::chunkSize;
+            let slx : i32 = wx - scx * World::CHUNK_SIZE;
+            let slz : i32 = wz - scz * World::CHUNK_SIZE;
             let lit : i32 = 15;
-            let cy : i32 = config::worldHeight - 1;
+            let cy : i32 = World::HEIGHT - 1;
             while (cy >= 0) {
                 if (lit > 0 && isOpaque(self.store.getVox(sslot, ivec3(slx, cy, slz)))) {
                     lit = 0;
                 }
                 let coff : i64 = self.store.voxIdx(sslot, slx, cy, slz) as i64;
-                let oldv : i32 = readU8(self.lights.vols.skylight, coff);
+                let oldv : i32 = Mem::byteAt(self.lights.vols.skylight, coff);
                 if (oldv > lit) {
-                    writeU8(self.lights.vols.skylight, coff, lit);
+                    Mem::putByte(self.lights.vols.skylight, coff, lit);
                     self.lights.ldirty[sslot] = 1;
                     self.rpush(ivec3(wx, cy, wz), oldv);
                 } else if (lit > oldv) {
-                    writeU8(self.lights.vols.skylight, coff, lit);
+                    Mem::putByte(self.lights.vols.skylight, coff, lit);
                     self.lights.ldirty[sslot] = 1;
                     self.lpush(ivec3(wx, cy, wz));
                 }
@@ -550,7 +552,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         // A border face is baked from the NEIGHBOUR chunk's light, which didn't
         // change — re-flag the edited chunk plus any border neighbour so their
         // shared faces re-bake with the final light.
-        let ecs : i32 = config::chunkSize;
+        let ecs : i32 = World::CHUNK_SIZE;
         let ecx : i32 = self.floorDiv(wx, ecs);
         let ecz : i32 = self.floorDiv(wz, ecs);
         let elx : i32 = wx - ecx * ecs;
@@ -568,19 +570,19 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * colour-bounce tint to neutral, and flag the slot for a sky-AO bake.
      * @param slot  the slot index
      */
-    fn clearLight(mut self, slot : i32) : void {
-        let hSide : i32 = config::chunkSize + 2;
-        let n : i32 = hSide * hSide * config::worldHeight;
+    pub(crate) fn clearLight(mut self, slot : i32) : void {
+        let hSide : i32 = World::CHUNK_SIZE + 2;
+        let n : i32 = hSide * hSide * World::HEIGHT;
         let base : i64 = (slot as i64) * (n as i64);
         let i : i32 = 0;
         while (i < n) {
-            writeU8(self.lights.vols.light, base + (i as i64), 0);
-            writeU8(self.lights.vols.skylight, base + (i as i64), 0);
-            writeU8(self.lights.vols.sunlit, base + (i as i64), 255);
-            writeU8(self.lights.vols.skyaccess, base + (i as i64), 255);
-            writeU8(self.lights.vols.bnR, base + (i as i64), 128);
-            writeU8(self.lights.vols.bnG, base + (i as i64), 128);
-            writeU8(self.lights.vols.bnB, base + (i as i64), 128);
+            Mem::putByte(self.lights.vols.light, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.skylight, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.sunlit, base + (i as i64), 255);
+            Mem::putByte(self.lights.vols.skyaccess, base + (i as i64), 255);
+            Mem::putByte(self.lights.vols.bnR, base + (i as i64), 128);
+            Mem::putByte(self.lights.vols.bnG, base + (i as i64), 128);
+            Mem::putByte(self.lights.vols.bnB, base + (i as i64), 128);
             i = i + 1;
         }
         self.lights.skyAOdirty[slot] = 1;
@@ -595,17 +597,17 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @return soft sun visibility 0..255
      */
     fn sunlitGet(self, cell : IVec3) : i32 {
-        if (cell.y < 0 || cell.y >= config::worldHeight) {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 255;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 255;
         }
-        return readU8(self.lights.vols.sunlit, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+        return Mem::byteAt(self.lights.vols.sunlit, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
     }
 
     /**
@@ -621,14 +623,14 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         let oy : f64 = (cell.y as f64) + 0.5;
         let oz : f64 = (cell.z as f64) + 0.5;
         let t : f64 = 0.5;
-        while (t < config::sunShadowReach) {
-            let cy : i32 = Math::floorToInt(oy + dir.y * t) as i32;
+        while (t < Daylight::SUN_SHADOW_REACH) {
+            let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
                 return 1;
             }
-            if (cy >= 0 && cy < config::worldHeight) {
-                let cx : i32 = Math::floorToInt(ox + dir.x * t) as i32;
-                let cz : i32 = Math::floorToInt(oz + dir.z * t) as i32;
+            if (cy >= 0 && cy < World::HEIGHT) {
+                let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
                 if (isOpaque(self.worldGet(ivec3(cx, cy, cz)))) {
                     return 0;
                 }
@@ -639,7 +641,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     }
 
     /**
-     * Soft sun visibility (penumbra): cast config::sunShadowSamples rays over the
+     * Soft sun visibility (penumbra): cast Daylight::SUN_SHADOW_SAMPLES rays over the
      * sun's angular disc and return the fraction that reach the sun (0..255).
      * @param cell  origin air cell
      * @param dir   sun direction (unit)
@@ -647,7 +649,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @return soft visibility 0..255
      */
     fn sunRaySoft(self, cell : IVec3, dir : Vec3, ceil : i32) : i32 {
-        let n : i32 = config::sunShadowSamples;
+        let n : i32 = Daylight::SUN_SHADOW_SAMPLES;
         if (n < 1) {
             n = 1;
         }
@@ -666,7 +668,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         let tx : f64 = uy * dir.z - uz * dir.y;
         let ty : f64 = uz * dir.x - ux * dir.z;
         let tz : f64 = ux * dir.y - uy * dir.x;
-        let tl : f64 = Math::sqrt(tx * tx + ty * ty + tz * tz);
+        let tl : f64 = (tx * tx + ty * ty + tz * tz).sqrt();
         if (tl < 0.000001) {
             tl = 0.000001;
         }
@@ -678,17 +680,17 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         let bz : f64 = dir.x * ty - dir.y * tx;
         let hash : i32 = (cell.x * 1664525 + cell.y * 22695477 + cell.z * 40503) & 0x7FFFFFFF;
         let rot : f64 = ((hash % 628) as f64) * 0.01;
-        let r : f64 = config::sunDiscAngle;
+        let r : f64 = Daylight::SUN_DISC_ANGLE;
         let cnt : i32 = 1;
         let i : i32 = 1;
         while (i < n) {
             let ang : f64 = 6.2831853 * ((i - 1) as f64) / ((n - 1) as f64) + rot;
-            let ox : f64 = Math::cos(ang) * r;
-            let oy : f64 = Math::sin(ang) * r;
+            let ox : f64 = ang.cos() * r;
+            let oy : f64 = ang.sin() * r;
             let dx : f64 = dir.x + tx * ox + bx * oy;
             let dy : f64 = dir.y + ty * ox + by * oy;
             let dz : f64 = dir.z + tz * ox + bz * oy;
-            let dl : f64 = Math::sqrt(dx * dx + dy * dy + dz * dz);
+            let dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
             if (dl < 0.000001) {
                 dl = 0.000001;
             }
@@ -709,10 +711,10 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param ceil  tallest terrain Y over loaded chunks
      */
     fn computeChunkSun(mut self, slot : i32, cx : i32, cz : i32, sun : Vec3, ceil : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let top : i32 = self.store.maxFY[slot] + 1;
-        if (top > config::worldHeight - 1) {
-            top = config::worldHeight - 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
         }
         let lz : i32 = 0;
         while (lz < s) {
@@ -721,8 +723,8 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
                 let y : i32 = 0;
                 while (y <= top) {
                     let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air && readU8(self.lights.vols.skylight, off) > 0) {
-                        writeU8(self.lights.vols.sunlit, off, self.sunRaySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil));
+                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air && Mem::byteAt(self.lights.vols.skylight, off) > 0) {
+                        Mem::putByte(self.lights.vols.sunlit, off, self.sunRaySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil));
                     }
                     y = y + 1;
                 }
@@ -740,20 +742,20 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      */
     fn stepSunShadows(mut self, dayTime : f64, budget : i32) : void {
         let ang : f64 = (dayTime - 0.25) * 6.2831853;
-        let sy : f64 = Math::sin(ang);
+        let sy : f64 = ang.sin();
         if (sy <= 0.02) {
             return;
         }
-        let sx : f64 = Math::cos(ang);
-        let sz : f64 = config::sunTilt;
-        let len : f64 = Math::sqrt(sx * sx + sy * sy + sz * sz);
+        let sx : f64 = ang.cos();
+        let sz : f64 = Daylight::SUN_TILT;
+        let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
         if (len < 0.0001) {
             len = 0.0001;
         }
         sx = sx / len;
         sy = sy / len;
         sz = sz / len;
-        let slots : i32 = config::span * config::span;
+        let slots : i32 = World::SPAN * World::SPAN;
         let ceil : i32 = 0;
         let j : i32 = 0;
         while (j < slots) {
@@ -787,17 +789,17 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @return the sky access 0..255
      */
     fn skyaccessGet(self, cell : IVec3) : i32 {
-        if (cell.y < 0 || cell.y >= config::worldHeight) {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 255;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 255;
         }
-        return readU8(self.lights.vols.skyaccess, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+        return Mem::byteAt(self.lights.vols.skyaccess, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
     }
 
     /**
@@ -825,7 +827,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      */
     fn bounceByte(self, ratio : f64, occ : f64) : i32 {
         let f : f64 = 1.0 + (ratio - 1.0) * occ;
-        let v : i32 = Math::floorToInt(f * 128.0) as i32;
+        let v : i32 = (f * 128.0).floorToInt() as i32;
         if (v < 0) {
             v = 0;
         }
@@ -842,10 +844,10 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @return the packed bounce tint (0xRRGGBB)
      */
     fn bounceGet(self, cell : IVec3) : i32 {
-        if (cell.y < 0 || cell.y >= config::worldHeight) {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0x808080;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
@@ -853,7 +855,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
             return 0x808080;
         }
         let off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
-        return (readU8(self.lights.vols.bnR, off) << 16) | (readU8(self.lights.vols.bnG, off) << 8) | readU8(self.lights.vols.bnB, off);
+        return (Mem::byteAt(self.lights.vols.bnR, off) << 16) | (Mem::byteAt(self.lights.vols.bnG, off) << 8) | Mem::byteAt(self.lights.vols.bnB, off);
     }
 
     /**
@@ -869,14 +871,14 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         let oy : f64 = (cell.y as f64) + 0.5;
         let oz : f64 = (cell.z as f64) + 0.5;
         let t : f64 = 0.6;
-        while (t < config::skyAOReach) {
-            let cy : i32 = Math::floorToInt(oy + dir.y * t) as i32;
+        while (t < Light::SKY_AO_REACH) {
+            let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
                 return 0 - 1;
             }
-            if (cy >= 0 && cy < config::worldHeight) {
-                let cx : i32 = Math::floorToInt(ox + dir.x * t) as i32;
-                let cz : i32 = Math::floorToInt(oz + dir.z * t) as i32;
+            if (cy >= 0 && cy < World::HEIGHT) {
+                let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
                 let hb : Block = self.worldGet(ivec3(cx, cy, cz));
                 if (isOpaque(hb)) {
                     return albedoFor(hb);
@@ -897,11 +899,11 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param ceil  tallest terrain Y over loaded chunks
      */
     fn computeChunkSkyAO(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
-        let s : i32 = config::chunkSize;
-        let m : i32 = config::skyAOSamples;
+        let s : i32 = World::CHUNK_SIZE;
+        let m : i32 = Light::SKY_AO_SAMPLES;
         let top : i32 = self.store.maxFY[slot] + 1;
-        if (top > config::worldHeight - 1) {
-            top = config::worldHeight - 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
         }
         let lz : i32 = 0;
         while (lz < s) {
@@ -910,7 +912,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
                 let y : i32 = 0;
                 while (y <= top) {
                     let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air && readU8(self.lights.vols.skylight, off) > 0) {
+                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air && Mem::byteAt(self.lights.vols.skylight, off) > 0) {
                         let wx : i32 = cx * s + lx;
                         let wz : i32 = cz * s + lz;
                         let esc : i32 = 0;
@@ -920,7 +922,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
                         let ab : i32 = 0;
                         let r : i32 = 0;
                         while (r < m) {
-                            let dir : Vec3 = vec3(getF64(self.lights.rays.hemiX, r), getF64(self.lights.rays.hemiY, r), getF64(self.lights.rays.hemiZ, r));
+                            let dir : Vec3 = vec3(Mem::realOf(self.lights.rays.hemiX, r), Mem::realOf(self.lights.rays.hemiY, r), Mem::realOf(self.lights.rays.hemiZ, r));
                             let hit : i32 = self.skyHemiHit(ivec3(wx, y, wz), dir, ceil);
                             if (hit < 0) {
                                 esc = esc + 1;
@@ -932,8 +934,8 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
                             }
                             r = r + 1;
                         }
-                        writeU8(self.lights.vols.skyaccess, off, (esc * 255) / m);
-                        if (config::bounceOn && hits > 0) {
+                        Mem::putByte(self.lights.vols.skyaccess, off, (esc * 255) / m);
+                        if (Light::BOUNCE_ON && hits > 0) {
                             let avr : f64 = (ar as f64) / (hits as f64);
                             let avg : f64 = (ag as f64) / (hits as f64);
                             let avb : f64 = (ab as f64) / (hits as f64);
@@ -941,14 +943,14 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
                             if (lum < 1.0) {
                                 lum = 1.0;
                             }
-                            let occ : f64 = (hits as f64) / (m as f64) * config::bounceStrength;
-                            writeU8(self.lights.vols.bnR, off, self.bounceByte(avr / lum, occ));
-                            writeU8(self.lights.vols.bnG, off, self.bounceByte(avg / lum, occ));
-                            writeU8(self.lights.vols.bnB, off, self.bounceByte(avb / lum, occ));
+                            let occ : f64 = (hits as f64) / (m as f64) * Light::BOUNCE_STRENGTH;
+                            Mem::putByte(self.lights.vols.bnR, off, self.bounceByte(avr / lum, occ));
+                            Mem::putByte(self.lights.vols.bnG, off, self.bounceByte(avg / lum, occ));
+                            Mem::putByte(self.lights.vols.bnB, off, self.bounceByte(avb / lum, occ));
                         } else {
-                            writeU8(self.lights.vols.bnR, off, 128);
-                            writeU8(self.lights.vols.bnG, off, 128);
-                            writeU8(self.lights.vols.bnB, off, 128);
+                            Mem::putByte(self.lights.vols.bnR, off, 128);
+                            Mem::putByte(self.lights.vols.bnG, off, 128);
+                            Mem::putByte(self.lights.vols.bnB, off, 128);
                         }
                     }
                     y = y + 1;
@@ -965,7 +967,7 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * @param budget  max chunks to bake this call
      */
     fn stepSkyAO(mut self, budget : i32) : void {
-        let slots : i32 = config::span * config::span;
+        let slots : i32 = World::SPAN * World::SPAN;
         let ceil : i32 = 0;
         let j : i32 = 0;
         while (j < slots) {
@@ -997,22 +999,22 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
      * the dedicated light thread, reading the time of day the main loop publishes.
      */
     fn stepBake(mut self) : void {
-        self.stepSunShadows(self.curDayTime, config::sunChunksPerTick);
-        self.stepSkyAO(config::skyAOChunksPerTick);
+        self.stepSunShadows(self.curDayTime, Daylight::SUN_CHUNKS_PER_TICK);
+        self.stepSkyAO(Light::SKY_AO_CHUNKS_PER_TICK);
     }
 
     /** Publish the current time of day for the background light thread. */
-    fn setDayTime(mut self, d : f64) : void {
+    pub(crate) fn setDayTime(mut self, d : f64) : void {
         self.curDayTime = d;
     }
 
     /** Tell the background light thread to stop (call before joining it). */
-    fn stopLight(mut self) : void {
+    pub(crate) fn stopLight(mut self) : void {
         self.lightRunning.set(false);
     }
 
     /** Whether the background light thread should keep running. */
-    fn lightAlive(self) : bool {
+    pub(crate) fn lightAlive(self) : bool {
         return self.lightRunning.get();
     }
 }

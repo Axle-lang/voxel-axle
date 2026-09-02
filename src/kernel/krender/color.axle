@@ -3,7 +3,8 @@
 // `rgb` itself lives in `mem` so the world's block table can use it
 // without depending on gfx.
 
-use sdl_platform::{rgb, putPixel, readI32};
+use smalt::Mem;
+use smalt::Color;
 
 /**
  * The 2D draw surface: the colour-plane base pointer and the framebuffer size.
@@ -13,9 +14,9 @@ use sdl_platform::{rgb, putPixel, readI32};
  * dependency.
  */
 struct Canvas {
-    base : i64,
-    w : i32,
-    h : i32,
+    pub(crate) base : i64,
+    pub(crate) w : i32,
+    pub(crate) h : i32,
 }
 
 /**
@@ -65,10 +66,10 @@ fn packRgb(r : i32, g : i32, b : i32) : i32 {
  * @return the scaled colour.
  */
 fn scaleRgb(color : i32, bright : f64) : i32 {
-    let r : i32 = clamp255(Math::floorToInt(((color >> 16) & 0xFF) as f64 * bright) as i32);
-    let g : i32 = clamp255(Math::floorToInt(((color >> 8) & 0xFF) as f64 * bright) as i32);
-    let b : i32 = clamp255(Math::floorToInt((color & 0xFF) as f64 * bright) as i32);
-    return rgb(r, g, b);
+    let r : i32 = clamp255((((color >> 16) & 0xFF) as f64 * bright).floorToInt() as i32);
+    let g : i32 = clamp255((((color >> 8) & 0xFF) as f64 * bright).floorToInt() as i32);
+    let b : i32 = clamp255(((color & 0xFF) as f64 * bright).floorToInt() as i32);
+    return Color::packBytes(r, g, b);
 }
 
 /**
@@ -84,9 +85,9 @@ fn redTint(color : i32) : i32 {
     if (r > 255) {
         r = 255;
     }
-    g = Math::floorToInt((g as f64) * 0.45) as i32;
-    b = Math::floorToInt((b as f64) * 0.45) as i32;
-    return rgb(r, g, b);
+    g = ((g as f64) * 0.45).floorToInt() as i32;
+    b = ((b as f64) * 0.45).floorToInt() as i32;
+    return Color::packBytes(r, g, b);
 }
 
 /**
@@ -112,7 +113,7 @@ fn dimScreen(cv : Canvas, bright : f64) : void {
     let n : i32 = cv.w * cv.h;
     let i : i32 = 0;
     while (i < n) {
-        putPixel(cv.base, i, scaleRgb(readI32(cv.base, (i as i64) * 4), bright));
+        Mem::putWordOf(cv.base, i, scaleRgb(Mem::dwordAt(cv.base, (i as i64) * 4), bright));
         i = i + 1;
     }
 }
@@ -147,7 +148,7 @@ fn fillRect(cv : Canvas, x : i32, y : i32, rw : i32, rh : i32, color : i32) : vo
     while (py < y1) {
         let px : i32 = x0;
         while (px < x1) {
-            putPixel(cv.base, py * cv.w + px, color);
+            Mem::putWordOf(cv.base, py * cv.w + px, color);
             px = px + 1;
         }
         py = py + 1;

@@ -16,9 +16,9 @@ trait Spatial {
 
 /** A 3D vector / point in world space (floats). Plain data, value semantics. */
 struct Vec3 : Spatial {
-    x : f64,
-    y : f64,
-    z : f64,
+    pub(crate) x : f64,
+    pub(crate) y : f64,
+    pub(crate) z : f64,
 
     /**
      * Component-wise sum.
@@ -52,7 +52,7 @@ struct Vec3 : Spatial {
      * @param o  the other vector
      * @return self · o
      */
-    fn dot(self, o : Vec3) : f64 {
+    pub(crate) fn dot(self, o : Vec3) : f64 {
         return self.x * o.x + self.y * o.y + self.z * o.z;
     }
 
@@ -82,7 +82,7 @@ struct Vec3 : Spatial {
      * @return |self|
      */
     fn length(self) : f64 {
-        return Math::sqrt(self.lengthSq());
+        return (self.lengthSq()).sqrt();
     }
 
     /**
@@ -117,7 +117,7 @@ struct Vec3 : Spatial {
      * @return |self - o|
      */
     fn distance(self, o : Vec3) : f64 {
-        return Math::sqrt(self.distanceSq(o));
+        return (self.distanceSq(o)).sqrt();
     }
 
     /**
@@ -131,9 +131,9 @@ struct Vec3 : Spatial {
 
 /** A 3D integer coordinate (a voxel / block cell). Plain data, value semantics. */
 struct IVec3 {
-    x : i32,
-    y : i32,
-    z : i32,
+    pub(crate) x : i32,
+    pub(crate) y : i32,
+    pub(crate) z : i32,
 
     /**
      * Component-wise sum.

@@ -3,9 +3,13 @@
 // test; depth is the barycentric blend of vertex inverse depths, nearest
 // wins. Winding-agnostic (the area's sign flows through the weights).
 
-use sdl_platform::{putPixel, getF64, setF64, readI32, rgb};
+use smalt::Mem;
+use smalt::Color;
+use crate::kernel::kmath::mathx::clampI32;
 use crate::kernel::kmath::vec3::{ Vec3 };
-use crate::config;
+use crate::configs::atlas::{ Atlas };
+use crate::configs::render::{ Render };
+use crate::configs::screen::{ Screen };
 
 /**
  * The render target bundle: framebuffer + z-buffer base pointers and the frame
@@ -13,10 +17,10 @@ use crate::config;
  * h` arguments that every render/raster routine used to take.
  */
 struct FrameBuf {
-    pixels : i64,
-    zbuf : i64,
-    w : i32,
-    h : i32,
+    pub(crate) pixels : i64,
+    pub(crate) zbuf : i64,
+    pub(crate) w : i32,
+    pub(crate) h : i32,
 }
 
 /**
@@ -26,10 +30,10 @@ struct FrameBuf {
  * in a single place (Camera) instead of being re-derived per pass.
  */
 struct Projected {
-    sx : f64,
-    sy : f64,
-    iz : f64,
-    cz : f64,
+    pub(crate) sx : f64,
+    pub(crate) sy : f64,
+    pub(crate) iz : f64,
+    pub(crate) cz : f64,
 }
 
 /**
@@ -49,11 +53,11 @@ trait Projector {
  * The one camera: eye position, cached look trig (yaw cos/sin, pitch cos/sin)
  * and the horizontal projection centre `hw`. A value struct built per frame from
  * the Player; every render pass projects through it so there is a single copy of
- * the transform. `focal` / `halfH` are fixed (config), so they are read directly
+ * the transform. `Screen::FOCAL` / `Screen::HALF_H` are fixed tunables, so they are read directly
  * rather than carried.
  */
 struct Camera : Projector {
-    eye : Vec3,
+    pub(crate) eye : Vec3,
     cosy : f64,
     siny : f64,
     cosp : f64,
@@ -67,7 +71,7 @@ struct Camera : Projector {
      * @param world  the world-space point
      * @return the camera-space point (x, y, depth)
      */
-    fn toCamera(self, world : Vec3) : Vec3 {
+    pub(crate) fn toCamera(self, world : Vec3) : Vec3 {
         let dx : f64 = world.x - self.eye.x;
         let dy : f64 = world.y - self.eye.y;
         let dz : f64 = world.z - self.eye.z;
@@ -82,10 +86,10 @@ struct Camera : Projector {
      * @param cam  the camera-space point (x, y, depth)
      * @return the projected screen point
      */
-    fn screenOf(self, cam : Vec3) : Projected {
+    pub(crate) fn screenOf(self, cam : Vec3) : Projected {
         return Projected {
-            sx: self.hw + config::focal * cam.x / cam.z,
-            sy: config::halfH - config::focal * cam.y / cam.z,
+            sx: self.hw + Screen::FOCAL * cam.x / cam.z,
+            sy: Screen::HALF_H - Screen::FOCAL * cam.y / cam.z,
             iz: 1.0 / cam.z,
             cz: cam.z,
         };
@@ -97,7 +101,7 @@ struct Camera : Projector {
      * @param world  the world-space point
      * @return the projected screen point
      */
-    fn project(self, world : Vec3) : Projected {
+    pub(crate) fn project(self, world : Vec3) : Projected {
         return self.screenOf(self.toCamera(world));
     }
 
@@ -107,14 +111,14 @@ struct Camera : Projector {
      * @param dir  the sky direction (need not be unit)
      * @return the projected screen point
      */
-    fn projectDir(self, dir : Vec3) : Projected {
+    pub(crate) fn projectDir(self, dir : Vec3) : Projected {
         let rx : f64 = dir.x * self.cosy + dir.z * self.siny;
         let rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
         let ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
         let rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
         return Projected {
-            sx: self.hw + config::focal * rx / rz2,
-            sy: config::halfH - config::focal * ry2 / rz2,
+            sx: self.hw + Screen::FOCAL * rx / rz2,
+            sy: Screen::HALF_H - Screen::FOCAL * ry2 / rz2,
             iz: 1.0 / rz2,
             cz: rz2,
         };
@@ -169,7 +173,7 @@ fn maxf(a : f64, b : f64) : f64 {
 
 /**
  * Lambert brightness for a surface normal under a sun direction, lifted by the
- * ambient floor: `ambient + (1 - ambient) * max(0, n · sun)`. The single shared
+ * ambient floor: `Render::AMBIENT + (1 - Render::AMBIENT) * max(0, n · sun)`. The single shared
  * shade term — the world faces and the mob boxes both call it instead of each
  * open-coding the same dot-product.
  * @param n    the (unit) surface normal
@@ -181,7 +185,7 @@ fn shadeLambert(n : Vec3, sun : Vec3) : f64 {
     if (ndl < 0.0) {
         ndl = 0.0;
     }
-    return config::ambient + (1.0 - config::ambient) * ndl;
+    return Render::AMBIENT + (1.0 - Render::AMBIENT) * ndl;
 }
 
 /**
@@ -209,8 +213,8 @@ fn clearFrame(fb : FrameBuf, bg : i32) : void {
     let n : i32 = fb.w * fb.h;
     let i : i32 = 0;
     while (i < n) {
-        putPixel(pixels, i, bg);
-        setF64(zbuf, i, 0.0);
+        Mem::putWordOf(pixels, i, bg);
+        Mem::putRealOf(zbuf, i, 0.0);
         i = i + 1;
     }
 }
@@ -246,10 +250,10 @@ fn avg4(a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
  */
 fn mipLevelOffset(level : i32) : i32 {
     let off : i32 = 0;
-    let sz : i32 = config::tilePx;
+    let sz : i32 = Atlas::TILE_PX;
     let l : i32 = 0;
     while (l < level) {
-        off = off + config::atlasTiles * sz * sz;
+        off = off + Atlas::TILE_COUNT * sz * sz;
         sz = sz / 2;
         l = l + 1;
     }
@@ -262,7 +266,7 @@ fn mipLevelOffset(level : i32) : i32 {
  * @return the tile side length in texels.
  */
 fn mipLevelSize(level : i32) : i32 {
-    let sz : i32 = config::tilePx;
+    let sz : i32 = Atlas::TILE_PX;
     let l : i32 = 0;
     while (l < level) {
         sz = sz / 2;
@@ -276,7 +280,7 @@ fn mipLevelSize(level : i32) : i32 {
  * @return the total texel count.
  */
 fn mipChainTexels() : i32 {
-    return mipLevelOffset(config::mipLevels);
+    return mipLevelOffset(Atlas::MIP_LEVELS);
 }
 
 /**
@@ -288,20 +292,20 @@ fn mipChainTexels() : i32 {
  * @param mips   the destination mip chain buffer.
  */
 fn buildMipChain(atlas : i64, mips : i64) : void {
-    let n0 : i32 = config::atlasTiles * config::tilePx * config::tilePx;
+    let n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
     let i : i32 = 0;
     while (i < n0) {
-        putPixel(mips, i, readI32(atlas, (i as i64) * 4));
+        Mem::putWordOf(mips, i, Mem::dwordAt(atlas, (i as i64) * 4));
         i = i + 1;
     }
     let level : i32 = 1;
-    let sz : i32 = config::tilePx / 2;
-    let psz : i32 = config::tilePx;
-    while (level < config::mipLevels) {
+    let sz : i32 = Atlas::TILE_PX / 2;
+    let psz : i32 = Atlas::TILE_PX;
+    while (level < Atlas::MIP_LEVELS) {
         let base : i32 = mipLevelOffset(level);
         let pbase : i32 = mipLevelOffset(level - 1);
         let t : i32 = 0;
-        while (t < config::atlasTiles) {
+        while (t < Atlas::TILE_COUNT) {
             let ty : i32 = 0;
             while (ty < sz) {
                 let tx : i32 = 0;
@@ -310,14 +314,14 @@ fn buildMipChain(atlas : i64, mips : i64) : void {
                     let i01 : i32 = i00 + 1;
                     let i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
                     let i11 : i32 = i10 + 1;
-                    let c00 : i32 = readI32(mips, (i00 as i64) * 4);
-                    let c01 : i32 = readI32(mips, (i01 as i64) * 4);
-                    let c10 : i32 = readI32(mips, (i10 as i64) * 4);
-                    let c11 : i32 = readI32(mips, (i11 as i64) * 4);
+                    let c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
+                    let c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
+                    let c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
+                    let c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
                     let rr : i32 = avg4(c00, c01, c10, c11, 16);
                     let gg : i32 = avg4(c00, c01, c10, c11, 8);
                     let bb : i32 = avg4(c00, c01, c10, c11, 0);
-                    putPixel(mips, base + (t * sz + ty) * sz + tx, rgb(rr, gg, bb));
+                    Mem::putWordOf(mips, base + (t * sz + ty) * sz + tx, Color::packBytes(rr, gg, bb));
                     tx = tx + 1;
                 }
                 ty = ty + 1;
@@ -373,24 +377,24 @@ struct MipAtlas {
  * a small per-vertex scratch array): position x/y/z, texture u/v and Gouraud
  * light colour r/g/b. The world raster keeps two — camera-space input and the
  * near-clipped output — instead of 16 loose pointer fields; the byte layout and
- * hot-loop access (`getF64(buf.x, i)`) are identical to the old flat fields.
+ * hot-loop access (`Mem::realOf(buf.x, i)`) are identical to the old flat fields.
  */
 struct VertAttribs {
-    x : i64,
-    y : i64,
-    z : i64,
-    u : i64,
-    v : i64,
-    r : i64,
-    g : i64,
-    b : i64,
+    pub(crate) x : i64,
+    pub(crate) y : i64,
+    pub(crate) z : i64,
+    pub(crate) u : i64,
+    pub(crate) v : i64,
+    pub(crate) r : i64,
+    pub(crate) g : i64,
+    pub(crate) b : i64,
 }
 
 /** Screen-space scratch for a clipped polygon: pixel x/y and inverse depth. */
 struct ScreenScratch {
-    sx : i64,
-    sy : i64,
-    iz : i64,
+    pub(crate) sx : i64,
+    pub(crate) sy : i64,
+    pub(crate) iz : i64,
 }
 
 /**
@@ -433,8 +437,8 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
     let tbase : i32 = tile * lvlSz;
     let fu : f64 = u * (lvlSz as f64) - 0.5;
     let fv : f64 = v * (lvlSz as f64) - 0.5;
-    let tx0 : i32 = Math::floorToInt(fu) as i32;
-    let ty0 : i32 = Math::floorToInt(fv) as i32;
+    let tx0 : i32 = fu.floorToInt() as i32;
+    let ty0 : i32 = fv.floorToInt() as i32;
     let fx : f64 = fu - (tx0 as f64);
     let fy : f64 = fv - (ty0 as f64);
     let tx1 : i32 = tx0 + 1;
@@ -445,26 +449,26 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
         ty0 = ty0 & tmax;
         ty1 = ty1 & tmax;
     } else {
-        if (tx0 < 0) { tx0 = 0; } else if (tx0 > tmax) { tx0 = tmax; }
-        if (tx1 < 0) { tx1 = 0; } else if (tx1 > tmax) { tx1 = tmax; }
-        if (ty0 < 0) { ty0 = 0; } else if (ty0 > tmax) { ty0 = tmax; }
-        if (ty1 < 0) { ty1 = 0; } else if (ty1 > tmax) { ty1 = tmax; }
+        tx0 = clampI32(tx0, 0, tmax);
+        tx1 = clampI32(tx1, 0, tmax);
+        ty0 = clampI32(ty0, 0, tmax);
+        ty1 = clampI32(ty1, 0, tmax);
     }
     let rw0 : i32 = lvlBase + (tbase + ty0) * lvlSz;
     let rw1 : i32 = lvlBase + (tbase + ty1) * lvlSz;
-    let c00 : i32 = readI32(mips, ((rw0 + tx0) as i64) * 4);
-    let c10 : i32 = readI32(mips, ((rw0 + tx1) as i64) * 4);
-    let c01 : i32 = readI32(mips, ((rw1 + tx0) as i64) * 4);
-    let c11 : i32 = readI32(mips, ((rw1 + tx1) as i64) * 4);
+    let c00 : i32 = Mem::dwordAt(mips, ((rw0 + tx0) as i64) * 4);
+    let c10 : i32 = Mem::dwordAt(mips, ((rw0 + tx1) as i64) * 4);
+    let c01 : i32 = Mem::dwordAt(mips, ((rw1 + tx0) as i64) * 4);
+    let c11 : i32 = Mem::dwordAt(mips, ((rw1 + tx1) as i64) * 4);
     let mfx : f64 = 1.0 - fx;
     let mfy : f64 = 1.0 - fy;
     let w00 : f64 = mfx * mfy;
     let w10 : f64 = fx * mfy;
     let w01 : f64 = mfx * fy;
     let w11 : f64 = fx * fy;
-    let rr : i32 = Math::floorToInt((((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11) as i32;
-    let gg : i32 = Math::floorToInt((((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11) as i32;
-    let bb : i32 = Math::floorToInt(((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11) as i32;
+    let rr : i32 = ((((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11).floorToInt() as i32;
+    let gg : i32 = ((((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11).floorToInt() as i32;
+    let bb : i32 = (((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11).floorToInt() as i32;
     return rr * 65536 + gg * 256 + bb;
 }
 
@@ -507,10 +511,10 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
     let vw2 : f64 = tri.c.v * tri.c.iz;
 
     // Screen bounding box of the triangle.
-    let minx : i32 = Math::floorToInt(minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))) as i32;
-    let maxx : i32 = Math::floorToInt(maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))) as i32;
-    let miny : i32 = Math::floorToInt(minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))) as i32;
-    let maxy : i32 = Math::floorToInt(maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))) as i32;
+    let minx : i32 = (minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let maxx : i32 = (maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let miny : i32 = (minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
+    let maxy : i32 = (maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -561,12 +565,12 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
     let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * inv;
     let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * inv;
     let gizy : f64 = (ay0 * tri.a.iz + ay1 * tri.b.iz + ay2 * tri.c.iz) * inv;
-    let tp : f64 = config::tilePx as f64;
-    let maxMip : i32 = config::mipLevels - 1;
+    let tp : f64 = Atlas::TILE_PX as f64;
+    let maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
     let tf : f64 = tp;
-    let tmax : i32 = config::tilePx - 1;
-    let tbase : i32 = tri.tile * config::tilePx;
+    let tmax : i32 = Atlas::TILE_PX - 1;
+    let tbase : i32 = tri.tile * Atlas::TILE_PX;
 
     let py : i32 = miny;
     while (py <= maxy) {
@@ -616,7 +620,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                             // ── Magnification (near): crisp sharp-bilinear, mip 0 ──
                             let sharp : f64 = 16.0;
                             if (minor2 > 0.0000001) {
-                                sharp = 1.0 / Math::sqrt(minor2);
+                                sharp = 1.0 / minor2.sqrt();
                             }
                             if (sharp < 1.0) {
                                 sharp = 1.0;
@@ -627,7 +631,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                             let rrs : f64 = 0.5 - 0.5 / sharp;
                             let fu0 : f64 = u * tf;
                             let fv0 : f64 = v * tf;
-                            let flx : f64 = Math::floorToInt(fu0) as f64;
+                            let flx : f64 = fu0.floorToInt() as f64;
                             let cdx0 : f64 = fu0 - flx - 0.5;
                             let ccx0 : f64 = cdx0;
                             if (ccx0 > rrs) {
@@ -636,7 +640,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                                 ccx0 = 0.0 - rrs;
                             }
                             let fu : f64 = flx + (cdx0 - ccx0) * sharp;
-                            let fly : f64 = Math::floorToInt(fv0) as f64;
+                            let fly : f64 = fv0.floorToInt() as f64;
                             let cdy0 : f64 = fv0 - fly - 0.5;
                             let ccy0 : f64 = cdy0;
                             if (ccy0 > rrs) {
@@ -645,8 +649,8 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                                 ccy0 = 0.0 - rrs;
                             }
                             let fv : f64 = fly + (cdy0 - ccy0) * sharp;
-                            let tx0 : i32 = Math::floorToInt(fu) as i32;
-                            let ty0 : i32 = Math::floorToInt(fv) as i32;
+                            let tx0 : i32 = fu.floorToInt() as i32;
+                            let ty0 : i32 = fv.floorToInt() as i32;
                             let fx : f64 = fu - (tx0 as f64);
                             let fy : f64 = fv - (ty0 as f64);
                             let tx1 : i32 = tx0 + 1;
@@ -657,13 +661,13 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                                 ty0 = ty0 & tmax;
                                 ty1 = ty1 & tmax;
                             } else {
-                                if (tx0 < 0) { tx0 = 0; } else if (tx0 > tmax) { tx0 = tmax; }
-                                if (tx1 < 0) { tx1 = 0; } else if (tx1 > tmax) { tx1 = tmax; }
-                                if (ty0 < 0) { ty0 = 0; } else if (ty0 > tmax) { ty0 = tmax; }
-                                if (ty1 < 0) { ty1 = 0; } else if (ty1 > tmax) { ty1 = tmax; }
+                                tx0 = clampI32(tx0, 0, tmax);
+                                tx1 = clampI32(tx1, 0, tmax);
+                                ty0 = clampI32(ty0, 0, tmax);
+                                ty1 = clampI32(ty1, 0, tmax);
                             }
-                            let rw0 : i32 = (tbase + ty0) * config::tilePx;
-                            let rw1 : i32 = (tbase + ty1) * config::tilePx;
+                            let rw0 : i32 = (tbase + ty0) * Atlas::TILE_PX;
+                            let rw1 : i32 = (tbase + ty1) * Atlas::TILE_PX;
                             let c00 : i32 = *((atlas.mips + ((rw0 + tx0) as i64) * 4) as ptr<i32>);
                             let c10 : i32 = *((atlas.mips + ((rw0 + tx1) as i64) * 4) as ptr<i32>);
                             let c01 : i32 = *((atlas.mips + ((rw1 + tx0) as i64) * 4) as ptr<i32>);
@@ -682,22 +686,22 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                             // Mip from the minor axis (with a sharpening bias), then
                             // average N bilinear taps along the major axis so oblique
                             // distant surfaces stay sharp without shimmering.
-                            let m2 : f64 = minor2 * config::mipBias;
+                            let m2 : f64 = minor2 * Atlas::MIP_BIAS;
                             let mip : i32 = 0;
                             let lim : f64 = 4.0;
                             while (mip < maxMip && m2 >= lim) {
                                 lim = lim * 4.0;
                                 mip = mip + 1;
                             }
-                            let lvlBase : i32 = readI32(atlas.mipOff, (mip as i64) * 4);
-                            let lvlSz : i32 = readI32(atlas.mipSz, (mip as i64) * 4);
-                            let ratio : f64 = Math::sqrt(major2 / minor2);
-                            let nN : i32 = Math::floorToInt(ratio + 0.5) as i32;
+                            let lvlBase : i32 = Mem::dwordAt(atlas.mipOff, (mip as i64) * 4);
+                            let lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
+                            let ratio : f64 = (major2 / minor2).sqrt();
+                            let nN : i32 = (ratio + 0.5).floorToInt() as i32;
                             if (nN < 1) {
                                 nN = 1;
                             }
-                            if (nN > config::maxAniso) {
-                                nN = config::maxAniso;
+                            if (nN > Atlas::MAX_ANISO) {
+                                nN = Atlas::MAX_ANISO;
                             }
                             let mju : f64 = dudx;
                             let mjv : f64 = dvdx;
@@ -728,9 +732,9 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                         let trp : f64 = b0 * tri.a.tr + b1 * tri.b.tr + b2 * tri.c.tr;
                         let tgp : f64 = b0 * tri.a.tg + b1 * tri.b.tg + b2 * tri.c.tg;
                         let tbp : f64 = b0 * tri.a.tb + b1 * tri.b.tb + b2 * tri.c.tb;
-                        let r : i32 = Math::floorToInt(rf * trp) as i32;
-                        let g : i32 = Math::floorToInt(gf * tgp) as i32;
-                        let bl : i32 = Math::floorToInt(bf * tbp) as i32;
+                        let r : i32 = (rf * trp).floorToInt() as i32;
+                        let g : i32 = (gf * tgp).floorToInt() as i32;
+                        let bl : i32 = (bf * tbp).floorToInt() as i32;
                         if (r > 255) {
                             r = 255;
                         }
@@ -740,17 +744,17 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                         if (bl > 255) {
                             bl = 255;
                         }
-                        // Distance fog: blend toward the sky past fogStart
+                        // Distance fog: blend toward the sky past `Render::FOG_START`
                         // so far terrain dissolves instead of shimmering.
-                        if (invz > config::fogStart) {
-                            let fog : f64 = (invz - config::fogStart) / (config::fogEnd - config::fogStart);
+                        if (invz > Render::FOG_START) {
+                            let fog : f64 = (invz - Render::FOG_START) / (Render::FOG_END - Render::FOG_START);
                             if (fog > 1.0) {
                                 fog = 1.0;
                             }
                             let keep : f64 = 1.0 - fog;
-                            r = Math::floorToInt((r as f64) * keep + (fogCol.r as f64) * fog) as i32;
-                            g = Math::floorToInt((g as f64) * keep + (fogCol.g as f64) * fog) as i32;
-                            bl = Math::floorToInt((bl as f64) * keep + (fogCol.b as f64) * fog) as i32;
+                            r = ((r as f64) * keep + (fogCol.r as f64) * fog).floorToInt() as i32;
+                            g = ((g as f64) * keep + (fogCol.g as f64) * fog).floorToInt() as i32;
+                            bl = ((bl as f64) * keep + (fogCol.b as f64) * fog).floorToInt() as i32;
                         }
                         *zp = izp;
                         let pp : ptr<i32> = (pixels + idx * 4) as ptr<i32>;
@@ -799,10 +803,10 @@ fn rasterTri(fb : FrameBuf,
     }
     let inv : f64 = 1.0 / area;
 
-    let minx : i32 = Math::floorToInt(minf(x0, minf(x1, x2))) as i32;
-    let maxx : i32 = Math::floorToInt(maxf(x0, maxf(x1, x2))) as i32;
-    let miny : i32 = Math::floorToInt(minf(y0, minf(y1, y2))) as i32;
-    let maxy : i32 = Math::floorToInt(maxf(y0, maxf(y1, y2))) as i32;
+    let minx : i32 = (minf(x0, minf(x1, x2))).floorToInt() as i32;
+    let maxx : i32 = (maxf(x0, maxf(x1, x2))).floorToInt() as i32;
+    let miny : i32 = (minf(y0, minf(y1, y2))).floorToInt() as i32;
+    let maxy : i32 = (maxf(y0, maxf(y1, y2))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -828,9 +832,9 @@ fn rasterTri(fb : FrameBuf,
             if (b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0) {
                 let iz : f64 = b0 * iz0 + b1 * iz1 + b2 * iz2;
                 let idx : i32 = py * w + px;
-                if (iz > getF64(zbuf, idx)) {
-                    setF64(zbuf, idx, iz);
-                    putPixel(pixels, idx, color);
+                if (iz > Mem::realOf(zbuf, idx)) {
+                    Mem::putRealOf(zbuf, idx, iz);
+                    Mem::putWordOf(pixels, idx, color);
                 }
             }
             px = px + 1;

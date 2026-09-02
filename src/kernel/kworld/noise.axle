@@ -9,7 +9,8 @@
 // lifting land out of the ocean, mid-frequency hills, and a mountain lift
 // where continentalness is high.
 
-use crate::config;
+use crate::configs::noise::{ Noise };
+use crate::configs::world::{ World };
 
 /**
  * Hash a lattice point (ix, iy) with seed `s` into [0,1). Pure integer
@@ -44,8 +45,8 @@ fn smooth(t : f64) : f64 {
  * @return the interpolated noise value
  */
 fn valueNoise(x : f64, y : f64, s : i32) : f64 {
-    let xi : i32 = Math::floorToInt(x) as i32;
-    let yi : i32 = Math::floorToInt(y) as i32;
+    let xi : i32 = x.floorToInt() as i32;
+    let yi : i32 = y.floorToInt() as i32;
     let xf : f64 = x - (xi as f64);
     let yf : f64 = y - (yi as f64);
     let u : f64 = smooth(xf);
@@ -92,7 +93,7 @@ fn fbm(x : f64, y : f64, s : i32, oct : i32) : f64 {
  * @return the scatter value in [0,1)
  */
 fn hash2(wx : f64, wz : f64, s : i32) : f64 {
-    return hashI(Math::floorToInt(wx) as i32, Math::floorToInt(wz) as i32, s);
+    return hashI(wx.floorToInt() as i32, wz.floorToInt() as i32, s);
 }
 
 /**
@@ -102,9 +103,9 @@ fn hash2(wx : f64, wz : f64, s : i32) : f64 {
  * @return the continentalness value in [0,1)
  */
 fn continentalness(wx : f64, wz : f64) : f64 {
-    let wxx : f64 = wx + (fbm(wx * config::warpScale, wz * config::warpScale, config::seedI + 11, 2) - 0.5) * 34.0;
-    let wzz : f64 = wz + (fbm(wx * config::warpScale + 9.0, wz * config::warpScale + 9.0, config::seedI + 23, 2) - 0.5) * 34.0;
-    return fbm(wxx * config::contScale, wzz * config::contScale, config::seedI, 3);
+    let wxx : f64 = wx + (fbm(wx * Noise::WARP_SCALE, wz * Noise::WARP_SCALE, Noise::SEED + 11, 2) - 0.5) * 34.0;
+    let wzz : f64 = wz + (fbm(wx * Noise::WARP_SCALE + 9.0, wz * Noise::WARP_SCALE + 9.0, Noise::SEED + 23, 2) - 0.5) * 34.0;
+    return fbm(wxx * Noise::CONT_SCALE, wzz * Noise::CONT_SCALE, Noise::SEED, 3);
 }
 
 /**
@@ -115,7 +116,7 @@ fn continentalness(wx : f64, wz : f64) : f64 {
  * @return the erosion value in [0,1)
  */
 fn erosion(wx : f64, wz : f64) : f64 {
-    return fbm(wx * config::erosionScale + 53.0, wz * config::erosionScale - 29.0, config::seedI + 333, 3);
+    return fbm(wx * Noise::EROSION_SCALE + 53.0, wz * Noise::EROSION_SCALE - 29.0, Noise::SEED + 333, 3);
 }
 
 /**
@@ -127,7 +128,7 @@ fn erosion(wx : f64, wz : f64) : f64 {
  * @return the ridge value in [0,1)
  */
 fn ridge(wx : f64, wz : f64) : f64 {
-    let w : f64 = fbm(wx * config::weirdScale + 7.0, wz * config::weirdScale + 31.0, config::seedI + 777, 4);
+    let w : f64 = fbm(wx * Noise::WEIRD_SCALE + 7.0, wz * Noise::WEIRD_SCALE + 31.0, Noise::SEED + 777, 4);
     let r : f64 = 2.0 * w - 1.0;
     if (r < 0.0) {
         r = 0.0 - r;
@@ -149,9 +150,9 @@ fn ridge(wx : f64, wz : f64) : f64 {
  */
 fn terrainHeight(wx : f64, wz : f64) : f64 {
     let cont : f64 = continentalness(wx, wz);
-    let hills : f64 = fbm(wx * config::hillScale, wz * config::hillScale, config::seedI + 99, 3);
-    let sea : f64 = config::seaLevel as f64;
-    let ocean : f64 = config::oceanLevel;
+    let hills : f64 = fbm(wx * Noise::HILL_SCALE, wz * Noise::HILL_SCALE, Noise::SEED + 99, 3);
+    let sea : f64 = World::SEA_LEVEL as f64;
+    let ocean : f64 = Noise::OCEAN_LEVEL;
     if (cont < ocean) {
         // Ocean basin: a coherent sea floor, deeper toward open water.
         let d : f64 = (ocean - cont) / ocean;
@@ -191,7 +192,7 @@ fn terrainHeight(wx : f64, wz : f64) : f64 {
  * @return the temperature value in [0,1)
  */
 fn temperature(wx : f64, wz : f64) : f64 {
-    return fbm(wx * config::tempScale, wz * config::tempScale, config::seedI + 555, 2);
+    return fbm(wx * Noise::TEMP_SCALE, wz * Noise::TEMP_SCALE, Noise::SEED + 555, 2);
 }
 
 /**
@@ -201,7 +202,7 @@ fn temperature(wx : f64, wz : f64) : f64 {
  * @return the humidity value in [0,1)
  */
 fn humidity(wx : f64, wz : f64) : f64 {
-    return fbm(wx * config::humidScale + 41.0, wz * config::humidScale - 17.0, config::seedI + 808, 2);
+    return fbm(wx * Noise::HUMID_SCALE + 41.0, wz * Noise::HUMID_SCALE - 17.0, Noise::SEED + 808, 2);
 }
 
 /**
@@ -215,7 +216,7 @@ fn humidity(wx : f64, wz : f64) : f64 {
  * @return the snow depth fraction in [0,1]
  */
 fn snowDepth(wx : f64, wz : f64) : f64 {
-    let n : f64 = fbm(wx * config::snowScale + 71.0, wz * config::snowScale - 53.0, config::seedI + 1212, 3);
+    let n : f64 = fbm(wx * Noise::SNOW_SCALE + 71.0, wz * Noise::SNOW_SCALE - 53.0, Noise::SEED + 1212, 3);
     // Patchy bare ground (low noise) and the odd full block (high noise); the
     // middle band quantises into 6 discrete levels (1/8 .. 6/8 of a block) so
     // the depth visibly steps from spot to spot like Minecraft's snow layers.
@@ -225,8 +226,8 @@ fn snowDepth(wx : f64, wz : f64) : f64 {
     if (n > 0.95) {
         return 1.0;
     }
-    let t : f64 = (n - 0.30) / 0.65;            // 0..1 across the layered band
-    let lvl : i32 = 1 + (Math::floorToInt(t * 6.0) as i32);   // 1..6
+    let t : f64 = (n - 0.30) / 0.65;                     // 0..1 across the layered band
+    let lvl : i32 = 1 + ((t * 6.0).floorToInt() as i32); // 1..6
     if (lvl > 6) {
         lvl = 6;
     }
@@ -240,5 +241,5 @@ fn snowDepth(wx : f64, wz : f64) : f64 {
  * @return the tree-placement scatter value in [0,1)
  */
 fn treeHash(wx : f64, wz : f64) : f64 {
-    return hash2(wx, wz, config::seedI * 3);
+    return hash2(wx, wz, Noise::SEED * 3);
 }

@@ -1,14 +1,13 @@
 // Sheep — calm grazer. Uses the base wander AI.
 
 use crate::kernel::kentity::mob::Mob;
-use crate::config;
-use crate::config::{ MobKind };
+use crate::configs::mobs::{ MobKind, Mobs };
 
 class Sheep : Mob {
     /** Create a sheep at (x, y, z). */
     constructor(x : f64, y : f64, z : f64) {
-        super(x, y, z, MobKind::Sheep, config::mobSheepHp);
-        self.speed = config::mobSheepSpeed;
+        super(x, y, z, MobKind::Sheep, Mobs::SHEEP_HP);
+        self.speed = Mobs::SHEEP_SPEED;
         self.height = 1.2;
     }
 }

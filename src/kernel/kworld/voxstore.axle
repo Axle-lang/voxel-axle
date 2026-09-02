@@ -1,6 +1,6 @@
 // voxstore — the raw voxel storage of the chunk ring.
 //
-// A LEAF mini-manager (imports only `config`) holding the padded per-slot voxel
+// A LEAF mini-manager (imports only `configs`) holding the padded per-slot voxel
 // field and the per-slot highest-face Y watermark, plus the master per-voxel
 // INDEX LAYOUT (`voxIdx`). That layout is shared: the manager's per-voxel byte
 // light volumes (block / sky / sun / sky-access / bounce) index with the very
@@ -12,20 +12,20 @@
 // through a VoxStore handed to a free function mutate the owning ring in place.
 
 use crate::kernel::kmath::vec3::{ IVec3 };
-use crate::config;
-use crate::config::{ Block };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
 
 class VoxStore {
-    vox : Block[],   // padded block field: slots × (chunkSize+2)² × worldHeight
-    maxFY : i32[],   // per-slot highest-face Y watermark (bounds the mesh/light scan)
+    vox : Block[],            // padded block field: slots × (chunkSize+2)² × worldHeight
+    pub(crate) maxFY : i32[], // per-slot highest-face Y watermark (bounds the mesh/light scan)
 
     /**
      * Allocate the padded voxel field and the per-slot face-Y watermark.
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let hSide : i32 = config::chunkSize + 2;
-        self.vox = malloc<Block>(slots * hSide * hSide * config::worldHeight);
+        let hSide : i32 = World::CHUNK_SIZE + 2;
+        self.vox = malloc<Block>(slots * hSide * hSide * World::HEIGHT);
         self.maxFY = malloc<i32>(slots);
     }
 
@@ -38,12 +38,12 @@ class VoxStore {
      * @param lz    the local z coordinate (skirt range [-1, chunkSize])
      * @return the flat offset into `vox` (and into the light byte volumes)
      */
-    fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        let hSide : i32 = config::chunkSize + 2;
+    pub(crate) fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
+        let hSide : i32 = World::CHUNK_SIZE + 2;
         let px : i32 = lx + 1;
         let pz : i32 = lz + 1;
-        return slot * (hSide * hSide * config::worldHeight)
-            + (pz * hSide + px) * config::worldHeight + ly;
+        return slot * (hSide * hSide * World::HEIGHT)
+            + (pz * hSide + px) * World::HEIGHT + ly;
     }
 
     /**
@@ -53,11 +53,11 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @return the block id at that cell
      */
-    fn getVox(self, slot : i32, local : IVec3) : Block {
+    pub(crate) fn getVox(self, slot : i32, local : IVec3) : Block {
         if (local.y < 0) {
             return Block::Stone;
         }
-        if (local.y >= config::worldHeight) {
+        if (local.y >= World::HEIGHT) {
             return Block::Air;
         }
         return self.vox[self.voxIdx(slot, local.x, local.y, local.z)];
@@ -69,7 +69,7 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @param id     the block id to write
      */
-    fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
+    pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
         self.vox[self.voxIdx(slot, local.x, local.y, local.z)] = id;
     }
 
@@ -80,12 +80,12 @@ class VoxStore {
      * @param local  the padded local voxel coordinate
      * @param id     the block id to write
      */
-    fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
-        let s : i32 = config::chunkSize;
+    pub(crate) fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
+        let s : i32 = World::CHUNK_SIZE;
         if (local.x < 0 - 1 || local.x > s || local.z < 0 - 1 || local.z > s) {
             return;
         }
-        if (local.y < 0 || local.y >= config::worldHeight) {
+        if (local.y < 0 || local.y >= World::HEIGHT) {
             return;
         }
         let v : Block = id;
@@ -97,7 +97,7 @@ class VoxStore {
      * @param slot  the slot index
      * @param y     the candidate Y
      */
-    fn bumpFY(mut self, slot : i32, y : i32) : void {
+    pub(crate) fn bumpFY(mut self, slot : i32, y : i32) : void {
         if (y > self.maxFY[slot]) {
             self.maxFY[slot] = y;
         }

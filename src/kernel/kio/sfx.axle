@@ -19,12 +19,14 @@
 // `audioLoop` pumps the device on its own OS thread so a slow render/bake frame
 // can't starve the queue and stutter the sound.
 
-use sdl_platform::{Mixer, SoundBank};
-use sdl_platform::fileExists;
+use std::sys::sleep;
+use smalt::{AssetFile, Mixer, SoundBank};
+
 use crate::kernel::kblock::blocks::materialOf;
 use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3 };
-use crate::config;
-use crate::config::{ Block, AudioMaterial, MobKind };
+use crate::configs::audio::{ Audio, AudioMaterial };
+use crate::configs::blocks::{ Block };
+use crate::configs::mobs::{ MobKind };
 
 /**
  * Folder name under `step/` and `dig/` for the material with discriminant `m`
@@ -53,43 +55,135 @@ fn matFolder(m : i32) : string {
  * the binary, or one directory up) and decodes banks relative to it — the sole
  * owner of the on-disk layout, so the manager only deals in loaded cues.
  */
-class BankLoader {
+class BankLoader : Closeable {
+    /** Slots a fresh loader starts with; it doubles from there. */
+    static INITIAL_SLOTS : i32 = 32;
+
+    /** Numbered variants a sound folder may hold — `1.wav`..`8.wav`. */
+    static VARIANTS : i32 = 8;
+
     base : string,
+    /**
+     * Every bank this loader made, so exactly one thing closes each.
+     *
+     * A `SoundBank` owns decoded PCM, and a cue holds one *without*
+     * owning it — the player-hurt bank is the shared fallback for three
+     * species, so four cues name the same bank. Letting a cue close it
+     * would free the same clips four times; letting nobody close it
+     * would leak every sound in the game. Neither is a choice worth
+     * making per cue, so the creator keeps them and the creator closes
+     * them.
+     *
+     * A bank is never bound to a local on its way in here, which is not
+     * a style choice: a `Closeable` local must be closed on the path
+     * that binds it (E0511), and the whole point of this table is that
+     * the path which *makes* a bank is not the one that releases it.
+     * Every one goes straight from `new` into this array.
+     */
+    banks : SoundBank[],
+    count : i32,
+    cap : i32,
 
     /** Resolve the sounds prefix by probing a known clip. */
     constructor() {
         self.base = "assets/sounds/";
-        if (!fileExists("assets/sounds/step/grass/1.wav")) {
+        if (!AssetFile::exists("assets/sounds/step/grass/1.wav")) {
             self.base = "../assets/sounds/";
         }
+        self.cap = BankLoader::INITIAL_SLOTS;
+        self.banks = malloc<SoundBank>(self.cap as i64);
+        self.count = 0;
+    }
+
+    /**
+     * Make room for one more bank, doubling the table when it is full.
+     *
+     * Growing rather than capping is what removes the question a fixed
+     * size would leave open: a table sized from the material count is a
+     * number to keep true, and the answer to getting it wrong would be
+     * either a leaked bank or a refused sound. Doubling happens at most
+     * a couple of times, at startup, over a table of handles.
+     */
+    fn reserve(mut self) : void {
+        if (self.count < self.cap) {
+            return;
+        }
+        let grown : i32 = self.cap * 2;
+        let wider : SoundBank[] = malloc<SoundBank>(grown as i64);
+        let i : i32 = 0;
+        while (i < self.count) {
+            wider[i] = self.banks[i];
+            i = i + 1;
+        }
+        free(self.banks);
+        self.banks = wider;
+        self.cap = grown;
+    }
+
+    /**
+     * Take a fresh bank into the table and answer its slot.
+     *
+     * The slot rather than the bank, so the caller fills it in place —
+     * a returned bank would have to be bound to a local to add clips to,
+     * and that local is what `Closeable` refuses.
+     */
+    fn keepNew(mut self, capacity : i32) : i32 {
+        self.reserve();
+        self.banks[self.count] = new SoundBank(capacity);
+        self.count = self.count + 1;
+        return self.count - 1;
     }
 
     /**
      * A bank of the numbered variants `1.wav`..`8.wav` under `<base><rel>/`
      * (missing files skipped silently).
      * @param rel  the folder, relative to the sounds prefix
-     * @return the loaded bank
+     * @return the loaded bank, owned by this loader
      */
-    fn dir(self, rel : string) : SoundBank {
-        let b : SoundBank = new SoundBank(8);
+    pub(file) fn dir(mut self, rel : string) : SoundBank {
+        let slot : i32 = self.keepNew(BankLoader::VARIANTS);
         let i : i32 = 1;
-        while (i <= 8) {
-            b.add(self.base + rel + "/" + i + ".wav");
+        while (i <= BankLoader::VARIANTS) {
+            self.banks[slot].add(self.base + rel + "/" + i + ".wav");
             i = i + 1;
         }
-        return b;
+        return self.banks[slot];
     }
 
     /**
      * A one-clip bank from the single file `<base><rel>` (a bespoke sound that
      * is not a numbered variant folder, e.g. the creeper's charge / blast).
      * @param rel  the file path, relative to the sounds prefix
-     * @return the loaded bank
+     * @return the loaded bank, owned by this loader
      */
-    fn file(self, rel : string) : SoundBank {
-        let b : SoundBank = new SoundBank(1);
-        b.add(self.base + rel);
-        return b;
+    pub(file) fn file(mut self, rel : string) : SoundBank {
+        let slot : i32 = self.keepNew(1);
+        self.banks[slot].add(self.base + rel);
+        return self.banks[slot];
+    }
+
+    /**
+     * An empty bank — a cue that is a silent no-op, which is what the
+     * creeper has instead of an idle voice.
+     */
+    pub(file) fn empty(mut self) : SoundBank {
+        return self.banks[self.keepNew(1)];
+    }
+
+    /**
+     * Release every bank.
+     *
+     * Must run **after** the mixer closes: a voice holds sample
+     * addresses, not clips, so one still playing out of a bank that has
+     * been freed reads memory nobody owns.
+     */
+    fn close(self) : void {
+        let i : i32 = 0;
+        while (i < self.count) {
+            self.banks[i].close();
+            i = i + 1;
+        }
+        free(self.banks);
     }
 }
 
@@ -164,15 +258,16 @@ trait Listener {
     fn setListener(self, x : f64, y : f64, z : f64) : void;
 }
 
-class AudioManager : Listener {
+class AudioManager : Listener, Closeable {
     mixer : Mixer,
-    lock : AtomicBoolean,    // spinlock guarding the mixer between the main
-                             // thread (play / setListener) and the audio thread
-                             // (pump) — see audioLoop. AtomicBoolean is the only
-                             // std lock primitive with a usable constructor.
-    running : AtomicBoolean, // false tells the audio thread to exit (on quit)
+    banks : BankLoader,          // the one owner of every decoded clip; closed last
+    lock : AtomicBoolean,        // spinlock guarding the mixer between the main
+                                 // thread (play / setListener) and the audio thread
+                                 // (pump) — see audioLoop. AtomicBoolean is the only
+                                 // std lock primitive with a usable constructor.
+    running : AtomicBoolean,     // false tells the audio thread to exit (on quit)
     materials : MaterialSound[], // footstep + dig cues, indexed by AudioMaterial
-    voices : MobVoice[],     // one voice per MobKind, indexed by its discriminant
+    voices : MobVoice[],         // one voice per MobKind, indexed by its discriminant
     playerHurtCue : Cue,
     splashCue : Cue,
     ambientCue : Cue,
@@ -184,59 +279,75 @@ class AudioManager : Listener {
         self.mixer = new Mixer();
         self.lock = new AtomicBoolean(false);
         self.running = new AtomicBoolean(true);
-        let ld : BankLoader = new BankLoader();
+        self.banks = new BankLoader();
 
         // Per-material footstep + dig cues. `m` IS the AudioMaterial discriminant,
         // so the cues land at the same index the play path reads them by
         // (`material as i32`); variants are auto-discovered 1..8.
-        self.materials = malloc<MaterialSound>(config::matCount);
+        self.materials = malloc<MaterialSound>(Audio::MATERIAL_COUNT);
         let m : i32 = 0;
-        while (m < config::matCount) {
+        while (m < Audio::MATERIAL_COUNT) {
             self.materials[m] = MaterialSound {
-                step: Cue { bank: ld.dir("step/" + matFolder(m)), gain: config::volFootstep, range: 0.0 },
-                dig: Cue { bank: ld.dir("dig/" + matFolder(m)), gain: config::volBreak, range: config::sndBreakDist },
+                step: Cue { bank: self.banks.dir("step/" + matFolder(m)), gain: Audio::VOL_FOOTSTEP, range: 0.0 },
+                dig: Cue { bank: self.banks.dir("dig/" + matFolder(m)), gain: Audio::VOL_BREAK, range: Audio::BREAK_DIST },
             };
             m = m + 1;
         }
 
-        // The player's own non-positional sounds. The hurt bank is reused below as
-        // the shared fallback for species with no dedicated hurt cry.
-        let hurt : SoundBank = ld.dir("player/hurt");
-        self.playerHurtCue = Cue { bank: hurt, gain: config::volPlayer, range: 0.0 };
-        self.splashCue = Cue { bank: ld.dir("player/splash"), gain: config::volPlayer, range: 0.0 };
-        self.ambientCue = Cue { bank: ld.dir("ambient/underwater"), gain: config::volAmbient, range: 0.0 };
+        // The player's own non-positional sounds. The hurt bank is reused
+        // below as the shared fallback for species with no dedicated hurt
+        // cry, and it is reached through the cue that already holds it —
+        // a local binding for a bank the loader owns would be a second
+        // name for one resource, which is exactly what the `Closeable`
+        // contract refuses (E0511).
+        self.playerHurtCue = Cue {
+            bank: self.banks.dir("player/hurt"), gain: Audio::VOL_PLAYER, range: 0.0,
+        };
+        self.splashCue = Cue { bank: self.banks.dir("player/splash"), gain: Audio::VOL_PLAYER, range: 0.0 };
+        self.ambientCue = Cue { bank: self.banks.dir("ambient/underwater"), gain: Audio::VOL_AMBIENT, range: 0.0 };
 
         // One positional voice (idle say + hurt cry) per MobKind, at mob gain /
         // range. Sheep / pig / creeper have no dedicated hurt clip, so their hurt
         // cue reuses the shared player-hurt bank; the creeper has no idle voice,
         // so its say cue wraps an empty bank (a silent no-op).
         self.voices = malloc<MobVoice>(5);
-        let noSay : SoundBank = new SoundBank(1);
         self.voices[MobKind::Chicken as i32] = MobVoice {
-            say: Cue { bank: ld.dir("mob/chicken/say"), gain: config::volMob, range: config::sndMobDist },
-            hurt: Cue { bank: ld.dir("mob/chicken/hurt"), gain: config::volMob, range: config::sndMobDist },
+            say: Cue { bank: self.banks.dir("mob/chicken/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            hurt: Cue { bank: self.banks.dir("mob/chicken/hurt"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
         };
         self.voices[MobKind::Sheep as i32] = MobVoice {
-            say: Cue { bank: ld.dir("mob/sheep/say"), gain: config::volMob, range: config::sndMobDist },
-            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+            say: Cue { bank: self.banks.dir("mob/sheep/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
         self.voices[MobKind::Cow as i32] = MobVoice {
-            say: Cue { bank: ld.dir("mob/cow/say"), gain: config::volMob, range: config::sndMobDist },
-            hurt: Cue { bank: ld.dir("mob/cow/hurt"), gain: config::volMob, range: config::sndMobDist },
+            say: Cue { bank: self.banks.dir("mob/cow/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            hurt: Cue { bank: self.banks.dir("mob/cow/hurt"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
         };
         self.voices[MobKind::Creeper as i32] = MobVoice {
-            say: Cue { bank: noSay, gain: config::volMob, range: config::sndMobDist },
-            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+            say: Cue { bank: self.banks.empty(), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
         self.voices[MobKind::Pig as i32] = MobVoice {
-            say: Cue { bank: ld.dir("mob/pig/say"), gain: config::volMob, range: config::sndMobDist },
-            hurt: Cue { bank: hurt, gain: config::volMob, range: config::sndMobDist },
+            say: Cue { bank: self.banks.dir("mob/pig/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
 
         // The creeper's charge / blast are single bespoke files (not numbered
         // variant folders), so load them directly.
-        self.creeperFuseCue = Cue { bank: ld.file("mob/creeper/charge.wav"), gain: config::volCreeper, range: config::sndCreeperDist };
-        self.creeperBlastCue = Cue { bank: ld.file("mob/creeper/exploded.wav"), gain: config::volCreeper, range: config::sndCreeperDist };
+        self.creeperFuseCue = Cue { bank: self.banks.file("mob/creeper/charge.wav"), gain: Audio::VOL_CREEPER, range: Audio::CREEPER_DIST };
+        self.creeperBlastCue = Cue { bank: self.banks.file("mob/creeper/exploded.wav"), gain: Audio::VOL_CREEPER, range: Audio::CREEPER_DIST };
     }
 
     /**
@@ -290,19 +401,34 @@ class AudioManager : Listener {
      * audio thread (audioLoop), NOT per frame — so a slow render/bake frame can
      * no longer starve the queue and make the sound stutter.
      */
-    fn pumpTick(self) : void {
+    pub(file) fn pumpTick(self) : void {
         self.acquire();
         self.mixer.pump();
         self.release();
     }
 
     /** Signal the audio thread to stop (call before joining it on quit). */
-    fn stop(self) : void {
+    pub(crate) fn stop(self) : void {
         self.running.set(false);
     }
 
+    /**
+     * Release the device and every decoded clip.
+     *
+     * Called after the audio thread has been stopped *and joined* — the
+     * pump runs on that thread, and closing the device under it is a
+     * mixer reading a handle that has been given back.
+     *
+     * The order inside is the one smalt's `SoundBank` states: the mixer
+     * first, because its voices hold sample addresses out of the banks.
+     */
+    fn close(self) : void {
+        self.mixer.close();
+        self.banks.close();
+    }
+
     /** Whether the audio thread should keep running. */
-    fn isRunning(self) : bool {
+    pub(file) fn isRunning(self) : bool {
         return self.running.get();
     }
 
@@ -339,7 +465,7 @@ class AudioManager : Listener {
      * @param blockId  the block stepped on
      * @param rnd      variant selector in [0, 1)
      */
-    fn footstep(self, blockId : Block, rnd : f64) : void {
+    pub(crate) fn footstep(self, blockId : Block, rnd : f64) : void {
         self.emit(self.stepCue(materialOf(blockId)), rnd);
     }
 
@@ -349,7 +475,7 @@ class AudioManager : Listener {
      * @param cell     the block cell
      * @param rnd      variant selector in [0, 1)
      */
-    fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
+    pub(crate) fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
         let center : Vec3 = vec3((cell.x as f64) + 0.5, (cell.y as f64) + 0.5, (cell.z as f64) + 0.5);
         self.emitAt(self.digCue(materialOf(blockId)), rnd, center);
     }
@@ -360,7 +486,7 @@ class AudioManager : Listener {
      * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobSay(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+    pub(crate) fn mobSay(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
         self.emitAt(self.voices[kind as i32].say, rnd, pos);
     }
 
@@ -371,7 +497,7 @@ class AudioManager : Listener {
      * @param pos   the source position
      * @param rnd   variant selector in [0, 1)
      */
-    fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+    pub(crate) fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
         self.emitAt(self.voices[kind as i32].hurt, rnd, pos);
     }
 
@@ -379,7 +505,7 @@ class AudioManager : Listener {
      * The player taking damage (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn playerHurt(self, rnd : f64) : void {
+    pub(crate) fn playerHurt(self, rnd : f64) : void {
         self.emit(self.playerHurtCue, rnd);
     }
 
@@ -387,7 +513,7 @@ class AudioManager : Listener {
      * A splash as the player enters water (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn splash(self, rnd : f64) : void {
+    pub(crate) fn splash(self, rnd : f64) : void {
         self.emit(self.splashCue, rnd);
     }
 
@@ -395,7 +521,7 @@ class AudioManager : Listener {
      * A soft underwater ambience while submerged (non-positional).
      * @param rnd  variant selector in [0, 1)
      */
-    fn ambientUnderwater(self, rnd : f64) : void {
+    pub(crate) fn ambientUnderwater(self, rnd : f64) : void {
         self.emit(self.ambientCue, rnd);
     }
 
@@ -403,7 +529,7 @@ class AudioManager : Listener {
      * The creeper lighting its fuse, attenuated live by distance.
      * @param pos  the creeper position
      */
-    fn creeperFuse(self, pos : Vec3) : void {
+    pub(crate) fn creeperFuse(self, pos : Vec3) : void {
         self.emitAt(self.creeperFuseCue, 0.0, pos);
     }
 
@@ -411,7 +537,7 @@ class AudioManager : Listener {
      * The creeper detonating, attenuated live by distance.
      * @param pos  the creeper position
      */
-    fn creeperBlast(self, pos : Vec3) : void {
+    pub(crate) fn creeperBlast(self, pos : Vec3) : void {
         self.emitAt(self.creeperBlastCue, 0.0, pos);
     }
 }
@@ -426,7 +552,7 @@ class AudioManager : Listener {
 fn audioLoop(sfx : AudioManager) : i32 {
     while (sfx.isRunning()) {
         sfx.pumpTick();
-        System::sleep(4);
+        sleep(4);
     }
     return 0;
 }

@@ -12,15 +12,17 @@
 // (kworld / kentity / krender / kio) keeps the same signature.
 //
 // To add a block: give it a variant in `configs::blocks` (the `Block` enum), an
-// atlas tile in `bake_atlas.py` (+ its `tl*` index in config), then add an arm
+// atlas tile in `bake_atlas.py` (+ its `Tile` index in `configs::atlas`), then add an arm
 // to whichever capability factories it differs from (usually just `surfaceOf`
 // and `soundOf`; the rest fall through to the sensible `_` default). The mesher
 // and renderer stay Block-agnostic.
 
-use sdl_platform::rgb;
+use smalt::Color;
 use crate::kernel::kworld::noise::{ snowDepth };
-use crate::config;
-use crate::config::{ Block, AudioMaterial, FaceDir };
+use crate::configs::atlas::{ Tile };
+use crate::configs::audio::{ AudioMaterial };
+use crate::configs::blocks::{ Block };
+use crate::configs::face::{ FaceDir };
 
 // ── Block capabilities ────────────────────────────────────────────────────
 // Each block attribute the engine asks about is grouped into a SMALL, single-
@@ -385,7 +387,7 @@ fn toughnessOf(id : Block) : Toughness {
 }
 
 /** Per-face atlas tiles + bounce albedo + fallback colour. */
-struct Surface : Textured {
+struct BlockSurface : Textured {
     albedoCol : i32,
     baseCol : i32,
     tTop : i32,
@@ -413,7 +415,7 @@ struct Surface : Textured {
     fn color(self) : i32 { return self.baseCol; }
 }
 
-// ── Surface archetypes ────────────────────────────────────────────────────
+// ── Block-surface archetypes ──────────────────────────────────────────────
 // Common tile/colour shapes as one-line factories so each `surfaceOf` arm reads
 // as the data it is.
 
@@ -426,33 +428,33 @@ struct Surface : Textured {
  * @param albedo   bounce albedo
  * @return the surface
  */
-fn txSolid(tTop : i32, tBottom : i32, tSide : i32, col : i32, albedo : i32) : Surface {
-    return Surface { albedoCol: albedo, baseCol: col, tTop: tTop, tBottom: tBottom, tSide: tSide };
+fn txSolid(tTop : i32, tBottom : i32, tSide : i32, col : i32, albedo : i32) : BlockSurface {
+    return BlockSurface { albedoCol: albedo, baseCol: col, tTop: tTop, tBottom: tBottom, tSide: tSide };
 }
 
 /** A surface with one tile on every face. */
-fn txUniform(tile : i32, col : i32, albedo : i32) : Surface {
+fn txUniform(tile : i32, col : i32, albedo : i32) : BlockSurface {
     return txSolid(tile, tile, tile, col, albedo);
 }
 
 /** A pillar surface: `top` on top/bottom, `side` on the four sides. */
-fn txColumn(top : i32, side : i32, col : i32, albedo : i32) : Surface {
+fn txColumn(top : i32, side : i32, col : i32, albedo : i32) : BlockSurface {
     return txSolid(top, top, side, col, albedo);
 }
 
 /** A grass-family surface: tinted top/side, dirt bottom, grass bounce albedo. */
-fn txGrass(tTop : i32, tSide : i32, col : i32) : Surface {
-    return Surface { albedoCol: rgb(112, 150, 72), baseCol: col, tTop: tTop, tBottom: config::tlDirt, tSide: tSide };
+fn txGrass(tTop : i32, tSide : i32, col : i32) : BlockSurface {
+    return BlockSurface { albedoCol: Color::packBytes(112, 150, 72), baseCol: col, tTop: tTop, tBottom: Tile::DIRT, tSide: tSide };
 }
 
 /** A leaf surface: one leaf tile on every face, canopy bounce albedo. */
-fn txLeaf(tile : i32, col : i32) : Surface {
-    return Surface { albedoCol: rgb(84, 122, 56), baseCol: col, tTop: tile, tBottom: tile, tSide: tile };
+fn txLeaf(tile : i32, col : i32) : BlockSurface {
+    return BlockSurface { albedoCol: Color::packBytes(84, 122, 56), baseCol: col, tTop: tile, tBottom: tile, tSide: tile };
 }
 
 /** A water surface: the water tile everywhere, grey bounce albedo, given colour. */
-fn txWater(col : i32) : Surface {
-    return Surface { albedoCol: rgb(138, 138, 138), baseCol: col, tTop: config::tlWater, tBottom: config::tlWater, tSide: config::tlWater };
+fn txWater(col : i32) : BlockSurface {
+    return BlockSurface { albedoCol: Color::packBytes(138, 138, 138), baseCol: col, tTop: Tile::WATER, tBottom: Tile::WATER, tSide: Tile::WATER };
 }
 
 /**
@@ -460,95 +462,95 @@ fn txWater(col : i32) : Surface {
  * @param id  the block
  * @return its surface capability
  */
-fn surfaceOf(id : Block) : Surface {
+fn surfaceOf(id : Block) : BlockSurface {
     return match id {
-        Block::Air => Surface { albedoCol: rgb(138, 138, 138), baseCol: rgb(0, 0, 0), tTop: config::tlStone, tBottom: config::tlStone, tSide: config::tlStone },
+        Block::Air => BlockSurface { albedoCol: Color::packBytes(138, 138, 138), baseCol: Color::packBytes(0, 0, 0), tTop: Tile::STONE, tBottom: Tile::STONE, tSide: Tile::STONE },
 
         // ── Grass family: tinted top, dirt bottom, tinted side ──
-        Block::Grass => txGrass(config::tlGrassTop, config::tlGrassSide, rgb(110, 170, 90)),
-        Block::GrassSavanna => txGrass(config::tlGrassTopSavanna, config::tlGrassSideSavanna, rgb(168, 156, 70)),
-        Block::GrassJungle => txGrass(config::tlGrassTopJungle, config::tlGrassSideJungle, rgb(80, 160, 56)),
-        Block::GrassSwamp => txGrass(config::tlGrassTopSwamp, config::tlGrassSideSwamp, rgb(96, 120, 80)),
-        Block::GrassTaiga => txGrass(config::tlGrassTopTaiga, config::tlGrassSideTaiga, rgb(120, 160, 130)),
-        Block::Podzol => txSolid(config::tlPodzolTop, config::tlDirt, config::tlPodzolSide, rgb(96, 68, 36), rgb(122, 92, 62)),
-        Block::Mycelium => txSolid(config::tlMyceliumTop, config::tlDirt, config::tlMyceliumSide, rgb(120, 104, 116), rgb(122, 92, 62)),
+        Block::Grass => txGrass(Tile::GRASS_TOP, Tile::GRASS_SIDE, Color::packBytes(110, 170, 90)),
+        Block::GrassSavanna => txGrass(Tile::GRASS_TOP_SAVANNA, Tile::GRASS_SIDE_SAVANNA, Color::packBytes(168, 156, 70)),
+        Block::GrassJungle => txGrass(Tile::GRASS_TOP_JUNGLE, Tile::GRASS_SIDE_JUNGLE, Color::packBytes(80, 160, 56)),
+        Block::GrassSwamp => txGrass(Tile::GRASS_TOP_SWAMP, Tile::GRASS_SIDE_SWAMP, Color::packBytes(96, 120, 80)),
+        Block::GrassTaiga => txGrass(Tile::GRASS_TOP_TAIGA, Tile::GRASS_SIDE_TAIGA, Color::packBytes(120, 160, 130)),
+        Block::Podzol => txSolid(Tile::PODZOL_TOP, Tile::DIRT, Tile::PODZOL_SIDE, Color::packBytes(96, 68, 36), Color::packBytes(122, 92, 62)),
+        Block::Mycelium => txSolid(Tile::MYCELIUM_TOP, Tile::DIRT, Tile::MYCELIUM_SIDE, Color::packBytes(120, 104, 116), Color::packBytes(122, 92, 62)),
 
         // ── Soils / loose ──
-        Block::Dirt => txUniform(config::tlDirt, rgb(140, 100, 64), rgb(122, 92, 62)),
-        Block::CoarseDirt => txUniform(config::tlCoarseDirt, rgb(122, 90, 58), rgb(122, 92, 62)),
-        Block::Sand => txUniform(config::tlSand, rgb(218, 205, 145), rgb(206, 188, 138)),
-        Block::RedSand => txUniform(config::tlRedSand, rgb(190, 110, 56), rgb(182, 112, 66)),
-        Block::Gravel => txUniform(config::tlGravel, rgb(122, 118, 112), rgb(138, 138, 138)),
-        Block::Clay => txUniform(config::tlClay, rgb(160, 165, 172), rgb(160, 164, 172)),
-        Block::Snow => txUniform(config::tlSnow, rgb(236, 240, 246), rgb(236, 240, 246)),
-        Block::Ice => txUniform(config::tlIce, rgb(150, 180, 235), rgb(168, 200, 224)),
-        Block::PackedIce => txUniform(config::tlPackedIce, rgb(140, 168, 222), rgb(168, 200, 224)),
+        Block::Dirt => txUniform(Tile::DIRT, Color::packBytes(140, 100, 64), Color::packBytes(122, 92, 62)),
+        Block::CoarseDirt => txUniform(Tile::COARSE_DIRT, Color::packBytes(122, 90, 58), Color::packBytes(122, 92, 62)),
+        Block::Sand => txUniform(Tile::SAND, Color::packBytes(218, 205, 145), Color::packBytes(206, 188, 138)),
+        Block::RedSand => txUniform(Tile::RED_SAND, Color::packBytes(190, 110, 56), Color::packBytes(182, 112, 66)),
+        Block::Gravel => txUniform(Tile::GRAVEL, Color::packBytes(122, 118, 112), Color::packBytes(138, 138, 138)),
+        Block::Clay => txUniform(Tile::CLAY, Color::packBytes(160, 165, 172), Color::packBytes(160, 164, 172)),
+        Block::Snow => txUniform(Tile::SNOW, Color::packBytes(236, 240, 246), Color::packBytes(236, 240, 246)),
+        Block::Ice => txUniform(Tile::ICE, Color::packBytes(150, 180, 235), Color::packBytes(168, 200, 224)),
+        Block::PackedIce => txUniform(Tile::PACKED_ICE, Color::packBytes(140, 168, 222), Color::packBytes(168, 200, 224)),
 
         // ── Stones / bricks ──
-        Block::Stone => txUniform(config::tlStone, rgb(128, 128, 132), rgb(138, 138, 138)),
-        Block::Cobble => txUniform(config::tlCobble, rgb(122, 120, 120), rgb(138, 138, 138)),
-        Block::MossyCobble => txUniform(config::tlMossyCobble, rgb(104, 116, 96), rgb(138, 138, 138)),
-        Block::Granite => txUniform(config::tlGranite, rgb(154, 110, 92), rgb(138, 138, 138)),
-        Block::Diorite => txUniform(config::tlDiorite, rgb(188, 188, 190), rgb(138, 138, 138)),
-        Block::Andesite => txUniform(config::tlAndesite, rgb(136, 138, 138), rgb(138, 138, 138)),
-        Block::StoneBricks => txUniform(config::tlStoneBricks, rgb(122, 122, 124), rgb(138, 138, 138)),
-        Block::Bricks => txUniform(config::tlBricks, rgb(150, 96, 80), rgb(138, 138, 138)),
-        Block::Sandstone => txSolid(config::tlSandstoneTop, config::tlSandstoneBottom, config::tlSandstoneSide, rgb(220, 208, 152), rgb(206, 188, 138)),
-        Block::RedSandstone => txSolid(config::tlRedSandstoneTop, config::tlRedSandstoneTop, config::tlRedSandstoneSide, rgb(184, 96, 38), rgb(182, 112, 66)),
-        Block::Terracotta => txUniform(config::tlTerracotta, rgb(150, 92, 66), rgb(138, 138, 138)),
-        Block::TerracottaOrange => txUniform(config::tlTerracottaOrange, rgb(162, 84, 38), rgb(138, 138, 138)),
-        Block::TerracottaWhite => txUniform(config::tlTerracottaWhite, rgb(208, 176, 156), rgb(138, 138, 138)),
+        Block::Stone => txUniform(Tile::STONE, Color::packBytes(128, 128, 132), Color::packBytes(138, 138, 138)),
+        Block::Cobble => txUniform(Tile::COBBLE, Color::packBytes(122, 120, 120), Color::packBytes(138, 138, 138)),
+        Block::MossyCobble => txUniform(Tile::MOSSY_COBBLE, Color::packBytes(104, 116, 96), Color::packBytes(138, 138, 138)),
+        Block::Granite => txUniform(Tile::GRANITE, Color::packBytes(154, 110, 92), Color::packBytes(138, 138, 138)),
+        Block::Diorite => txUniform(Tile::DIORITE, Color::packBytes(188, 188, 190), Color::packBytes(138, 138, 138)),
+        Block::Andesite => txUniform(Tile::ANDESITE, Color::packBytes(136, 138, 138), Color::packBytes(138, 138, 138)),
+        Block::StoneBricks => txUniform(Tile::STONE_BRICKS, Color::packBytes(122, 122, 124), Color::packBytes(138, 138, 138)),
+        Block::Bricks => txUniform(Tile::BRICKS, Color::packBytes(150, 96, 80), Color::packBytes(138, 138, 138)),
+        Block::Sandstone => txSolid(Tile::SANDSTONE_TOP, Tile::SANDSTONE_BOTTOM, Tile::SANDSTONE_SIDE, Color::packBytes(220, 208, 152), Color::packBytes(206, 188, 138)),
+        Block::RedSandstone => txSolid(Tile::RED_SANDSTONE_TOP, Tile::RED_SANDSTONE_TOP, Tile::RED_SANDSTONE_SIDE, Color::packBytes(184, 96, 38), Color::packBytes(182, 112, 66)),
+        Block::Terracotta => txUniform(Tile::TERRACOTTA, Color::packBytes(150, 92, 66), Color::packBytes(138, 138, 138)),
+        Block::TerracottaOrange => txUniform(Tile::TERRACOTTA_ORANGE, Color::packBytes(162, 84, 38), Color::packBytes(138, 138, 138)),
+        Block::TerracottaWhite => txUniform(Tile::TERRACOTTA_WHITE, Color::packBytes(208, 176, 156), Color::packBytes(138, 138, 138)),
 
         // ── Logs (top/bottom = ring, side = bark) + leaves + planks ──
-        Block::Wood => txColumn(config::tlOakLogTop, config::tlOakLogSide, rgb(110, 78, 48), rgb(140, 106, 66)),
-        Block::Leaves => txLeaf(config::tlOakLeaves, rgb(58, 132, 60)),
-        Block::Planks => txUniform(config::tlPlanks, rgb(150, 112, 66), rgb(140, 106, 66)),
-        Block::WoodBirch => txColumn(config::tlBirchLogTop, config::tlBirchLogSide, rgb(196, 196, 188), rgb(140, 106, 66)),
-        Block::LeavesBirch => txLeaf(config::tlBirchLeaves, rgb(110, 150, 70)),
-        Block::WoodSpruce => txColumn(config::tlSpruceLogTop, config::tlSpruceLogSide, rgb(66, 48, 28), rgb(140, 106, 66)),
-        Block::LeavesSpruce => txLeaf(config::tlSpruceLeaves, rgb(54, 92, 64)),
-        Block::WoodAcacia => txColumn(config::tlAcaciaLogTop, config::tlAcaciaLogSide, rgb(104, 78, 64), rgb(140, 106, 66)),
-        Block::LeavesAcacia => txLeaf(config::tlAcaciaLeaves, rgb(100, 126, 46)),
-        Block::WoodJungle => txColumn(config::tlJungleLogTop, config::tlJungleLogSide, rgb(88, 68, 36), rgb(140, 106, 66)),
-        Block::LeavesJungle => txLeaf(config::tlJungleLeaves, rgb(50, 132, 38)),
-        Block::WoodDarkOak => txColumn(config::tlDarkOakLogTop, config::tlDarkOakLogSide, rgb(66, 50, 32), rgb(140, 106, 66)),
-        Block::LeavesDarkOak => txLeaf(config::tlDarkOakLeaves, rgb(62, 96, 48)),
+        Block::Wood => txColumn(Tile::OAK_LOG_TOP, Tile::OAK_LOG_SIDE, Color::packBytes(110, 78, 48), Color::packBytes(140, 106, 66)),
+        Block::Leaves => txLeaf(Tile::OAK_LEAVES, Color::packBytes(58, 132, 60)),
+        Block::Planks => txUniform(Tile::PLANKS, Color::packBytes(150, 112, 66), Color::packBytes(140, 106, 66)),
+        Block::WoodBirch => txColumn(Tile::BIRCH_LOG_TOP, Tile::BIRCH_LOG_SIDE, Color::packBytes(196, 196, 188), Color::packBytes(140, 106, 66)),
+        Block::LeavesBirch => txLeaf(Tile::BIRCH_LEAVES, Color::packBytes(110, 150, 70)),
+        Block::WoodSpruce => txColumn(Tile::SPRUCE_LOG_TOP, Tile::SPRUCE_LOG_SIDE, Color::packBytes(66, 48, 28), Color::packBytes(140, 106, 66)),
+        Block::LeavesSpruce => txLeaf(Tile::SPRUCE_LEAVES, Color::packBytes(54, 92, 64)),
+        Block::WoodAcacia => txColumn(Tile::ACACIA_LOG_TOP, Tile::ACACIA_LOG_SIDE, Color::packBytes(104, 78, 64), Color::packBytes(140, 106, 66)),
+        Block::LeavesAcacia => txLeaf(Tile::ACACIA_LEAVES, Color::packBytes(100, 126, 46)),
+        Block::WoodJungle => txColumn(Tile::JUNGLE_LOG_TOP, Tile::JUNGLE_LOG_SIDE, Color::packBytes(88, 68, 36), Color::packBytes(140, 106, 66)),
+        Block::LeavesJungle => txLeaf(Tile::JUNGLE_LEAVES, Color::packBytes(50, 132, 38)),
+        Block::WoodDarkOak => txColumn(Tile::DARK_OAK_LOG_TOP, Tile::DARK_OAK_LOG_SIDE, Color::packBytes(66, 50, 32), Color::packBytes(140, 106, 66)),
+        Block::LeavesDarkOak => txLeaf(Tile::DARK_OAK_LEAVES, Color::packBytes(62, 96, 48)),
 
         // ── Decoration ──
-        Block::Cactus => txColumn(config::tlCactusTop, config::tlCactusSide, rgb(80, 118, 52), rgb(138, 138, 138)),
-        Block::Pumpkin => txColumn(config::tlPumpkinTop, config::tlPumpkinSide, rgb(190, 122, 38), rgb(196, 134, 48)),
-        Block::Melon => txColumn(config::tlMelonTop, config::tlMelonSide, rgb(110, 140, 40), rgb(196, 134, 48)),
-        Block::Glowstone => txUniform(config::tlGlowstone, rgb(180, 150, 92), rgb(138, 138, 138)),
-        Block::Torch => Surface { albedoCol: rgb(138, 138, 138), baseCol: rgb(240, 180, 70), tTop: config::tlTorch, tBottom: config::tlTorch, tSide: config::tlTorch },
+        Block::Cactus => txColumn(Tile::CACTUS_TOP, Tile::CACTUS_SIDE, Color::packBytes(80, 118, 52), Color::packBytes(138, 138, 138)),
+        Block::Pumpkin => txColumn(Tile::PUMPKIN_TOP, Tile::PUMPKIN_SIDE, Color::packBytes(190, 122, 38), Color::packBytes(196, 134, 48)),
+        Block::Melon => txColumn(Tile::MELON_TOP, Tile::MELON_SIDE, Color::packBytes(110, 140, 40), Color::packBytes(196, 134, 48)),
+        Block::Glowstone => txUniform(Tile::GLOWSTONE, Color::packBytes(180, 150, 92), Color::packBytes(138, 138, 138)),
+        Block::Torch => BlockSurface { albedoCol: Color::packBytes(138, 138, 138), baseCol: Color::packBytes(240, 180, 70), tTop: Tile::TORCH, tBottom: Tile::TORCH, tSide: Tile::TORCH },
 
         // ── Water: still source (blue) + flowing levels (no fallback colour) ──
-        Block::Water => txWater(rgb(58, 110, 200)),
+        Block::Water => txWater(Color::packBytes(58, 110, 200)),
         Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3 | Block::FlowWater4
         | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
-            => txWater(rgb(0, 0, 0)),
+            => txWater(Color::packBytes(0, 0, 0)),
 
         // ── Ores ──
-        Block::CoalOre => txUniform(config::tlCoalOre, rgb(70, 70, 72), rgb(138, 138, 138)),
-        Block::IronOre => txUniform(config::tlIronOre, rgb(150, 132, 116), rgb(138, 138, 138)),
-        Block::GoldOre => txUniform(config::tlGoldOre, rgb(160, 150, 96), rgb(138, 138, 138)),
-        Block::DiamondOre => txUniform(config::tlDiamondOre, rgb(120, 170, 170), rgb(138, 138, 138)),
-        Block::RedstoneOre => txUniform(config::tlRedstoneOre, rgb(140, 90, 88), rgb(138, 138, 138)),
-        Block::EmeraldOre => txUniform(config::tlEmeraldOre, rgb(90, 150, 104), rgb(138, 138, 138)),
-        Block::LapisOre => txUniform(config::tlLapisOre, rgb(90, 100, 140), rgb(138, 138, 138)),
+        Block::CoalOre => txUniform(Tile::COAL_ORE, Color::packBytes(70, 70, 72), Color::packBytes(138, 138, 138)),
+        Block::IronOre => txUniform(Tile::IRON_ORE, Color::packBytes(150, 132, 116), Color::packBytes(138, 138, 138)),
+        Block::GoldOre => txUniform(Tile::GOLD_ORE, Color::packBytes(160, 150, 96), Color::packBytes(138, 138, 138)),
+        Block::DiamondOre => txUniform(Tile::DIAMOND_ORE, Color::packBytes(120, 170, 170), Color::packBytes(138, 138, 138)),
+        Block::RedstoneOre => txUniform(Tile::REDSTONE_ORE, Color::packBytes(140, 90, 88), Color::packBytes(138, 138, 138)),
+        Block::EmeraldOre => txUniform(Tile::EMERALD_ORE, Color::packBytes(90, 150, 104), Color::packBytes(138, 138, 138)),
+        Block::LapisOre => txUniform(Tile::LAPIS_ORE, Color::packBytes(90, 100, 140), Color::packBytes(138, 138, 138)),
 
         // ── Expansion: bamboo, cherry, giant mushrooms ──
-        Block::Bamboo => txColumn(config::tlBambooTop, config::tlBambooSide, rgb(120, 160, 80), rgb(140, 106, 66)),
-        Block::CherryLog => txColumn(config::tlCherryLogTop, config::tlCherryLogSide, rgb(110, 80, 90), rgb(140, 106, 66)),
-        Block::CherryLeaves => txLeaf(config::tlCherryLeaves, rgb(236, 168, 206)),
-        Block::MushroomStem => txUniform(config::tlMushroomStem, rgb(206, 200, 186), rgb(138, 138, 138)),
-        Block::RedMushroom => txUniform(config::tlRedMushroom, rgb(180, 40, 40), rgb(138, 138, 138)),
-        Block::BrownMushroom => txUniform(config::tlBrownMushroom, rgb(150, 112, 76), rgb(138, 138, 138)),
+        Block::Bamboo => txColumn(Tile::BAMBOO_TOP, Tile::BAMBOO_SIDE, Color::packBytes(120, 160, 80), Color::packBytes(140, 106, 66)),
+        Block::CherryLog => txColumn(Tile::CHERRY_LOG_TOP, Tile::CHERRY_LOG_SIDE, Color::packBytes(110, 80, 90), Color::packBytes(140, 106, 66)),
+        Block::CherryLeaves => txLeaf(Tile::CHERRY_LEAVES, Color::packBytes(236, 168, 206)),
+        Block::MushroomStem => txUniform(Tile::MUSHROOM_STEM, Color::packBytes(206, 200, 186), Color::packBytes(138, 138, 138)),
+        Block::RedMushroom => txUniform(Tile::RED_MUSHROOM, Color::packBytes(180, 40, 40), Color::packBytes(138, 138, 138)),
+        Block::BrownMushroom => txUniform(Tile::BROWN_MUSHROOM, Color::packBytes(150, 112, 76), Color::packBytes(138, 138, 138)),
 
         // ── Partial-height snow layer ──
-        Block::SnowLayer => Surface { albedoCol: rgb(236, 240, 246), baseCol: rgb(236, 240, 246), tTop: config::tlSnow, tBottom: config::tlSnow, tSide: config::tlSnow },
+        Block::SnowLayer => BlockSurface { albedoCol: Color::packBytes(236, 240, 246), baseCol: Color::packBytes(236, 240, 246), tTop: Tile::SNOW, tBottom: Tile::SNOW, tSide: Tile::SNOW },
 
         // Fallback: a plain stone-like solid (matches the old per-fn defaults).
-        _ => txUniform(config::tlStone, rgb(0, 0, 0), rgb(138, 138, 138)),
+        _ => txUniform(Tile::STONE, Color::packBytes(0, 0, 0), Color::packBytes(138, 138, 138)),
     };
 }
 
@@ -746,10 +748,10 @@ fn isGrassy(id : Block) : bool {
 }
 
 /**
- * Sound material of a block (config::mat*), shared by footsteps and the
+ * Sound material of a block (an `AudioMaterial`), shared by footsteps and the
  * dig / place sound.
  * @param id  the block
- * @return the material id (config::mat*)
+ * @return the material id (an `AudioMaterial`)
  */
 fn materialOf(id : Block) : AudioMaterial {
     return soundOf(id).material();

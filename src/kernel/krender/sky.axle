@@ -10,15 +10,18 @@
 // The Renderer still caches the same fields inline (its world / mob / god-ray
 // passes read them every frame); it builds a DayState once per frame via
 // `computeDayState` and hands it to these draws. This module depends only on
-// `sdl_platform`, `raster` (FrameBuf), `player`, `mathx` and `config` — one-way,
+// `smalt`, `raster` (FrameBuf), `player`, `mathx` and `configs` — one-way,
 // no import cycle back into render.
 
-use sdl_platform::{putPixel, rgb};
+use smalt::Mem;
+use smalt::Color;
 use crate::kernel::krender::raster::{ FrameBuf, Camera, Projected, SkyLighting, shadeLambert };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::kmath::mathx::{ clampI32 };
-use crate::config;
+use crate::configs::render::{ Render };
+use crate::configs::screen::{ Screen };
+use crate::configs::time::{ Daylight };
 
 /**
  * The per-frame day/night state: the (normalised) sun direction used for face
@@ -27,13 +30,13 @@ use crate::config;
  * across the gradient job's thread), so no day-state is shared by reference.
  */
 struct DayState : SkyLighting {
-    sunX : f64,
-    sunY : f64,
-    sunZ : f64,
-    daylight : f64,
-    skyColR : i32,
-    skyColG : i32,
-    skyColB : i32,
+    pub(crate) sunX : f64,
+    pub(crate) sunY : f64,
+    pub(crate) sunZ : f64,
+    pub(crate) daylight : f64,
+    pub(crate) skyColR : i32,
+    pub(crate) skyColG : i32,
+    pub(crate) skyColB : i32,
 
     /**
      * Lambert brightness for a surface normal under this frame's sun, lifted by
@@ -43,9 +46,15 @@ struct DayState : SkyLighting {
      * @param n  the (unit) surface normal
      * @return the brightness factor in [ambient, 1]
      */
-    fn shade(self, n : Vec3) : f64 {
+    pub(crate) fn shade(self, n : Vec3) : f64 {
         return shadeLambert(n, vec3(self.sunX, self.sunY, self.sunZ));
     }
+}
+
+/** Which body the disc pass is drawing. */
+enum SkyBody : i32 {
+    Sun,
+    Moon,
 }
 
 /** A screen-space disc (sun / moon): centre + radius, in pixels. */
@@ -66,10 +75,10 @@ struct Disc {
 fn computeDayState(dayTime : f64) : DayState {
     // Sun angle around the sky dome, tilted out of the pure east-west plane.
     let ang : f64 = (dayTime - 0.25) * 6.2831853;
-    let sx : f64 = Math::cos(ang);
-    let sy : f64 = Math::sin(ang);
-    let sz : f64 = config::sunTilt;
-    let len : f64 = Math::sqrt(sx * sx + sy * sy + sz * sz);
+    let sx : f64 = ang.cos();
+    let sy : f64 = ang.sin();
+    let sz : f64 = Daylight::SUN_TILT;
+    let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
     if (len < 0.0001) {
         len = 0.0001;
     }
@@ -91,52 +100,67 @@ fn computeDayState(dayTime : f64) : DayState {
         dusk = 0.0;
     }
     dusk = dusk * 0.7;
-    let r : f64 = (config::nightSkyR as f64) + ((config::daySkyR - config::nightSkyR) as f64) * dl;
-    let g : f64 = (config::nightSkyG as f64) + ((config::daySkyG - config::nightSkyG) as f64) * dl;
-    let b : f64 = (config::nightSkyB as f64) + ((config::daySkyB - config::nightSkyB) as f64) * dl;
-    r = r + ((config::duskSkyR as f64) - r) * dusk;
-    g = g + ((config::duskSkyG as f64) - g) * dusk;
-    b = b + ((config::duskSkyB as f64) - b) * dusk;
+    let r : f64 = (Daylight::NIGHT_SKY_R as f64) + ((Daylight::DAY_SKY_R - Daylight::NIGHT_SKY_R) as f64) * dl;
+    let g : f64 = (Daylight::NIGHT_SKY_G as f64) + ((Daylight::DAY_SKY_G - Daylight::NIGHT_SKY_G) as f64) * dl;
+    let b : f64 = (Daylight::NIGHT_SKY_B as f64) + ((Daylight::DAY_SKY_B - Daylight::NIGHT_SKY_B) as f64) * dl;
+    r = r + ((Daylight::DUSK_SKY_R as f64) - r) * dusk;
+    g = g + ((Daylight::DUSK_SKY_G as f64) - g) * dusk;
+    b = b + ((Daylight::DUSK_SKY_B as f64) - b) * dusk;
     return DayState {
         sunX: sx / len,
         sunY: sy / len,
         sunZ: sz / len,
-        daylight: config::nightLevel + (1.0 - config::nightLevel) * dl,
-        skyColR: Math::floorToInt(r) as i32,
-        skyColG: Math::floorToInt(g) as i32,
-        skyColB: Math::floorToInt(b) as i32,
+        daylight: Daylight::NIGHT_LEVEL + (1.0 - Daylight::NIGHT_LEVEL) * dl,
+        skyColR: r.floorToInt() as i32,
+        skyColG: g.floorToInt() as i32,
+        skyColB: b.floorToInt() as i32,
     };
 }
 
 /**
  * Solid colour of one celestial-disc texel at offset (dx, dy) from the centre.
- * The sun (kind 0) is a white-hot centre fading to gold at the rim; the moon
- * (kind 1) a pale disc with two faint dark maria. Pulled out of drawDisc so
- * that loop stays shallow.
- * @param kind    0 = sun, 1 = moon
+ * Pulled out of drawDisc so that loop stays shallow.
+ * @param body    which body is being drawn
  * @param dx      texel x offset from the disc centre
  * @param dy      texel y offset from the disc centre
  * @param radius  disc radius in pixels
  * @return the packed rgb colour for the texel
  */
-fn discColor(kind : i32, dx : f64, dy : f64, radius : f64) : i32 {
-    if (kind == 0) {
-        let nd : f64 = Math::sqrt(dx * dx + dy * dy) / radius;
-        let cg : i32 = Math::floorToInt(253.0 - 42.0 * nd) as i32;
-        let cb : i32 = Math::floorToInt(218.0 - 150.0 * nd) as i32;
-        return rgb(255, cg, cb);
-    }
-    let cr : i32 = 226;
-    let cg : i32 = 231;
-    let cb : i32 = 240;
-    let m1 : f64 = Math::sqrt((dx + radius * 0.30) * (dx + radius * 0.30) + (dy + radius * 0.32) * (dy + radius * 0.32));
-    let m2 : f64 = Math::sqrt((dx - radius * 0.36) * (dx - radius * 0.36) + (dy - radius * 0.10) * (dy - radius * 0.10));
+fn discColor(body : SkyBody, dx : f64, dy : f64, radius : f64) : i32 {
+    return match body {
+        SkyBody::Sun => sunTexel(dx, dy, radius),
+        _ => moonTexel(dx, dy, radius),
+    };
+}
+
+/**
+ * A sun texel: white-hot at the centre, fading to gold at the rim.
+ * @param dx      texel x offset from the disc centre
+ * @param dy      texel y offset from the disc centre
+ * @param radius  disc radius in pixels
+ * @return the packed rgb colour for the texel
+ */
+fn sunTexel(dx : f64, dy : f64, radius : f64) : i32 {
+    let nd : f64 = (dx * dx + dy * dy).sqrt() / radius;
+    let cg : i32 = (253.0 - 42.0 * nd).floorToInt() as i32;
+    let cb : i32 = (218.0 - 150.0 * nd).floorToInt() as i32;
+    return Color::packBytes(255, cg, cb);
+}
+
+/**
+ * A moon texel: a pale disc darkened inside two faint maria.
+ * @param dx      texel x offset from the disc centre
+ * @param dy      texel y offset from the disc centre
+ * @param radius  disc radius in pixels
+ * @return the packed rgb colour for the texel
+ */
+fn moonTexel(dx : f64, dy : f64, radius : f64) : i32 {
+    let m1 : f64 = ((dx + radius * 0.30) * (dx + radius * 0.30) + (dy + radius * 0.32) * (dy + radius * 0.32)).sqrt();
+    let m2 : f64 = ((dx - radius * 0.36) * (dx - radius * 0.36) + (dy - radius * 0.10) * (dy - radius * 0.10)).sqrt();
     if (m1 < radius * 0.26 || m2 < radius * 0.20) {
-        cr = 198;
-        cg = 206;
-        cb = 220;
+        return Color::packBytes(198, 206, 220);
     }
-    return rgb(cr, cg, cb);
+    return Color::packBytes(226, 231, 240);
 }
 
 /**
@@ -146,16 +170,16 @@ fn discColor(kind : i32, dx : f64, dy : f64, radius : f64) : i32 {
  * solid, never blended. Hard edge, like Minecraft's sun and moon.
  * @param fb    the render target (framebuffer + size)
  * @param d     the disc's screen centre + radius
- * @param kind  0 = sun, 1 = moon
+ * @param body  which body is being drawn
  */
-fn drawDisc(fb : FrameBuf, d : Disc, kind : i32) : void {
+fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody) : void {
     let pixels : i64 = fb.pixels;
     let w : i32 = fb.w;
     let h : i32 = fb.h;
-    let x0 : i32 = Math::floorToInt(d.cx - d.radius) as i32;
-    let x1 : i32 = Math::floorToInt(d.cx + d.radius) as i32;
-    let y0 : i32 = Math::floorToInt(d.cy - d.radius) as i32;
-    let y1 : i32 = Math::floorToInt(d.cy + d.radius) as i32;
+    let x0 : i32 = (d.cx - d.radius).floorToInt() as i32;
+    let x1 : i32 = (d.cx + d.radius).floorToInt() as i32;
+    let y0 : i32 = (d.cy - d.radius).floorToInt() as i32;
+    let y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
     let r2 : f64 = d.radius * d.radius;
     let py : i32 = y0;
     while (py <= y1) {
@@ -166,7 +190,7 @@ fn drawDisc(fb : FrameBuf, d : Disc, kind : i32) : void {
                     let dx : f64 = (px as f64) + 0.5 - d.cx;
                     let dy : f64 = (py as f64) + 0.5 - d.cy;
                     if (dx * dx + dy * dy <= r2) {
-                        putPixel(pixels, py * w + px, discColor(kind, dx, dy, d.radius));
+                        Mem::putWordOf(pixels, py * w + px, discColor(body, dx, dy, d.radius));
                     }
                 }
                 px = px + 1;
@@ -184,16 +208,16 @@ fn drawDisc(fb : FrameBuf, d : Disc, kind : i32) : void {
  * @param fb      the render target (framebuffer + size)
  * @param dir     sky direction (unit)
  * @param radius  disc radius in pixels
- * @param kind    0 = sun, 1 = moon
+ * @param body    which body is being drawn
  * @param hw      half the render width (horizontal projection centre)
  */
-fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, kind : i32, hw : f64) : void {
+fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, body : SkyBody, hw : f64) : void {
     let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: hw };
     let pr : Projected = cam.projectDir(dir);
     if (pr.cz < 0.05) {
         return;
     }
-    drawDisc(fb, Disc { cx: pr.sx, cy: pr.sy, radius: radius }, kind);
+    drawDisc(fb, Disc { cx: pr.sx, cy: pr.sy, radius: radius }, body);
 }
 
 /**
@@ -217,10 +241,10 @@ fn drawSkyGradientRows(ds : DayState, p : Player, fb : FrameBuf, y0 : i32, y1 : 
     let baseG : f64 = ds.skyColG as f64;
     let baseB : f64 = ds.skyColB as f64;
     // Zenith (deep) and horizon (pale warm) endpoints derived from it.
-    let zenR : f64 = baseR * config::skyZenithR;
-    let zenG : f64 = baseG * config::skyZenithG;
-    let zenB : f64 = baseB * config::skyZenithB;
-    let lift : f64 = config::skyHorizonLift;
+    let zenR : f64 = baseR * Render::SKY_ZENITH_R;
+    let zenG : f64 = baseG * Render::SKY_ZENITH_G;
+    let zenB : f64 = baseB * Render::SKY_ZENITH_B;
+    let lift : f64 = Render::SKY_HORIZON_LIFT;
     let horR : f64 = baseR + (250.0 - baseR) * lift;
     let horG : f64 = baseG + (245.0 - baseG) * lift;
     let horB : f64 = baseB + (235.0 - baseB) * lift;
@@ -241,17 +265,17 @@ fn drawSkyGradientRows(ds : DayState, p : Player, fb : FrameBuf, y0 : i32, y1 : 
     }
     let py : i32 = y0;
     while (py < y1) {
-        let ndcy : f64 = (config::halfH - ((py as f64) + 0.5)) / config::focal;
+        let ndcy : f64 = (Screen::HALF_H - ((py as f64) + 0.5)) / Screen::FOCAL;
         // Camera ray (rx, ndcy, 1) → world dir, inverting toCam's rotation.
         let rz0c : f64 = cosp - ndcy * sinp;   // depends only on row
         let dyw : f64 = ndcy * cosp + sinp;
         let row : i32 = py * w;
         let px : i32 = 0;
         while (px < w) {
-            let ndcx : f64 = (((px as f64) + 0.5) - hw) / config::focal;
+            let ndcx : f64 = (((px as f64) + 0.5) - hw) / Screen::FOCAL;
             let dxw : f64 = ndcx * cosy - rz0c * siny;
             let dzw : f64 = ndcx * siny + rz0c * cosy;
-            let len : f64 = Math::sqrt(dxw * dxw + dyw * dyw + dzw * dzw);
+            let len : f64 = (dxw * dxw + dyw * dyw + dzw * dzw).sqrt();
             if (len < 0.0001) {
                 len = 0.0001;
             }
@@ -265,7 +289,7 @@ fn drawSkyGradientRows(ds : DayState, p : Player, fb : FrameBuf, y0 : i32, y1 : 
                 t = 1.0;
             }
             // Sharper near the horizon: sqrt pushes the gradient up.
-            let ts : f64 = Math::sqrt(t);
+            let ts : f64 = t.sqrt();
             let r : f64 = horR + (zenR - horR) * ts;
             let g : f64 = horG + (zenG - horG) * ts;
             let b : f64 = horB + (zenB - horB) * ts;
@@ -273,19 +297,19 @@ fn drawSkyGradientRows(ds : DayState, p : Player, fb : FrameBuf, y0 : i32, y1 : 
             let sd : f64 = (dxw * sX + dyw * sY + dzw * sZ) * inv;
             if (sd > 0.0 && haloFade > 0.0) {
                 let s2 : f64 = sd * sd;
-                let halo : f64 = s2 * s2 * s2 * config::skyHaloStrength * haloFade;
-                if (sd > config::skyCoreThresh) {
-                    let cc : f64 = (sd - config::skyCoreThresh) / (1.0 - config::skyCoreThresh);
-                    halo = halo + cc * cc * haloFade * config::skyCoreStrength;
+                let halo : f64 = s2 * s2 * s2 * Render::SKY_HALO_STRENGTH * haloFade;
+                if (sd > Render::SKY_CORE_THRESH) {
+                    let cc : f64 = (sd - Render::SKY_CORE_THRESH) / (1.0 - Render::SKY_CORE_THRESH);
+                    halo = halo + cc * cc * haloFade * Render::SKY_CORE_STRENGTH;
                 }
-                r = r + (config::skyHaloR as f64) * halo;
-                g = g + (config::skyHaloG as f64) * halo;
-                b = b + (config::skyHaloB as f64) * halo;
+                r = r + (Render::SKY_HALO_R as f64) * halo;
+                g = g + (Render::SKY_HALO_G as f64) * halo;
+                b = b + (Render::SKY_HALO_B as f64) * halo;
             }
-            let ri : i32 = clampI32(Math::floorToInt(r) as i32, 0, 255);
-            let gi : i32 = clampI32(Math::floorToInt(g) as i32, 0, 255);
-            let bi : i32 = clampI32(Math::floorToInt(b) as i32, 0, 255);
-            putPixel(pixels, row + px, ri * 65536 + gi * 256 + bi);
+            let ri : i32 = clampI32(r.floorToInt() as i32, 0, 255);
+            let gi : i32 = clampI32(g.floorToInt() as i32, 0, 255);
+            let bi : i32 = clampI32(b.floorToInt() as i32, 0, 255);
+            Mem::putWordOf(pixels, row + px, ri * 65536 + gi * 256 + bi);
             px = px + 1;
         }
         py = py + 1;
@@ -323,10 +347,10 @@ fn drawCelestial(ds : DayState, p : Player, fb : FrameBuf, hw : f64) : void {
     let sunR : f64 = (fb.h as f64) * 0.085;
     let moonR : f64 = (fb.h as f64) * 0.072;
     if (ds.sunY > 0.0 - 0.04) {
-        drawSky(p, fb, vec3(ds.sunX, ds.sunY, ds.sunZ), sunR, 0, hw);
+        drawSky(p, fb, vec3(ds.sunX, ds.sunY, ds.sunZ), sunR, SkyBody::Sun, hw);
     }
     if ((0.0 - ds.sunY) > 0.0 - 0.04) {
-        drawSky(p, fb, vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ), moonR, 1, hw);
+        drawSky(p, fb, vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ), moonR, SkyBody::Moon, hw);
     }
 }
 

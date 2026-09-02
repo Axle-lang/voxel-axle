@@ -1,10 +1,11 @@
 // configs::biomes — the biome id enum (Minecraft-inspired). The climate
-// selector `world::biomes::registry::biomeAt` maps temperature/humidity/height
-// to one of these, and the registry holds one `Biome` class instance per id.
-//
-// `BiomeId` is the lightweight tag; `world::biomes::Biome` (+ its subclasses) is
-// the behaviour. The backing i32 discriminants follow declaration order.
+// selector `game::world::biomes::biomeAt` maps temperature/humidity/height to
+// one of these, and one `BiomeDef` row per id carries the parameters.
 
+/**
+ * The lightweight biome tag; `game::world::biomes::BiomeDef` holds the
+ * behaviour. The backing i32 discriminants follow declaration order.
+ */
 enum BiomeId : i32 {
     Ocean,
     Beach,

@@ -3,7 +3,7 @@
 // the renderer and the mouse hit-test agree. All coordinates are in the
 // 640×400 framebuffer; `main` maps the window-space cursor into it.
 
-use sdl_platform::rgb;
+use smalt::Color;
 use crate::kernel::krender::color::{fillRect, dimScreen, Widget, Canvas};
 use crate::kernel::krender::font::{drawText, textWidth};
 
@@ -126,13 +126,13 @@ fn drawButton(cv : Canvas, i : i32, label : string, hover : i32) : void {
     let bx : i32 = btnX(cv.w);
     let by : i32 = btnY(cv.h, i);
     let on : bool = hover == i;
-    let bg : i32 = rgb(44, 48, 58);
-    let edge : i32 = rgb(70, 76, 90);
-    let txt : i32 = rgb(210, 214, 224);
+    let bg : i32 = Color::packBytes(44, 48, 58);
+    let edge : i32 = Color::packBytes(70, 76, 90);
+    let txt : i32 = Color::packBytes(210, 214, 224);
     if (on) {
-        bg = rgb(86, 180, 90);
-        edge = rgb(150, 230, 150);
-        txt = rgb(16, 22, 16);
+        bg = Color::packBytes(86, 180, 90);
+        edge = Color::packBytes(150, 230, 150);
+        txt = Color::packBytes(16, 22, 16);
     }
     fillRect(cv, bx, by, btnW(), btnH(), bg);
     border(cv, bx, by, btnW(), btnH(), 2, edge);
@@ -158,22 +158,22 @@ struct PauseWidget : Widget {
         let pw : i32 = panelW();
         let ph : i32 = panelH();
 
-        fillRect(cv, px + 6, py + 8, pw, ph, rgb(0, 0, 0));        // drop shadow
-        fillRect(cv, px, py, pw, ph, rgb(24, 26, 32));            // panel
-        fillRect(cv, px, py, pw, 6, rgb(86, 180, 90));           // accent top bar
-        border(cv, px, py, pw, ph, 2, rgb(86, 180, 90));        // accent border
+        fillRect(cv, px + 6, py + 8, pw, ph, Color::packBytes(0, 0, 0)); // drop shadow
+        fillRect(cv, px, py, pw, ph, Color::packBytes(24, 26, 32));      // panel
+        fillRect(cv, px, py, pw, 6, Color::packBytes(86, 180, 90));      // accent top bar
+        border(cv, px, py, pw, ph, 2, Color::packBytes(86, 180, 90));    // accent border
 
         let title : string = "PAUSED";
         let ts : i32 = 4;
         let tw : i32 = textWidth(title, ts);
-        drawText(cv, px + (pw - tw) / 2, py + 26, ts, rgb(238, 240, 245), title);
+        drawText(cv, px + (pw - tw) / 2, py + 26, ts, Color::packBytes(238, 240, 245), title);
 
         drawButton(cv, 0, "RESUME", self.hover);
         drawButton(cv, 1, "QUIT", self.hover);
 
         let hint : string = "ESC TO RESUME";
         let hw : i32 = textWidth(hint, 1);
-        drawText(cv, px + (pw - hw) / 2, py + ph - 16, 1, rgb(150, 154, 166), hint);
+        drawText(cv, px + (pw - hw) / 2, py + ph - 16, 1, Color::packBytes(150, 154, 166), hint);
     }
 }
 

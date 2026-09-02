@@ -1,3 +1,0 @@
-[submodule "vendor/sdl_platform"]
-	path = vendor/sdl_platform
-	url = https://github.com/ChocolatMilka/sdl_platform

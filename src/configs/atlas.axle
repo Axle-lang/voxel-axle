@@ -1,124 +1,130 @@
 // configs::atlas — texture atlas geometry and the per-tile indices.
 //
-// The atlas is a vertical strip of square tiles. The first `blockTiles` tiles
-// are block faces; any tiles above that are mob skins. Bump `atlasTiles` (and
+// The atlas is a vertical strip of square tiles. The first `Atlas::BLOCK_TILES` tiles
+// are block faces; any tiles above that are mob skins. Bump `Atlas::TILE_COUNT` (and
 // the embedded hex in bake_atlas.py) when you add mob textures, then flip
-// `useMobTextures` on. The tl* indices MIRROR THE ORDER IN `bake_atlas.py`
+// `Atlas::USE_MOB_TEXTURES` on. The `Tile` indices MIRROR THE ORDER IN `bake_atlas.py`
 // EXACTLY — keep them in sync.
 
-const tilePx : i32 = 128;
-const blockTiles : i32 = 81;
-const atlasTiles : i32 = 94;
-const useMobTextures : bool = true;
-// Mip chain depth (64 → 32 → … → 1 = 7 levels). Distant faces sample a
-// coarser, pre-averaged level so textures don't shimmer when moving.
-const mipLevels : i32 = 8;
-// Texture filtering: the rasteriser picks the mip from the LESS compressed
-// screen axis and averages `maxAniso` taps along the MORE compressed one
-// (anisotropic filtering) — this is what keeps oblique distant ground crisp
-// instead of a blurry mush. `mipBias` < 1 sharpens (delays the mip step);
-// lower = sharper but more shimmer.
-const maxAniso : i32 = 8;
-const mipBias : f64 = 0.5;
+/** Texture atlas geometry: tile size, tile counts, and the mip / filter settings. */
+class Atlas {
+    static TILE_PX : i32 = 128;
+    static BLOCK_TILES : i32 = 81;
+    static TILE_COUNT : i32 = 94;
+    static USE_MOB_TEXTURES : bool = true;
+    // Mip chain depth (64 → 32 → … → 1 = 7 levels). Distant faces sample a
+    // coarser, pre-averaged level so textures don't shimmer when moving.
+    static MIP_LEVELS : i32 = 8;
+    // Texture filtering: the rasteriser picks the mip from the LESS compressed
+    // screen axis and averages `Atlas::MAX_ANISO` taps along the MORE compressed one
+    // (anisotropic filtering) — this is what keeps oblique distant ground crisp
+    // instead of a blurry mush. `Atlas::MIP_BIAS` < 1 sharpens (delays the mip step);
+    // lower = sharper but more shimmer.
+    static MAX_ANISO : i32 = 8;
+    static MIP_BIAS : f64 = 0.5;
+}
 
-// ── Block tiles (0 .. blockTiles-1) ─────────────────────────
-const tlGrassTop : i32 = 0;
-const tlGrassSide : i32 = 1;
-const tlDirt : i32 = 2;
-const tlCoarseDirt : i32 = 3;
-const tlPodzolTop : i32 = 4;
-const tlPodzolSide : i32 = 5;
-const tlMyceliumTop : i32 = 6;
-const tlMyceliumSide : i32 = 7;
-const tlSand : i32 = 8;
-const tlRedSand : i32 = 9;
-const tlGravel : i32 = 10;
-const tlClay : i32 = 11;
-const tlSnow : i32 = 12;
-const tlIce : i32 = 13;
-const tlPackedIce : i32 = 14;
-const tlStone : i32 = 15;
-const tlCobble : i32 = 16;
-const tlMossyCobble : i32 = 17;
-const tlGranite : i32 = 18;
-const tlDiorite : i32 = 19;
-const tlAndesite : i32 = 20;
-const tlStoneBricks : i32 = 21;
-const tlBricks : i32 = 22;
-const tlSandstoneTop : i32 = 23;
-const tlSandstoneSide : i32 = 24;
-const tlSandstoneBottom : i32 = 25;
-const tlRedSandstoneTop : i32 = 26;
-const tlRedSandstoneSide : i32 = 27;
-const tlTerracotta : i32 = 28;
-const tlTerracottaOrange : i32 = 29;
-const tlTerracottaWhite : i32 = 30;
-const tlOakLogSide : i32 = 31;
-const tlOakLogTop : i32 = 32;
-const tlOakLeaves : i32 = 33;
-const tlPlanks : i32 = 34;
-const tlBirchLogSide : i32 = 35;
-const tlBirchLogTop : i32 = 36;
-const tlBirchLeaves : i32 = 37;
-const tlSpruceLogSide : i32 = 38;
-const tlSpruceLogTop : i32 = 39;
-const tlSpruceLeaves : i32 = 40;
-const tlAcaciaLogSide : i32 = 41;
-const tlAcaciaLogTop : i32 = 42;
-const tlAcaciaLeaves : i32 = 43;
-const tlJungleLogSide : i32 = 44;
-const tlJungleLogTop : i32 = 45;
-const tlJungleLeaves : i32 = 46;
-const tlDarkOakLogSide : i32 = 47;
-const tlDarkOakLogTop : i32 = 48;
-const tlDarkOakLeaves : i32 = 49;
-const tlCactusSide : i32 = 50;
-const tlCactusTop : i32 = 51;
-const tlPumpkinSide : i32 = 52;
-const tlPumpkinTop : i32 = 53;
-const tlMelonSide : i32 = 54;
-const tlMelonTop : i32 = 55;
-const tlGlowstone : i32 = 56;
-const tlWater : i32 = 57;
-const tlCoalOre : i32 = 58;
-const tlIronOre : i32 = 59;
-const tlGoldOre : i32 = 60;
-const tlDiamondOre : i32 = 61;
-const tlRedstoneOre : i32 = 62;
-const tlEmeraldOre : i32 = 63;
-const tlLapisOre : i32 = 64;
-const tlGrassTopSavanna : i32 = 65;
-const tlGrassSideSavanna : i32 = 66;
-const tlGrassTopJungle : i32 = 67;
-const tlGrassSideJungle : i32 = 68;
-const tlGrassTopSwamp : i32 = 69;
-const tlGrassSideSwamp : i32 = 70;
-const tlGrassTopTaiga : i32 = 71;
-const tlGrassSideTaiga : i32 = 72;
+/** The atlas index of every tile, in the order `bake_atlas.py` writes them. */
+class Tile {
+    // ── Block tiles (0 .. Atlas::BLOCK_TILES-1) ─────────────────
+    static GRASS_TOP : i32 = 0;
+    static GRASS_SIDE : i32 = 1;
+    static DIRT : i32 = 2;
+    static COARSE_DIRT : i32 = 3;
+    static PODZOL_TOP : i32 = 4;
+    static PODZOL_SIDE : i32 = 5;
+    static MYCELIUM_TOP : i32 = 6;
+    static MYCELIUM_SIDE : i32 = 7;
+    static SAND : i32 = 8;
+    static RED_SAND : i32 = 9;
+    static GRAVEL : i32 = 10;
+    static CLAY : i32 = 11;
+    static SNOW : i32 = 12;
+    static ICE : i32 = 13;
+    static PACKED_ICE : i32 = 14;
+    static STONE : i32 = 15;
+    static COBBLE : i32 = 16;
+    static MOSSY_COBBLE : i32 = 17;
+    static GRANITE : i32 = 18;
+    static DIORITE : i32 = 19;
+    static ANDESITE : i32 = 20;
+    static STONE_BRICKS : i32 = 21;
+    static BRICKS : i32 = 22;
+    static SANDSTONE_TOP : i32 = 23;
+    static SANDSTONE_SIDE : i32 = 24;
+    static SANDSTONE_BOTTOM : i32 = 25;
+    static RED_SANDSTONE_TOP : i32 = 26;
+    static RED_SANDSTONE_SIDE : i32 = 27;
+    static TERRACOTTA : i32 = 28;
+    static TERRACOTTA_ORANGE : i32 = 29;
+    static TERRACOTTA_WHITE : i32 = 30;
+    static OAK_LOG_SIDE : i32 = 31;
+    static OAK_LOG_TOP : i32 = 32;
+    static OAK_LEAVES : i32 = 33;
+    static PLANKS : i32 = 34;
+    static BIRCH_LOG_SIDE : i32 = 35;
+    static BIRCH_LOG_TOP : i32 = 36;
+    static BIRCH_LEAVES : i32 = 37;
+    static SPRUCE_LOG_SIDE : i32 = 38;
+    static SPRUCE_LOG_TOP : i32 = 39;
+    static SPRUCE_LEAVES : i32 = 40;
+    static ACACIA_LOG_SIDE : i32 = 41;
+    static ACACIA_LOG_TOP : i32 = 42;
+    static ACACIA_LEAVES : i32 = 43;
+    static JUNGLE_LOG_SIDE : i32 = 44;
+    static JUNGLE_LOG_TOP : i32 = 45;
+    static JUNGLE_LEAVES : i32 = 46;
+    static DARK_OAK_LOG_SIDE : i32 = 47;
+    static DARK_OAK_LOG_TOP : i32 = 48;
+    static DARK_OAK_LEAVES : i32 = 49;
+    static CACTUS_SIDE : i32 = 50;
+    static CACTUS_TOP : i32 = 51;
+    static PUMPKIN_SIDE : i32 = 52;
+    static PUMPKIN_TOP : i32 = 53;
+    static MELON_SIDE : i32 = 54;
+    static MELON_TOP : i32 = 55;
+    static GLOWSTONE : i32 = 56;
+    static WATER : i32 = 57;
+    static COAL_ORE : i32 = 58;
+    static IRON_ORE : i32 = 59;
+    static GOLD_ORE : i32 = 60;
+    static DIAMOND_ORE : i32 = 61;
+    static REDSTONE_ORE : i32 = 62;
+    static EMERALD_ORE : i32 = 63;
+    static LAPIS_ORE : i32 = 64;
+    static GRASS_TOP_SAVANNA : i32 = 65;
+    static GRASS_SIDE_SAVANNA : i32 = 66;
+    static GRASS_TOP_JUNGLE : i32 = 67;
+    static GRASS_SIDE_JUNGLE : i32 = 68;
+    static GRASS_TOP_SWAMP : i32 = 69;
+    static GRASS_SIDE_SWAMP : i32 = 70;
+    static GRASS_TOP_TAIGA : i32 = 71;
+    static GRASS_SIDE_TAIGA : i32 = 72;
 
-// ── Expansion blocks: bamboo, cherry, giant mushrooms ───────
-const tlBambooSide : i32 = 73;
-const tlBambooTop : i32 = 74;
-const tlCherryLogSide : i32 = 75;
-const tlCherryLogTop : i32 = 76;
-const tlCherryLeaves : i32 = 77;
-const tlMushroomStem : i32 = 78;
-const tlRedMushroom : i32 = 79;
-const tlBrownMushroom : i32 = 80;
+    // ── Expansion blocks: bamboo, cherry, giant mushrooms ───────
+    static BAMBOO_SIDE : i32 = 73;
+    static BAMBOO_TOP : i32 = 74;
+    static CHERRY_LOG_SIDE : i32 = 75;
+    static CHERRY_LOG_TOP : i32 = 76;
+    static CHERRY_LEAVES : i32 = 77;
+    static MUSHROOM_STEM : i32 = 78;
+    static RED_MUSHROOM : i32 = 79;
+    static BROWN_MUSHROOM : i32 = 80;
 
-// ── Mob tiles (after the block tiles) ───────────────────────
-const tlChickenBody : i32 = 81;
-const tlChickenHead : i32 = 82;
-const tlSheepWool : i32 = 83;
-const tlSheepHead : i32 = 84;
-const tlCowBody : i32 = 85;
-const tlCowHead : i32 = 86;
-const tlCreeperSkin : i32 = 87;
-const tlCreeperFace : i32 = 88;
-const tlChargeSkin : i32 = 89;
-const tlChargeFace : i32 = 90;
-const tlPigBody : i32 = 91;
-const tlPigHead : i32 = 92;
+    // ── Mob tiles (after the block tiles) ───────────────────────
+    static CHICKEN_BODY : i32 = 81;
+    static CHICKEN_HEAD : i32 = 82;
+    static SHEEP_WOOL : i32 = 83;
+    static SHEEP_HEAD : i32 = 84;
+    static COW_BODY : i32 = 85;
+    static COW_HEAD : i32 = 86;
+    static CREEPER_SKIN : i32 = 87;
+    static CREEPER_FACE : i32 = 88;
+    static CHARGE_SKIN : i32 = 89;
+    static CHARGE_FACE : i32 = 90;
+    static PIG_BODY : i32 = 91;
+    static PIG_HEAD : i32 = 92;
 
-// ── Decoration tiles ────────────────────────────────────────
-const tlTorch : i32 = 93;
+    // ── Decoration tiles ────────────────────────────────────────
+    static TORCH : i32 = 93;
+}

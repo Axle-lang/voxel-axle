@@ -4,48 +4,51 @@
 // mesher bakes the per-face level and the renderer adds a warm boost to the
 // face brightness for each unit of light. Sky-light and day/night come later.
 
-const lightQueueCap : i32 = 65536;   // flood-fill stack capacity (cells)
+/** The block-light engine, ambient occlusion, sky access and the colour bounce. */
+class Light {
+    static QUEUE_CAP : i32 = 65536;   // flood-fill stack capacity (cells)
 
-// Face brightness vs. baked light level (0..15) follows an EXPONENTIAL falloff
-// (Minecraft-style): each level down multiplies brightness by lightFalloff, so
-// light dies fast with distance — and since the flood loses one level per block
-// travelled, a longer/zig-zag path goes much darker. lightMin is the darkness
-// floor; torchWarm tints block-lit faces warm against cool sky light.
-const lightMin : f64 = 0.05;
-const lightFalloff : f64 = 0.80;
-const torchWarm : f64 = 0.16;
+    // Face brightness vs. baked light level (0..15) follows an EXPONENTIAL falloff
+    // (Minecraft-style): each level down multiplies brightness by `Light::FALLOFF`, so
+    // light dies fast with distance — and since the flood loses one level per block
+    // travelled, a longer/zig-zag path goes much darker. `Light::MIN` is the darkness
+    // floor; `Light::TORCH_WARM` tints block-lit faces warm against cool sky light.
+    static MIN : f64 = 0.05;
+    static FALLOFF : f64 = 0.80;
+    static TORCH_WARM : f64 = 0.16;
 
-// Ambient occlusion strength for smooth lighting: how much a fully-occluded
-// face corner (AO level 0) is darkened. 0 = no AO, 1 = corner goes black at the
-// deepest seams. The bake stores 0..3 per corner; the renderer maps it to
-// 1 - aoStrength·(3-ao)/3.
-const aoStrength : f64 = 0.55;
+    // Ambient occlusion strength for smooth lighting: how much a fully-occluded
+    // face corner (AO level 0) is darkened. 0 = no AO, 1 = corner goes black at the
+    // deepest seams. The bake stores 0..3 per corner; the renderer maps it to
+    // 1 - `Light::AO_STRENGTH`·(3-ao)/3.
+    static AO_STRENGTH : f64 = 0.55;
 
-// Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
-// surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
-// skylight. The renderer blends between these by how directly a corner faces the
-// sun (and by daylight, so night stays neutral-blue moonlight). Multipliers
-// around 1.0 per channel.
-const sunTintR : f64 = 1.10;   // warm gold for full sun …
-const sunTintG : f64 = 1.02;
-const sunTintB : f64 = 0.82;
-const shadeTintR : f64 = 0.88;  // … cool blue for shade / ambient
-const shadeTintG : f64 = 0.94;
-const shadeTintB : f64 = 1.12;
+    // Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
+    // surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
+    // skylight. The renderer blends between these by how directly a corner faces the
+    // sun (and by daylight, so night stays neutral-blue moonlight). Multipliers
+    // around 1.0 per channel.
+    static SUN_TINT_R : f64 = 1.10;   // warm gold for full sun …
+    static SUN_TINT_G : f64 = 1.02;
+    static SUN_TINT_B : f64 = 0.82;
+    static SHADE_TINT_R : f64 = 0.88; // … cool blue for shade / ambient
+    static SHADE_TINT_G : f64 = 0.94;
+    static SHADE_TINT_B : f64 = 1.12;
 
-// Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
-// cell casts skyAOSamples rays over the upper hemisphere (up to skyAOReach
-// blocks); the escaped fraction darkens the ambient SKY light at render —
-// contact shadows in valleys, corners and under canopy. Baked & amortised
-// (skyAOChunksPerTick chunks/frame, once per chunk; static, no re-bake until an
-// edit). aoSkyMin is the darkest the sky term drops to at zero access.
-const skyAOSamples : i32 = 10;
-const skyAOReach : f64 = 14.0;
-const skyAOChunksPerTick : i32 = 3;
-const aoSkyMin : f64 = 0.45;
+    // Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
+    // cell casts `Light::SKY_AO_SAMPLES` rays over the upper hemisphere (up to `Light::SKY_AO_REACH`
+    // blocks); the escaped fraction darkens the ambient SKY light at render —
+    // contact shadows in valleys, corners and under canopy. Baked & amortised
+    // (`Light::SKY_AO_CHUNKS_PER_TICK` chunks/frame, once per chunk; static, no re-bake until an
+    // edit). `Light::AO_SKY_MIN` is the darkest the sky term drops to at zero access.
+    static SKY_AO_SAMPLES : i32 = 10;
+    static SKY_AO_REACH : f64 = 14.0;
+    static SKY_AO_CHUNKS_PER_TICK : i32 = 3;
+    static AO_SKY_MIN : f64 = 0.45;
 
-// One-bounce coloured indirect light (GI tint): the sky-AO rays that hit a
-// surface sample its albedo, so ambient bleeds the nearby colour (green under
-// canopy, warm by sand/wood). Hue-only (brightness stays the sky-AO's job).
-const bounceOn : bool = true;
-const bounceStrength : f64 = 0.5;   // how strongly surrounding colour tints ambient (0 = off)
+    // One-bounce coloured indirect light (GI tint): the sky-AO rays that hit a
+    // surface sample its albedo, so ambient bleeds the nearby colour (green under
+    // canopy, warm by sand/wood). Hue-only (brightness stays the sky-AO's job).
+    static BOUNCE_ON : bool = true;
+    static BOUNCE_STRENGTH : f64 = 0.5;   // how strongly surrounding colour tints ambient (0 = off)
+}

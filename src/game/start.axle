@@ -5,7 +5,7 @@
 // because `spawn` is a reserved keyword.)
 
 use crate::kernel::seams::VoxelQuery;
-use crate::config;
+use crate::configs::world::{ World };
 
 /**
  * A clearing to start in: the 3×3 columns around (gx, gz) are tree-free
@@ -58,14 +58,14 @@ fn openYaw(man : dyn VoxelQuery, sx : i32, sz : i32, baseH : i32) : f64 {
     let k : i32 = 0;
     while (k < 8) {
         let yaw : f64 = (k as f64) * 0.7853981634;
-        let fwx : f64 = 0.0 - Math::sin(yaw);
-        let fwz : f64 = Math::cos(yaw);
+        let fwx : f64 = 0.0 - yaw.sin();
+        let fwz : f64 = yaw.cos();
         let score : i32 = 0;
         let blocked : bool = false;
         let d : f64 = 1.5;
         while (d < 8.0 && !blocked) {
-            let cx : i32 = Math::floorToInt((sx as f64) + 0.5 + fwx * d) as i32;
-            let cz : i32 = Math::floorToInt((sz as f64) + 0.5 + fwz * d) as i32;
+            let cx : i32 = ((sx as f64) + 0.5 + fwx * d).floorToInt() as i32;
+            let cz : i32 = ((sz as f64) + 0.5 + fwz * d).floorToInt() as i32;
             let hc : i32 = man.columnHeight(cx, cz);
             if (man.collisionHeight(cx, cz) != hc || hc > baseH + 1) {
                 blocked = true;
@@ -85,9 +85,9 @@ fn openYaw(man : dyn VoxelQuery, sx : i32, sz : i32, baseH : i32) : f64 {
 
 /** The chosen start column (sx, sz) and its surface height `h`. */
 class Spawn {
-    sx : i32,
-    sz : i32,
-    h : i32,
+    pub(crate) sx : i32,
+    pub(crate) sz : i32,
+    pub(crate) h : i32,
 
     /**
      * Default the start to the origin column at sea level + 1.
@@ -95,7 +95,7 @@ class Spawn {
     constructor() {
         self.sx = 0;
         self.sz = 0;
-        self.h = config::seaLevel + 1;
+        self.h = World::SEA_LEVEL + 1;
     }
 
     /**
@@ -103,14 +103,14 @@ class Spawn {
      * hilltop. Falls back to sea level + 1 if nothing qualifies.
      * @param man  the voxel-query surface to read heights from
      */
-    fn find(mut self, man : dyn VoxelQuery) : void {
+    pub(crate) fn find(mut self, man : dyn VoxelQuery) : void {
         let bestH : i32 = 0 - 1;
         let gz : i32 = 0 - 40;
         while (gz <= 40) {
             let gx : i32 = 0 - 40;
             while (gx <= 40) {
                 let hh : i32 = man.columnHeight(gx, gz);
-                if (hh > config::seaLevel + 2 && hh > bestH && openSpot(man, gx, gz)) {
+                if (hh > World::SEA_LEVEL + 2 && hh > bestH && openSpot(man, gx, gz)) {
                     bestH = hh;
                     self.sx = gx;
                     self.sz = gz;
@@ -120,7 +120,7 @@ class Spawn {
             gz = gz + 1;
         }
         if (bestH < 0) {
-            bestH = config::seaLevel + 1;
+            bestH = World::SEA_LEVEL + 1;
         }
         self.h = bestH;
     }

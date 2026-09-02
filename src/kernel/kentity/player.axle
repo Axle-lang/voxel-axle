@@ -9,8 +9,10 @@
 use crate::kernel::kentity::entity::Entity;
 use crate::kernel::seams::VoxelQuery;
 use crate::kernel::kblock::blocks::{ isWater };
-use crate::config;
-use crate::config::{ Block };
+use crate::configs::blocks::{ Block };
+use crate::configs::health::{ Health };
+use crate::configs::hud::{ Hotbar };
+use crate::configs::motion::{ Motion };
 use crate::kernel::kmath::mathx::{ clampF64 };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 
@@ -39,35 +41,41 @@ trait Inventory {
     fn heldBlock(self) : Block;
 }
 
+/** Which rules the player plays by. */
+enum GameMode : i32 {
+    Survival,
+    Creative,   // free flight, no fall / drown damage
+}
+
 class Player : Entity, Looks, Survives, Inventory {
-    yaw : f64,
+    pub(crate) yaw : f64,
     pitch : f64,
-    siny : f64,
-    cosy : f64,
-    sinp : f64,
-    cosp : f64,
-    eye : Vec3,
-    airTicks : i32,
+    pub(crate) siny : f64,
+    pub(crate) cosy : f64,
+    pub(crate) sinp : f64,
+    pub(crate) cosp : f64,
+    pub(crate) eye : Vec3,
+    pub(crate) airTicks : i32,
     drownTick : i32,
-    sinceHurt : i32,
+    pub(crate) sinceHurt : i32,
     regenTick : i32,
-    creative : i32,   // 0 = survival, 1 = creative (fly)
-    headInWater : bool,   // eye voxel is water → underwater visuals / drowning
-    hotbar : Block[],   // block id held in each inventory slot
-    selected : i32,   // active hotbar slot (0-based)
+    pub(crate) mode : GameMode,
+    headInWater : bool,          // eye voxel is water → underwater visuals / drowning
+    pub(crate) hotbar : Block[], // block id held in each inventory slot
+    pub(crate) selected : i32,   // active hotbar slot (0-based)
 
     /** Construct a player at (x, y, z) with a stocked hotbar and full HP. */
     constructor(x : f64, y : f64, z : f64) {
         self.pos = vec3(x, y, z);
         self.velY = 0.0;
-        self.radius = config::playerRadius;
-        self.height = config::playerHeight;
+        self.radius = Motion::PLAYER_RADIUS;
+        self.height = Motion::PLAYER_HEIGHT;
         self.gravityScale = 1.0;
-        self.hp = config::playerMaxHp;
-        self.maxHp = config::playerMaxHp;
-        self.onGround = 0;
+        self.hp = Health::PLAYER_MAX_HP;
+        self.maxHp = Health::PLAYER_MAX_HP;
+        self.onGround = false;
         self.impact = 0.0;
-        self.grav = config::gravity;
+        self.grav = Motion::GRAVITY;
         self.apexY = y;
         self.stepUp = 0.0;
         self.inWater = false;
@@ -77,14 +85,14 @@ class Player : Entity, Looks, Survives, Inventory {
         self.cosy = 1.0;
         self.sinp = 0.0;
         self.cosp = 1.0;
-        self.eye = vec3(x, y + config::eyeHeight, z);
+        self.eye = vec3(x, y + Motion::EYE_HEIGHT, z);
         self.airTicks = 0;
-        self.drownTick = config::drownEveryFrames;
+        self.drownTick = Health::DROWN_EVERY_FRAMES;
         self.sinceHurt = 0;
-        self.regenTick = config::regenEveryFrames;
-        self.creative = 0;
+        self.regenTick = Health::REGEN_EVERY_FRAMES;
+        self.mode = GameMode::Survival;
         self.headInWater = false;
-        self.hotbar = malloc<Block>(config::hotbarSize);
+        self.hotbar = malloc<Block>(Hotbar::SIZE);
         self.hotbar[0] = Block::Grass;
         self.hotbar[1] = Block::Dirt;
         self.hotbar[2] = Block::Stone;
@@ -102,7 +110,7 @@ class Player : Entity, Looks, Survives, Inventory {
      * @param i  hotbar slot index to activate
      */
     fn selectSlot(mut self, i : i32) : void {
-        if (i >= 0 && i < config::hotbarSize) {
+        if (i >= 0 && i < Hotbar::SIZE) {
             self.selected = i;
         }
     }
@@ -119,23 +127,23 @@ class Player : Entity, Looks, Survives, Inventory {
      * Toggle survival ↔ creative. Creative enables free flight; entering
      * it cancels any fall, leaving it restores normal gravity.
      */
-    fn toggleGameMode(mut self) : void {
-        if (self.creative == 0) {
-            self.creative = 1;
+    pub(crate) fn toggleGameMode(mut self) : void {
+        if (self.mode == GameMode::Survival) {
+            self.mode = GameMode::Creative;
             self.velY = 0.0;
         } else {
-            self.creative = 0;
+            self.mode = GameMode::Survival;
         }
     }
 
     /** Recompute look trig and the eye position the renderer projects from. */
     fn refresh(mut self) : void {
-        self.siny = Math::sin(self.yaw);
-        self.cosy = Math::cos(self.yaw);
-        self.sinp = Math::sin(self.pitch);
-        self.cosp = Math::cos(self.pitch);
+        self.siny = self.yaw.sin();
+        self.cosy = self.yaw.cos();
+        self.sinp = self.pitch.sin();
+        self.cosp = self.pitch.cos();
         self.eye.x = self.pos.x;
-        self.eye.y = self.pos.y + config::eyeHeight - self.stepUp;
+        self.eye.y = self.pos.y + Motion::EYE_HEIGHT - self.stepUp;
         self.eye.z = self.pos.z;
     }
 
@@ -146,14 +154,14 @@ class Player : Entity, Looks, Survives, Inventory {
      */
     fn look(mut self, dyaw : f64, dpitch : f64) : void {
         self.yaw = self.yaw + dyaw;
-        self.pitch = clampF64(self.pitch + dpitch, 0.0 - config::pitchMax, config::pitchMax);
+        self.pitch = clampF64(self.pitch + dpitch, 0.0 - Motion::PITCH_MAX, Motion::PITCH_MAX);
     }
 
     /**
      * Damage that also restarts the regeneration delay.
      * @param d  points of damage to apply
      */
-    fn hurt(mut self, d : i32) : void {
+    pub(crate) fn hurt(mut self, d : i32) : void {
         self.damage(d);
         self.sinceHurt = 0;
     }
@@ -162,7 +170,7 @@ class Player : Entity, Looks, Survives, Inventory {
      * Is the eye below sea level (so the player is submerged)?
      * @return true when the eye height is under the sea level
      */
-    fn isUnderwater(self) : bool {
+    pub(crate) fn isUnderwater(self) : bool {
         return self.headInWater;
     }
 
@@ -178,9 +186,9 @@ class Player : Entity, Looks, Survives, Inventory {
      * @param up      whether the up / jump input is held
      * @param down    whether the down input is held
      */
-    fn update(mut self, world : dyn VoxelQuery, fwd : f64, strafe : f64, sprint : bool,
+    pub(crate) fn update(mut self, world : dyn VoxelQuery, fwd : f64, strafe : f64, sprint : bool,
         up : bool, down : bool) : void {
-        if (self.creative == 1) {
+        if (self.mode == GameMode::Creative) {
             self.fly(world, fwd, strafe, sprint, up, down);
             self.refresh();
             return;
@@ -191,17 +199,17 @@ class Player : Entity, Looks, Survives, Inventory {
         // Submerged = the eye's own voxel is water, at any altitude (not the
         // absolute sea level) — this is what drives the underwater visuals and
         // drowning, so a pool you dug on a hill counts too.
-        let ex : i32 = Math::floorToInt(self.pos.x) as i32;
-        let ey : i32 = Math::floorToInt(self.pos.y + config::eyeHeight) as i32;
-        let ez : i32 = Math::floorToInt(self.pos.z) as i32;
+        let ex : i32 = self.pos.x.floorToInt() as i32;
+        let ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
+        let ez : i32 = self.pos.z.floorToInt() as i32;
         let submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
         self.headInWater = submerged;
 
-        let speed : f64 = config::walkSpeed;
+        let speed : f64 = Motion::WALK_SPEED;
         if (inWater) {
-            speed = config::swimSpeed;
+            speed = Motion::SWIM_SPEED;
         } else if (sprint) {
-            speed = config::sprintSpeed;
+            speed = Motion::SPRINT_SPEED;
         }
 
         let dx : f64 = (0.0 - self.siny) * fwd + self.cosy * strafe;
@@ -214,13 +222,13 @@ class Player : Entity, Looks, Survives, Inventory {
             // only while Space is held). The horizontal current that carries
             // every entity is applied in Entity.tick.
             if (up) {
-                self.velY = self.velY + config::swimUpAccel;
+                self.velY = self.velY + Motion::SWIM_UP_ACCEL;
             }
             if (down) {
-                self.velY = self.velY - config::swimDownSpeed;
+                self.velY = self.velY - Motion::SWIM_DOWN_SPEED;
             }
-        } else if (up && self.onGround == 1) {
-            self.velY = config::jumpVel;
+        } else if (up && self.onGround) {
+            self.velY = Motion::JUMP_VEL;
         }
 
         self.tick(world, dx, dz);
@@ -241,14 +249,14 @@ class Player : Entity, Looks, Survives, Inventory {
      */
     fn fly(mut self, world : dyn VoxelQuery, fwd : f64, strafe : f64, sprint : bool,
         up : bool, down : bool) : void {
-        let speed : f64 = config::flySpeed;
+        let speed : f64 = Motion::FLY_SPEED;
         if (sprint) {
-            speed = config::flySprintSpeed;
+            speed = Motion::FLY_SPRINT_SPEED;
         }
         let dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
         let dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
         self.velY = 0.0;
-        self.onGround = 0;
+        self.onGround = false;
         // Horizontal move with voxel collision (no auto-step in flight).
         if (!self.collidesAt(world, self.pos.x + dx, self.pos.y, self.pos.z)) {
             self.pos.x = self.pos.x + dx;
@@ -257,18 +265,18 @@ class Player : Entity, Looks, Survives, Inventory {
             self.pos.z = self.pos.z + dz;
         }
         if (up) {
-            self.pos.y = self.pos.y + config::flyVertSpeed;
+            self.pos.y = self.pos.y + Motion::FLY_VERT_SPEED;
         }
         if (down) {
-            self.pos.y = self.pos.y - config::flyVertSpeed;
+            self.pos.y = self.pos.y - Motion::FLY_VERT_SPEED;
         }
         // Don't sink into the ground: if the body intersects blocks, lift
         // the feet onto the highest support beneath them.
         if (self.collidesAt(world, self.pos.x, self.pos.y, self.pos.z)) {
             let top : f64 = self.supportTop(world, self.pos.x, self.pos.z,
-                Math::floorToInt(self.pos.y) as i32, Math::floorToInt(self.pos.y + self.height) as i32);
+                self.pos.y.floorToInt() as i32, (self.pos.y + self.height).floorToInt() as i32);
             self.pos.y = top;
-            self.onGround = 1;
+            self.onGround = true;
         }
     }
 
@@ -282,8 +290,8 @@ class Player : Entity, Looks, Survives, Inventory {
 
         // Water cushions a fall; on land, falling far hurts (`impact` is
         // the distance dropped from the apex).
-        if (!water && self.impact > config::safeFallDist) {
-            let dmg : i32 = Math::floorToInt((self.impact - config::safeFallDist) * config::fallDamagePerBlock) as i32;
+        if (!water && self.impact > Health::SAFE_FALL_DIST) {
+            let dmg : i32 = ((self.impact - Health::SAFE_FALL_DIST) * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
             if (dmg > 0) {
                 self.hurt(dmg);
             }
@@ -291,23 +299,23 @@ class Player : Entity, Looks, Survives, Inventory {
 
         if (water) {
             self.airTicks = self.airTicks + 1;
-            if (self.airTicks > config::drownGraceFrames) {
+            if (self.airTicks > Health::DROWN_GRACE_FRAMES) {
                 self.drownTick = self.drownTick - 1;
                 if (self.drownTick <= 0) {
                     self.hurt(1);
-                    self.drownTick = config::drownEveryFrames;
+                    self.drownTick = Health::DROWN_EVERY_FRAMES;
                 }
             }
         } else {
             self.airTicks = 0;
-            self.drownTick = config::drownEveryFrames;
+            self.drownTick = Health::DROWN_EVERY_FRAMES;
         }
 
-        if (!water && self.hp < self.maxHp && self.sinceHurt > config::regenDelayFrames) {
+        if (!water && self.hp < self.maxHp && self.sinceHurt > Health::REGEN_DELAY_FRAMES) {
             self.regenTick = self.regenTick - 1;
             if (self.regenTick <= 0) {
                 self.heal(1);
-                self.regenTick = config::regenEveryFrames;
+                self.regenTick = Health::REGEN_EVERY_FRAMES;
             }
         }
     }

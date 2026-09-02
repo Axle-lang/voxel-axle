@@ -7,11 +7,12 @@
 // (back) edges are culled against the z-buffer so the box reads as an outline
 // on the block, not a see-through cage.
 
-use sdl_platform::{allocBytes, getF64, setF64, putPixel, rgb};
+use smalt::Mem;
+use smalt::Color;
 use crate::kernel::krender::raster::{ FrameBuf, Camera, Projected };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::kentity::player::Player;
-use crate::config;
+use crate::configs::screen::{ Screen };
 
 class Selection {
     csx : i64,   // projected screen x / y / inverse depth for the 8 box corners
@@ -20,9 +21,9 @@ class Selection {
 
     /** Allocate the 8-corner projection scratch. */
     constructor() {
-        self.csx = allocBytes(8 * 8);
-        self.csy = allocBytes(8 * 8);
-        self.ciz = allocBytes(8 * 8);
+        self.csx = Mem::take(8 * 8);
+        self.csy = Mem::take(8 * 8);
+        self.ciz = Mem::take(8 * 8);
     }
 
     /**
@@ -35,12 +36,12 @@ class Selection {
      */
     fn projCorner(self, cam : Camera, w : Vec3, k : i32) : bool {
         let pr : Projected = cam.project(w);
-        if (pr.cz < config::nearPlane) {
+        if (pr.cz < Screen::NEAR_PLANE) {
             return false;
         }
-        setF64(self.csx, k, pr.sx);
-        setF64(self.csy, k, pr.sy);
-        setF64(self.ciz, k, pr.iz);
+        Mem::putRealOf(self.csx, k, pr.sx);
+        Mem::putRealOf(self.csy, k, pr.sy);
+        Mem::putRealOf(self.ciz, k, pr.iz);
         return true;
     }
 
@@ -67,8 +68,8 @@ class Selection {
                     let idx : i32 = yy * w + xx;
                     // A hair in front of the surface it sits on; well in front of
                     // nothing means a back edge stays hidden.
-                    if (iz * 1.004 >= getF64(zbuf, idx)) {
-                        putPixel(pixels, idx, color);
+                    if (iz * 1.004 >= Mem::realOf(zbuf, idx)) {
+                        Mem::putWordOf(pixels, idx, color);
                     }
                 }
                 xx = xx + 1;
@@ -85,15 +86,15 @@ class Selection {
      * @param color  line color
      */
     fn selEdge(self, fb : FrameBuf, a : i32, b : i32, color : i32) : void {
-        let ax : f64 = getF64(self.csx, a);
-        let bx : f64 = getF64(self.csx, b);
+        let ax : f64 = Mem::realOf(self.csx, a);
+        let bx : f64 = Mem::realOf(self.csx, b);
         if (ax < 0.0 - 1.0e8 || bx < 0.0 - 1.0e8) {
             return;
         }
-        let ay : f64 = getF64(self.csy, a);
-        let by : f64 = getF64(self.csy, b);
-        let aiz : f64 = getF64(self.ciz, a);
-        let biz : f64 = getF64(self.ciz, b);
+        let ay : f64 = Mem::realOf(self.csy, a);
+        let by : f64 = Mem::realOf(self.csy, b);
+        let aiz : f64 = Mem::realOf(self.ciz, a);
+        let biz : f64 = Mem::realOf(self.ciz, b);
         let ddx : f64 = bx - ax;
         let ddy : f64 = by - ay;
         let adx : f64 = ddx;
@@ -104,9 +105,9 @@ class Selection {
         if (ady < 0.0) {
             ady = 0.0 - ady;
         }
-        let steps : i32 = Math::floorToInt(adx) as i32;
-        if (Math::floorToInt(ady) as i32 > steps) {
-            steps = Math::floorToInt(ady) as i32;
+        let steps : i32 = adx.floorToInt() as i32;
+        if (ady.floorToInt() as i32 > steps) {
+            steps = ady.floorToInt() as i32;
         }
         if (steps < 1) {
             steps = 1;
@@ -115,8 +116,8 @@ class Selection {
         let i : i32 = 0;
         while (i <= steps) {
             let t : f64 = (i as f64) * inv;
-            let px : i32 = Math::floorToInt(ax + ddx * t) as i32;
-            let py : i32 = Math::floorToInt(ay + ddy * t) as i32;
+            let px : i32 = (ax + ddx * t).floorToInt() as i32;
+            let py : i32 = (ay + ddy * t).floorToInt() as i32;
             let iz : f64 = aiz + (biz - aiz) * t;
             self.selDot(fb, px, py, iz, color);
             i = i + 1;
@@ -136,7 +137,7 @@ class Selection {
      * @param topH  the block's real height (1.0 full, snowDepth for a thin snow
      *              layer) so the outline hugs the true box, not a cube
      */
-    fn draw(self, p : Player, fb : FrameBuf, hw : f64, bx : i32, by : i32, bz : i32, topH : f64) : void {
+    pub(crate) fn draw(self, p : Player, fb : FrameBuf, hw : f64, bx : i32, by : i32, bz : i32, topH : f64) : void {
         let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: hw };
         let k : i32 = 0;
         while (k < 8) {
@@ -144,11 +145,11 @@ class Selection {
             let cdy : f64 = ((k / 2) & 1) as f64 * topH;
             let cdz : f64 = ((k / 4) & 1) as f64;
             if (!self.projCorner(cam, vec3((bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz), k)) {
-                setF64(self.csx, k, 0.0 - 1.0e9);
+                Mem::putRealOf(self.csx, k, 0.0 - 1.0e9);
             }
             k = k + 1;
         }
-        let col : i32 = rgb(36, 38, 44);
+        let col : i32 = Color::packBytes(36, 38, 44);
         self.selEdge(fb, 0, 1, col);
         self.selEdge(fb, 2, 3, col);
         self.selEdge(fb, 4, 5, col);

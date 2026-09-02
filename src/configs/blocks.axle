@@ -1,12 +1,13 @@
 // configs::blocks — the block enum. Each variant is a block id used by the
-// voxel field, the mesher, the renderer (via world::blocks::tileFor / colorOf)
+// voxel field, the mesher, the renderer (via `kblock::blocks::tileFor` / `color`)
 // and the generator. The backing i32 discriminants (0.. in declaration order)
 // are the on-field ids; nothing relies on a specific number, only on identity.
 //
-// Add a block: a variant here, an atlas tile in bake_atlas.py (+ its tl* index
-// in configs::atlas), a tile mapping in world::blocks::tileFor, a fallback
-// colour in colorOf, and a placement in a biome / the generator.
+// Add a block: a variant here, an atlas tile in bake_atlas.py (+ its `Tile` index
+// in `configs::atlas`), a tile mapping in `kblock::blocks::tileFor`, a fallback
+// colour in `color`, and a placement in a biome / the generator.
 
+/** A block id: what occupies one voxel cell. */
 enum Block : i32 {
     Air,
     Grass,
@@ -15,8 +16,8 @@ enum Block : i32 {
     Sand,
     Snow,
     Water,
-    Wood,          // oak log
-    Leaves,        // oak leaves
+    Wood,   // oak log
+    Leaves, // oak leaves
     Gravel,
     // Soils
     CoarseDirt,

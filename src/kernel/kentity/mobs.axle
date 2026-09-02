@@ -15,21 +15,24 @@ use crate::kernel::kworld::manager::ChunkManager;
 use crate::kernel::kworld::blocksim::BlockSim;
 use crate::kernel::kworld::noise::hash2;
 use crate::kernel::kio::sfx::AudioManager;
-use crate::config;
+use crate::configs::audio::{ Audio };
+use crate::configs::mobs::{ Mobs };
+use crate::configs::noise::{ Noise };
+use crate::configs::world::{ World };
 
 class MobManager {
-    actors : Mob[],         // every live creature, stored by its concrete base
-                            // (freeable pointers); driven through the Actor traits
-                            // by viewing each element as `dyn Actor`
-    n : i32,                // live count (actors[0..n) are valid)
+    actors : Mob[],             // every live creature, stored by its concrete base
+                                // (freeable pointers); driven through the Actor traits
+                                // by viewing each element as `dyn Actor`
+    n : i32,                    // live count (actors[0..n) are valid)
     rc : f64,
     spawner : dyn MobSpawner[], // app factory that builds the concrete species,
-                            // held in a one-slot array: a trait-typed field
-                            // cannot store a class implementer (E0709)
+                                // held in a one-slot array: a trait-typed field
+                                // cannot store a class implementer (E0709)
 
     /** Create an empty mob manager with the single actor pool allocated. */
     constructor() {
-        self.actors = malloc<Mob>(config::mobCap);
+        self.actors = malloc<Mob>(Mobs::CAP);
         self.spawner = malloc<dyn MobSpawner>(1);
         self.n = 0;
         self.rc = 9.0;
@@ -41,7 +44,7 @@ class MobManager {
      * calls it to populate the world, so the kernel never names a species.
      * @param s  the spawner implementation (ownership taken)
      */
-    fn attachSpawner(mut self, own s : dyn MobSpawner) : void {
+    pub(crate) fn attachSpawner(mut self, own s : dyn MobSpawner) : void {
         self.spawner[0] = s;
     }
 
@@ -50,9 +53,9 @@ class MobManager {
      * Next pseudo-random value in [0,1).
      * @return the next pseudo-random value in [0,1)
      */
-    fn rand(mut self) : f64 {
+    pub(crate) fn rand(mut self) : f64 {
         self.rc = self.rc + 1.0;
-        return hash2(self.rc, self.rc * 1.3 + 7.0, config::seedI + 4242);
+        return hash2(self.rc, self.rc * 1.3 + 7.0, Noise::SEED + 4242);
     }
 
     // ── Census & render access ──
@@ -68,7 +71,7 @@ class MobManager {
      * Live actor count, for the renderer's billboard pass.
      * @return the number of live actors
      */
-    fn actorCount(self) : i32 {
+    pub(crate) fn actorCount(self) : i32 {
         return self.n;
     }
 
@@ -78,7 +81,7 @@ class MobManager {
      * @param i  index into the actor pool
      * @return the actor as an ActorVisual
      */
-    fn actorAt(self, i : i32) : dyn ActorVisual {
+    pub(crate) fn actorAt(self, i : i32) : dyn ActorVisual {
         return self.actors[i];
     }
 
@@ -91,29 +94,29 @@ class MobManager {
      * @return true if a dry column was found and a creature placed
      */
     fn spawnOne(mut self, world : ChunkManager, player : Player) : bool {
-        if (self.n >= config::mobCap) {
+        if (self.n >= Mobs::CAP) {
             return false;
         }
         // Pick a random bearing on the spawn ring around the player (6.2831853 = 2π).
         let angle : f64 = self.rand() * 6.2831853;
-        let cosA : f64 = Math::cos(angle);
-        let sinA : f64 = Math::sin(angle);
+        let cosA : f64 = angle.cos();
+        let sinA : f64 = angle.sin();
         // Spawn out of sight: skip directions inside the camera's forward
         // cone so creatures never pop into existence in front of the player.
         let fwdx : f64 = 0.0 - player.siny;
         let fwdz : f64 = player.cosy;
-        if (cosA * fwdx + sinA * fwdz > config::mobSpawnFovDot) {
+        if (cosA * fwdx + sinA * fwdz > Mobs::SPAWN_FOV_DOT) {
             return false;
         }
         // Distance out: a random radius within the [min, radius] ring band.
-        let ringSpan : f64 = (config::mobSpawnRadius - config::mobSpawnMin) as f64;
-        let ringRadius : f64 = (config::mobSpawnMin as f64) + self.rand() * ringSpan;
+        let ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
+        let ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
         let worldX : f64 = player.pos.x + cosA * ringRadius;
         let worldZ : f64 = player.pos.z + sinA * ringRadius;
-        let cellX : i32 = Math::floorToInt(worldX) as i32;
-        let cellZ : i32 = Math::floorToInt(worldZ) as i32;
+        let cellX : i32 = worldX.floorToInt() as i32;
+        let cellZ : i32 = worldZ.floorToInt() as i32;
         let surfaceY : i32 = world.columnHeight(cellX, cellZ);
-        if (surfaceY <= config::seaLevel) {
+        if (surfaceY <= World::SEA_LEVEL) {
             return false;
         }
         // Only open, solid ground: reject columns carrying a tree trunk,
@@ -140,7 +143,7 @@ class MobManager {
      * @return the delay in frames
      */
     fn nextVocalDelay(mut self) : i32 {
-        return config::mobVocalMin + Math::floorToInt(self.rand() * (config::mobVocalRand as f64)) as i32;
+        return Audio::MOB_VOCAL_MIN + (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
     }
 
     // ── Population upkeep (cull + respawn) ──
@@ -154,7 +157,7 @@ class MobManager {
     fn cull(self, a : dyn Actor, player : Player) : bool {
         let dx : f64 = a.pos().x - player.pos.x;
         let dz : f64 = a.pos().z - player.pos.z;
-        let despawn2 : f64 = config::mobDespawnDist * config::mobDespawnDist;
+        let despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
         return a.deathDone() || (!a.isDying() && dx * dx + dz * dz > despawn2);
     }
 
@@ -170,7 +173,7 @@ class MobManager {
      * @param sfx     the audio manager for mob voices / creeper sounds
      * @param sim     the block-update sim a creeper blast wakes around its crater
      */
-    fn update(mut self, world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
+    pub(crate) fn update(mut self, world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
         let i : i32 = 0;
         while (i < self.n) {
             let a : dyn Actor = self.actors[i];
@@ -191,14 +194,14 @@ class MobManager {
 
     /**
      * Cull distant / finished mobs and top the population back up. Cheap but
-     * not urgent: the scheduler calls this every `config::maintainTicks`
+     * not urgent: the scheduler calls this every `World::MAINTAIN_TICKS`
      * ticks rather than every tick — spawning is random and out of view, so
      * a few times per second is indistinguishable from per-tick while cutting
-     * the spawn-ring probing ~`maintainTicks`×.
+     * the spawn-ring probing ~`World::MAINTAIN_TICKS`×.
      * @param world   the chunk manager that provides column heights
      * @param player  the player whose position bounds spawn / cull ranges
      */
-    fn maintain(mut self, world : ChunkManager, player : Player) : void {
+    pub(crate) fn maintain(mut self, world : ChunkManager, player : Player) : void {
         // Swap-with-last compaction over the single pool. The evicted mob's heap
         // object is freed before its slot is overwritten — otherwise every
         // despawn / death would leak one Mob for the whole session.
@@ -214,7 +217,7 @@ class MobManager {
         }
 
         let tries : i32 = 0;
-        while (self.n < config::mobTargetCount && tries < 16) {
+        while (self.n < Mobs::TARGET_COUNT && tries < 16) {
             self.spawnOne(world, player);
             tries = tries + 1;
         }
@@ -251,10 +254,10 @@ class MobManager {
      * @param sfx     the audio manager for the hurt sound
      * @return the struck mob's kind, or -1 if nothing was hit
      */
-    fn attackNearest(mut self, player : Player, sfx : AudioManager) : i32 {
+    pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager) : i32 {
         let fwdx : f64 = 0.0 - player.siny;
         let fwdz : f64 = player.cosy;
-        let bestD : f64 = config::attackRange * config::attackRange;
+        let bestD : f64 = Mobs::ATTACK_RANGE * Mobs::ATTACK_RANGE;
         let bestIdx : i32 = 0 - 1;
         let i : i32 = 0;
         while (i < self.n) {
@@ -272,7 +275,7 @@ class MobManager {
             return 0 - 1;
         }
         let target : dyn Actor = self.actors[bestIdx];
-        target.damage(config::attackDamage);
+        target.damage(Mobs::ATTACK_DAMAGE);
         target.flashHurt();
         sfx.mobHurt(target.kind(), target.pos(), self.rand());
         let kind : i32 = target.kind() as i32;

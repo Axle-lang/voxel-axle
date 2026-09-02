@@ -17,8 +17,9 @@
 
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::config;
-use crate::config::{ Block, TreeKind };
+use crate::configs::blocks::{ Block };
+use crate::configs::trees::{ TreeKind };
+use crate::configs::world::{ World };
 
 /**
  * Stamp one leaf voxel of `leafId`, but only into air (never carving terrain).
@@ -30,11 +31,11 @@ use crate::config::{ Block, TreeKind };
  * @param leafId  the leaf block id
  */
 fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
-    let s : i32 = config::chunkSize;
+    let s : i32 = World::CHUNK_SIZE;
     if (pos.x < 0 - 1 || pos.x > s || pos.z < 0 - 1 || pos.z > s) {
         return;
     }
-    if (pos.y < 0 || pos.y >= config::worldHeight) {
+    if (pos.y < 0 || pos.y >= World::HEIGHT) {
         return;
     }
     if (vs.getVox(slot, pos) == Block::Air) {
@@ -81,7 +82,7 @@ fn stampTrunk(vs : VoxStore, slot : i32, origin : IVec3, height : i32, woodId : 
 }
 
 /**
- * Stamp a tree of `kind` (config::tree*) with base cell `origin` and trunk
+ * Stamp a tree of `kind` (a `TreeKind`) with base cell `origin` and trunk
  * `height` (the biome's `treeHt`). Leaves first, then the trunk overwrites its
  * column. Shapes are fixed (no RNG) so the two chunks sharing a border tree
  * stamp it identically.

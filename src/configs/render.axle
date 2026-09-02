@@ -2,69 +2,72 @@
 //
 // Far faces fade to the sky colour so the distance dissolves softly
 // (Minecraft-style) instead of shimmering as a mush of aliased texels at the
-// render edge. Fog runs from `fogStart` to `fogEnd` blocks of depth.
+// render edge. Fog runs from `Render::FOG_START` to `Render::FOG_END` blocks of depth.
 
-const renderDist : f64 = 92.0;
-const skyR : i32 = 150;
-const skyG : i32 = 198;
-const skyB : i32 = 240;
-const fogStart : f64 = 66.0;
-const fogEnd : f64 = 90.0;
+/** Draw distance, sky and fog, the directional light, and the post passes. */
+class Render {
+    static DRAW_DIST : f64 = 92.0;
+    static SKY_R : i32 = 150;
+    static SKY_G : i32 = 198;
+    static SKY_B : i32 = 240;
+    static FOG_START : f64 = 66.0;
+    static FOG_END : f64 = 90.0;
 
-// ── Directional light ───────────────────────────────────────
-const lightX : f64 = 0.35;
-const lightY : f64 = 0.86;
-const lightZ : f64 = 0.37;
-const ambient : f64 = 0.32;  // lower = darker shadow side / cast shadows (more contrast)
-// Fraction of the direct-sun term a cast-shadowed face keeps (0 = flat ambient /
-// fully aggressive, 1 = no shadow). Higher = softer / less aggressive shadows.
-const shadowKeep : f64 = 0.20;
+    // ── Directional light ───────────────────────────────────────
+    static LIGHT_X : f64 = 0.35;
+    static LIGHT_Y : f64 = 0.86;
+    static LIGHT_Z : f64 = 0.37;
+    static AMBIENT : f64 = 0.32;  // lower = darker shadow side / cast shadows (more contrast)
+    // Fraction of the direct-sun term a cast-shadowed face keeps (0 = flat ambient /
+    // fully aggressive, 1 = no shadow). Higher = softer / less aggressive shadows.
+    static SHADOW_KEEP : f64 = 0.20;
 
-// ── Atmospheric sky ─────────────────────────────────────────
-// The flat sky clear is replaced by a per-pixel gradient: a deeper zenith, a
-// paler/warmer horizon, and a warm glow around the sun (a soft halo plus a
-// tight bright core). Tints multiply / lift the day/night sky colour so the
-// whole thing still tracks dawn → noon → dusk.
-const skyZenithR : f64 = 0.72;   // zenith = skyCol × these (deeper, bluer up high)
-const skyZenithG : f64 = 0.82;
-const skyZenithB : f64 = 1.04;
-const skyHorizonLift : f64 = 0.40;  // horizon fades toward a pale warm white by this much
-const skyHaloR : i32 = 255;      // warm sun-halo colour added around the sun
-const skyHaloG : i32 = 214;
-const skyHaloB : i32 = 138;
-const skyHaloStrength : f64 = 0.55;  // broad halo intensity (applied to cos⁶ around the sun)
-const skyCoreThresh : f64 = 0.9992;  // cos(view,sun) above this = the tight bright core (higher = smaller)
-const skyCoreStrength : f64 = 0.45;  // brightness of that tight core (lower = less white-out when facing the sun)
+    // ── Atmospheric sky ─────────────────────────────────────────
+    // The flat sky clear is replaced by a per-pixel gradient: a deeper zenith, a
+    // paler/warmer horizon, and a warm glow around the sun (a soft halo plus a
+    // tight bright core). Tints multiply / lift the day/night sky colour so the
+    // whole thing still tracks dawn → noon → dusk.
+    static SKY_ZENITH_R : f64 = 0.72;      // zenith = skyCol × these (deeper, bluer up high)
+    static SKY_ZENITH_G : f64 = 0.82;
+    static SKY_ZENITH_B : f64 = 1.04;
+    static SKY_HORIZON_LIFT : f64 = 0.40;  // horizon fades toward a pale warm white by this much
+    static SKY_HALO_R : i32 = 255;         // warm sun-halo colour added around the sun
+    static SKY_HALO_G : i32 = 214;
+    static SKY_HALO_B : i32 = 138;
+    static SKY_HALO_STRENGTH : f64 = 0.55; // broad halo intensity (applied to cos⁶ around the sun)
+    static SKY_CORE_THRESH : f64 = 0.9992; // cos(view,sun) above this = the tight bright core (higher = smaller)
+    static SKY_CORE_STRENGTH : f64 = 0.45; // brightness of that tight core (lower = less white-out when facing the sun)
 
-// ── Volumetric god-rays (crepuscular light shafts) ──────────
-// A screen-space radial scatter from the sun's projected position: each pixel
-// marches toward the sun summing the visible-sky mask, so terrain silhouettes
-// carve bright warm shafts. Cost is O(w·h·samples) per frame — keep samples
-// modest. Disabled below the horizon.
-const godRaysOn : bool = true;
-const godRaySamples : i32 = 24;     // steps per pixel toward the sun
-const godRayDecay : f64 = 0.92;     // per-step attenuation of the accumulated shaft
-const godRayWeight : f64 = 0.42;    // overall shaft brightness (exposure)
-const godRayDensity : f64 = 0.92;   // fraction of the pixel→sun distance the march spans
+    // ── Volumetric god-rays (crepuscular light shafts) ──────────
+    // A screen-space radial scatter from the sun's projected position: each pixel
+    // marches toward the sun summing the visible-sky mask, so terrain silhouettes
+    // carve bright warm shafts. Cost is O(w·h·samples) per frame — keep samples
+    // modest. Disabled below the horizon.
+    static GOD_RAYS_ON : bool = true;
+    static GOD_RAY_SAMPLES : i32 = 24;   // steps per pixel toward the sun
+    static GOD_RAY_DECAY : f64 = 0.92;   // per-step attenuation of the accumulated shaft
+    static GOD_RAY_WEIGHT : f64 = 0.42;  // overall shaft brightness (exposure)
+    static GOD_RAY_DENSITY : f64 = 0.92; // fraction of the pixel→sun distance the march spans
 
-// ── Bloom (soft glow on bright pixels) ──────────────────────
-// Bright areas (sun, halo, god-rays, water glints, snow) bleed a soft warm glow.
-// Extracted above a luminance threshold at half resolution, blurred, and added
-// back — gives the image a honeyed, sunlit feel without touching midtones.
-const bloomOn : bool = true;
-const bloomThreshold : f64 = 190.0;  // luminance (0..255) above which a pixel blooms
-const bloomStrength : f64 = 0.68;    // how strongly the blurred glow is added back
-const bloomRadius : i32 = 5;         // half-res blur radius (larger = wider glow)
-const bloomIters : i32 = 2;          // separable blur passes (smoother glow)
+    // ── Bloom (soft glow on bright pixels) ──────────────────────
+    // Bright areas (sun, halo, god-rays, water glints, snow) bleed a soft warm glow.
+    // Extracted above a luminance threshold at half resolution, blurred, and added
+    // back — gives the image a honeyed, sunlit feel without touching midtones.
+    static BLOOM_ON : bool = true;
+    static BLOOM_THRESHOLD : f64 = 190.0; // luminance (0..255) above which a pixel blooms
+    static BLOOM_STRENGTH : f64 = 0.68;   // how strongly the blurred glow is added back
+    static BLOOM_RADIUS : i32 = 5;        // half-res blur radius (larger = wider glow)
+    static BLOOM_ITERS : i32 = 2;         // separable blur passes (smoother glow)
 
-// Worker threads for the full-screen post passes (sky gradient, god-rays,
-// bloom): each is split into this many horizontal row bands (disjoint output →
-// race-free), spawned per frame and joined. 1 = single-threaded.
-const postThreads : i32 = 4;
+    // Worker threads for the full-screen post passes (sky gradient, god-rays,
+    // bloom): each is split into this many horizontal row bands (disjoint output →
+    // race-free), spawned per frame and joined. 1 = single-threaded.
+    static POST_THREADS : i32 = 4;
 
-// Tiled world rasteriser: the world pass queues up to triQueueCap triangles,
-// then rasterTiles worker threads each fill a vertical screen-column band (so
-// the z-buffer regions are disjoint — race-free). Excess triangles past the cap
-// are dropped (logged once). Bands split the WIDTH, post passes split the HEIGHT.
-const triQueueCap : i32 = 220000;
-const rasterTiles : i32 = 4;
+    // Tiled world rasteriser: the world pass queues up to `Render::TRI_QUEUE_CAP` triangles,
+    // then `Render::RASTER_TILES` worker threads each fill a vertical screen-column band (so
+    // the z-buffer regions are disjoint — race-free). Excess triangles past the cap
+    // are dropped (logged once). Bands split the WIDTH, post passes split the HEIGHT.
+    static TRI_QUEUE_CAP : i32 = 220000;
+    static RASTER_TILES : i32 = 4;
+}

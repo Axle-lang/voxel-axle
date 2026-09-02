@@ -3,13 +3,10 @@ name = "voxel"
 version = "0.1.0"
 
 [dependencies]
-# SDL2 + libc platform layer (window, renderer, audio mixer, raw memory,
-# file IO). Its whole src/ compiles together with ours; `use sdl_platform::X`.
-sdl_platform = { path = "vendor/sdl_platform" }
-
-[link]
-libs  = ["SDL2"]
-# `lib` has SDL2.lib (used to link); `bin` has SDL2.dll. Axle's build
-# auto-copies <lib>.dll next to the binary from these paths, so listing
-# `bin` makes `axle build` drop SDL2.dll into target/ on every build.
-paths = ["C:/vcpkg/installed/x64-windows/lib", "C:/vcpkg/installed/x64-windows/bin"]
+# The platform layer: window, event queue, framebuffer blit, monotonic
+# clock, software audio mixer, whole-file reads and raw buffers. Written
+# in Axle, calling Win32 or X11 + ALSA directly depending on the build's
+# target. There is no `[link]` section here because there is nothing to
+# put in one: every library the link line needs is named by the
+# `extern "C" from "…"` block inside smalt that imports from it.
+smalt = { path = "../smalt" }

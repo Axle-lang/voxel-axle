@@ -4,7 +4,7 @@
 // health reads as hollow hearts. Each heart = 2 hp; odd hp shows a
 // half-heart. Stateless: reads hp, paints pixels.
 
-use sdl_platform::rgb;
+use smalt::Color;
 use crate::kernel::krender::color::{fillRect, Canvas};
 
 /**
@@ -34,20 +34,20 @@ fn heartScale() : i32 {
 fn heartColor(code : i32, filled : bool) : i32 {
     if (filled) {
         if (code == 1) {
-            return rgb(54, 10, 10);
+            return Color::packBytes(54, 10, 10);
         }
         if (code == 3) {
-            return rgb(228, 40, 40);
+            return Color::packBytes(228, 40, 40);
         }
-        return rgb(255, 140, 140);
+        return Color::packBytes(255, 140, 140);
     }
     if (code == 1) {
-        return rgb(22, 20, 26);
+        return Color::packBytes(22, 20, 26);
     }
     if (code == 3) {
-        return rgb(78, 78, 90);
+        return Color::packBytes(78, 78, 90);
     }
-    return rgb(108, 108, 122);
+    return Color::packBytes(108, 108, 122);
 }
 
 /**

@@ -4,7 +4,7 @@
 // Stateless: reads hp + the hotbar and paints pixels.
 
 use crate::kernel::krender::hotbar::{drawHotbar, hotbarPanelW, hotbarPanelH};
-use crate::config::{ Block };
+use crate::configs::blocks::{ Block };
 use crate::kernel::krender::color::{Widget, Canvas};
 use crate::kernel::krender::health::{drawHealth, healthHeight};
 

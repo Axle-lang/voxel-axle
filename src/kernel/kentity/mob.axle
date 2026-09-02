@@ -18,8 +18,10 @@ use crate::kernel::kentity::player::Player;
 use crate::kernel::seams::{ VoxelQuery, ActorVisual };
 use crate::kernel::kworld::blocksim::BlockSim;
 use crate::kernel::kio::sfx::AudioManager;
-use crate::config;
-use crate::config::{ MobKind };
+use crate::configs::audio::{ Audio };
+use crate::configs::mobs::{ MobKind, Mobs };
+use crate::configs::motion::{ Motion };
+use std::numeric::math;
 use crate::kernel::kmath::mathx::{ clampF64, wrapAngle, PI, TAU };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 
@@ -105,47 +107,53 @@ trait MobSpawner {
  */
 trait Actor : ActorVisual, Brain, Flees, Mortal, Damageable, Flashes, Vocal {}
 
+/** Whether a mob is still living, or playing out its death collapse. */
+enum MobState : i32 {
+    Alive,
+    Dying,
+}
+
 /** The AI countdown timers a mob ticks down each frame (all in frames). */
 struct AiTimers {
-    turnTimer : i32,    // until the next heading change
-    fleeTimer : i32,    // of panic-run remaining
-    hurtTimer : i32,    // of the red hurt-flash remaining
-    deathTimer : i32,   // of the death collapse remaining
-    vocalTimer : i32,   // until the next idle voice (manager-driven)
+    turnTimer : i32,             // until the next heading change
+    fleeTimer : i32,             // of panic-run remaining
+    pub(crate) hurtTimer : i32,  // of the red hurt-flash remaining
+    pub(crate) deathTimer : i32, // of the death collapse remaining
+    vocalTimer : i32,            // until the next idle voice (manager-driven)
 }
 
 class Mob : Entity, Actor, Wanders {
     kind : MobKind,
-    speed : f64,
-    heading : f64,
+    pub(derived) speed : f64,
+    pub(derived) heading : f64,
     targetHeading : f64,
-    moving : i32,
-    walkPhase : f64,
-    state : i32,        // 0 = alive, 1 = dying
-    timers : AiTimers,  // AI countdowns (turn / flee / hurt / death / vocal)
+    moving : bool,
+    pub(derived) walkPhase : f64,
+    pub(derived) state : MobState,
+    pub(derived) timers : AiTimers, // AI countdowns (turn / flee / hurt / death / vocal)
 
     /** Create a mob at (x, y, z) of the given kind with maxHp hit points. */
     constructor(x : f64, y : f64, z : f64, own kind : MobKind, maxHp : i32) {
         self.pos = vec3(x, y, z);
         self.velY = 0.0;
-        self.radius = config::mobRadius;
+        self.radius = Motion::MOB_RADIUS;
         self.height = 1.0;
         self.gravityScale = 1.0;
         self.hp = maxHp;
         self.maxHp = maxHp;
-        self.onGround = 0;
+        self.onGround = false;
         self.impact = 0.0;
-        self.grav = config::mobGravity;
+        self.grav = Motion::MOB_GRAVITY;
         self.apexY = y;
         self.stepUp = 0.0;
         self.kind = kind;
         self.heading = 0.0;
         self.targetHeading = 0.0;
-        self.moving = 1;
+        self.moving = true;
         self.walkPhase = 0.0;
-        self.state = 0;
-        self.timers = AiTimers { turnTimer: 0, fleeTimer: 0, hurtTimer: 0, deathTimer: 0, vocalTimer: config::mobVocalMin };
-        self.speed = config::mobWanderSpeed;
+        self.state = MobState::Alive;
+        self.timers = AiTimers { turnTimer: 0, fleeTimer: 0, hurtTimer: 0, deathTimer: 0, vocalTimer: Audio::MOB_VOCAL_MIN };
+        self.speed = Mobs::WANDER_SPEED;
     }
 
     // ── ActorVisual (the render-facing seam krender's billboard pass reads) ──
@@ -201,7 +209,7 @@ class Mob : Entity, Actor, Wanders {
     // ── Combat / life-cycle ──
     /** Flag a hit so the renderer glows the mob red for a few frames. */
     fn flashHurt(mut self) : void {
-        self.timers.hurtTimer = config::hurtFlashFrames;
+        self.timers.hurtTimer = Mobs::HURT_FLASH_FRAMES;
     }
 
     /**
@@ -210,17 +218,17 @@ class Mob : Entity, Actor, Wanders {
      * @param pz  z coordinate of the source of the hit
      */
     fn panicFrom(mut self, px : f64, pz : f64) : void {
-        self.targetHeading = atan2(self.pos.z - pz, self.pos.x - px);
-        self.timers.fleeTimer = config::mobFleeFrames;
-        self.moving = 1;
-        self.timers.turnTimer = config::mobFleeFrames;
+        self.targetHeading = math::atan2(self.pos.z - pz, self.pos.x - px);
+        self.timers.fleeTimer = Mobs::FLEE_FRAMES;
+        self.moving = true;
+        self.timers.turnTimer = Mobs::FLEE_FRAMES;
     }
 
     /** Begin the death collapse; the manager removes the mob when it ends. */
     fn startDying(mut self) : void {
-        self.state = 1;
-        self.timers.deathTimer = config::deathFrames;
-        self.moving = 0;
+        self.state = MobState::Dying;
+        self.timers.deathTimer = Mobs::DEATH_FRAMES;
+        self.moving = false;
     }
 
     /**
@@ -228,7 +236,7 @@ class Mob : Entity, Actor, Wanders {
      * @return true while dying
      */
     fn isDying(self) : bool {
-        return self.state == 1;
+        return self.state == MobState::Dying;
     }
 
     /**
@@ -236,7 +244,7 @@ class Mob : Entity, Actor, Wanders {
      * @return true when dying and the death timer has elapsed
      */
     fn deathDone(self) : bool {
-        return self.state == 1 && self.timers.deathTimer <= 0;
+        return self.state == MobState::Dying && self.timers.deathTimer <= 0;
     }
 
     /**
@@ -244,10 +252,10 @@ class Mob : Entity, Actor, Wanders {
      * @return the normalized death-collapse progress
      */
     fn deathProgress(self) : f64 {
-        if (self.state == 0) {
+        if (self.state == MobState::Alive) {
             return 0.0;
         }
-        let df : f64 = config::deathFrames as f64;
+        let df : f64 = Mobs::DEATH_FRAMES as f64;
         return (df - (self.timers.deathTimer as f64)) / df;
     }
 
@@ -259,7 +267,7 @@ class Mob : Entity, Actor, Wanders {
      * @return true if the mob should speak this frame
      */
     fn wantsVoice(mut self) : bool {
-        if (self.state == 1) {
+        if (self.state == MobState::Dying) {
             return false;
         }
         self.timers.vocalTimer = self.timers.vocalTimer - 1;
@@ -275,12 +283,12 @@ class Mob : Entity, Actor, Wanders {
     }
 
     /**
-     * Ease `heading` toward `targetHeading` by at most `mobTurnRate`,
+     * Ease `heading` toward `targetHeading` by at most `Mobs::TURN_RATE`,
      * taking the shortest way around the circle.
      */
     fn turnToward(mut self) : void {
         let d : f64 = wrapAngle(self.targetHeading - self.heading);
-        let rate : f64 = config::mobTurnRate;
+        let rate : f64 = Mobs::TURN_RATE;
         self.heading = self.heading + clampF64(d, 0.0 - rate, rate);
     }
 
@@ -313,7 +321,7 @@ class Mob : Entity, Actor, Wanders {
 
         // Dying: stop steering, let gravity settle the body while the
         // collapse animation plays out.
-        if (self.state == 1) {
+        if (self.state == MobState::Dying) {
             if (self.timers.deathTimer > 0) {
                 self.timers.deathTimer = self.timers.deathTimer - 1;
             }
@@ -327,19 +335,19 @@ class Mob : Entity, Actor, Wanders {
         self.timers.turnTimer = self.timers.turnTimer - 1;
         if (self.timers.turnTimer <= 0 && self.timers.fleeTimer <= 0) {
             self.targetHeading = rnd * TAU;
-            self.timers.turnTimer = config::mobTurnEveryMin + Math::floorToInt(rnd * (config::mobTurnEveryRand as f64)) as i32;
-            if (rnd < config::mobIdleChance) {
-                self.moving = 0;
+            self.timers.turnTimer = Mobs::TURN_EVERY_MIN + (rnd * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
+            if (rnd < Mobs::IDLE_CHANCE) {
+                self.moving = false;
             } else {
-                self.moving = 1;
+                self.moving = true;
             }
         }
         self.turnToward();
 
         let spd : f64 = 0.0;
         if (self.timers.fleeTimer > 0) {
-            spd = config::mobFleeSpeed;
-        } else if (self.moving == 1) {
+            spd = Mobs::FLEE_SPEED;
+        } else if (self.moving) {
             spd = self.speed;
         }
 
@@ -347,58 +355,9 @@ class Mob : Entity, Actor, Wanders {
             self.walkPhase = self.walkPhase + 0.35;
         }
 
-        let dx : f64 = Math::cos(self.heading) * spd;
-        let dz : f64 = Math::sin(self.heading) * spd;
+        let dx : f64 = self.heading.cos() * spd;
+        let dz : f64 = self.heading.sin() * spd;
         self.tick(world, dx, dz);
     }
 }
 
-/**
- * Two-argument arctangent over the full circle, in radians.
- * @param y  the y component
- * @param x  the x component
- * @return the angle of (x, y) in radians
- */
-fn atan2(y : f64, x : f64) : f64 {
-    if (x > 0.0) {
-        return atanApprox(y / x);
-    }
-    if (x < 0.0) {
-        if (y >= 0.0) {
-            return atanApprox(y / x) + PI;
-        }
-        return atanApprox(y / x) - PI;
-    }
-    if (y > 0.0) {
-        return PI * 0.5;
-    }
-    if (y < 0.0) {
-        return 0.0 - PI * 0.5;
-    }
-    return 0.0;
-}
-
-/**
- * atan(z) approximation (max error ~0.0038 rad) — ample for AI facing.
- * @param z  the tangent value
- * @return the approximate arctangent of z in radians
- */
-fn atanApprox(z : f64) : f64 {
-    let a : f64 = z;
-    if (a < 0.0) {
-        a = 0.0 - a;
-    }
-    let inv : bool = a > 1.0;
-    if (inv) {
-        a = 1.0 / a;
-    }
-    let a3 : f64 = a * a * a;
-    let r : f64 = 0.7853981634 * a - a * (a - 1.0) * (0.2447 + 0.0663 * a);
-    if (inv) {
-        r = 1.5707963268 - r;
-    }
-    if (z < 0.0) {
-        return 0.0 - r;
-    }
-    return r;
-}

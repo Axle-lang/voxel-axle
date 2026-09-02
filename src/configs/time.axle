@@ -6,26 +6,30 @@
 // direction drives the directional face shading, and the sky/fog colour
 // interpolates night → dusk → day.
 
-const dayLengthTicks : i32 = 14400;  // a full day in fixed ticks (~4 min @ 60 Hz)
-const dayStart : f64 = 0.42;         // start mid-morning
-const nightLevel : f64 = 0.13;       // daylight floor at night (moonlight)
-const sunTilt : f64 = 0.35;          // sun's north/south lean (so it's not dead overhead)
-
-// ── Directional sun shadows ─────────────────────────────────
-const sunShadowReach : f64 = 30.0;   // how far (blocks) a shadow ray probes toward the sun
-const sunChunksPerTick : i32 = 6;    // chunks whose sun-shadow map is refreshed per frame
                                      // (round-robin → whole view refreshes in ~span²/this frames)
-const sunShadowSamples : i32 = 6;    // rays per cell over the sun disc (1 = hard, more = softer penumbra)
-const sunDiscAngle : f64 = 0.085;    // angular radius of the sun disc the rays spread over (rad);
                                      // larger = softer, wider shadow edges (exaggerated vs the real sun)
 
-// Sky colours interpolated across the day.
-const daySkyR : i32 = 150;
-const daySkyG : i32 = 198;
-const daySkyB : i32 = 240;
-const nightSkyR : i32 = 12;
-const nightSkyG : i32 = 16;
-const nightSkyB : i32 = 40;
-const duskSkyR : i32 = 235;
-const duskSkyG : i32 = 128;
-const duskSkyB : i32 = 70;
+/** The day/night cycle: its length, the sun's shadows, and the sky colours. */
+class Daylight {
+    static LENGTH_TICKS : i32 = 14400; // a full day in fixed ticks (~4 min @ 60 Hz)
+    static START : f64 = 0.42;         // start mid-morning
+    static NIGHT_LEVEL : f64 = 0.13;   // daylight floor at night (moonlight)
+    static SUN_TILT : f64 = 0.35;      // sun's north/south lean (so it's not dead overhead)
+
+    // ── Directional sun shadows ─────────────────────────────────
+    static SUN_SHADOW_REACH : f64 = 30.0; // how far (blocks) a shadow ray probes toward the sun
+    static SUN_CHUNKS_PER_TICK : i32 = 6; // chunks whose sun-shadow map is refreshed per frame
+    static SUN_SHADOW_SAMPLES : i32 = 6;  // rays per cell over the sun disc (1 = hard, more = softer penumbra)
+    static SUN_DISC_ANGLE : f64 = 0.085;  // angular radius of the sun disc the rays spread over (rad);
+
+    // Sky colours interpolated across the day.
+    static DAY_SKY_R : i32 = 150;
+    static DAY_SKY_G : i32 = 198;
+    static DAY_SKY_B : i32 = 240;
+    static NIGHT_SKY_R : i32 = 12;
+    static NIGHT_SKY_G : i32 = 16;
+    static NIGHT_SKY_B : i32 = 40;
+    static DUSK_SKY_R : i32 = 235;
+    static DUSK_SKY_G : i32 = 128;
+    static DUSK_SKY_B : i32 = 70;
+}

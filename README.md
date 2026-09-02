@@ -8,11 +8,11 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 
 <p align="center">
   <a href="https://axle-lang.dev"><img alt="Powered by Axle" src="https://img.shields.io/badge/powered%20by-Axle-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
-  <a href="https://axle-lang.dev"><img alt="Axle 0.7.0+" src="https://img.shields.io/badge/axle-0.7.0%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
+  <a href="https://axle-lang.dev"><img alt="Axle 0.12.1+" src="https://img.shields.io/badge/axle-0.12.1%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
   <img alt="Rendering: 100% CPU" src="https://img.shields.io/badge/rendering-100%25%20CPU-FF7A45?style=flat-square&labelColor=1b1b2b">
-  <img alt="SDL2" src="https://img.shields.io/badge/SDL2-window%20%2B%20software%20mixer-1D6FB8?style=flat-square&labelColor=1b1b2b">
+  <img alt="smalt" src="https://img.shields.io/badge/smalt-window%20%2B%20software%20mixer-1D6FB8?style=flat-square&labelColor=1b1b2b">
   <img alt="Threaded" src="https://img.shields.io/badge/threaded-audio%20%C2%B7%20light%20%C2%B7%20raster-9C27B0?style=flat-square&labelColor=1b1b2b">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2E7D32?style=flat-square&labelColor=1b1b2b">
 </p>
@@ -44,7 +44,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 
 | | |
 |---|---|
-| **Language** | 100% [Axle](https://axle-lang.dev) (LLVM 18 backend) — only the SDL2/libc bindings are a sibling crate |
+| **Language** | 100% [Axle](https://axle-lang.dev) — game *and* platform layer; nothing is C, nothing is vendored |
 | **Rendering** | Software rasteriser on the CPU — perspective-correct 128 px HD textures, mip-chain + anisotropic filtering, shared z-buffer |
 | **World** | Infinite, streamed voxel terrain · ~18 biomes · continentalness / erosion / peaks-and-valleys noise |
 | **Lighting** | Flood-filled sky + block light with AO · day/night sun · soft shadows · god-rays · bloom · atmospheric sky |
@@ -79,98 +79,87 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 ## 🚀 Quick start
 
 ```bash
-git clone --recurse-submodules <repo-url>   # the SDL2 platform layer is a submodule
+git clone <repo-url>
 cd voxel-axle
-axle --version                              # must print 0.7.0 or newer
-axle run                                    # compile + run
+axle --version      # must print 0.12.1 or newer
+axle build          # compile
+./target/voxel      # run
 ```
 
-That's it if you already have **Axle 0.7.0+** and **SDL2**. If not, the two sections below get you there.
+That is the whole list: a compiler, and this repo. There is no library to
+install, no DLL to copy, and no `[link]` section to point at a package
+manager — the platform layer is [**smalt**](../smalt), which is Axle
+calling Win32 or X11 + ALSA directly and lives in a sibling checkout.
 
 ## 🧩 Built with Axle
 
-This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern systems language with an LLVM 18 backend, traits, generics, structs and first-class concurrency. The whole game (world gen, physics, lighting, the software rasteriser, the threaded audio mixer) is written in Axle; only the thin SDL2/libc bindings live in a sibling crate.
+This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern systems language with an LLVM backend, traits, generics, structs and first-class concurrency. The whole game is written in Axle — world gen, physics, lighting, the software rasteriser, the threaded audio mixer — and so is everything under it: **smalt** opens the window, drains the event queue, blits the framebuffer and feeds the sound card, in Axle, by calling the operating system.
 
 > **New to Axle?** Start at **[axle-lang.dev](https://axle-lang.dev)** — install guide, language tour and docs.
 
 ## 📦 Prerequisites
 
-You need three things: this repo **with its submodule**, the **Axle compiler** (v0.7.0+) and **SDL2**.
+Two things: the **Axle compiler** (v0.12.1+) and a checkout of
+[**smalt**](../smalt) beside this one, which `axle.toml` names as a path
+dependency.
 
-### 0. Clone the repo and its SDL2 platform submodule
-
-The SDL2 + libc platform layer (window, renderer, audio mixer, raw memory, file IO) lives in the **`vendor/sdl_platform` git submodule** — its `src/` compiles together with ours (`use sdl_platform::…`). It is **not** vendored in-tree, so a clone without the submodule leaves `vendor/sdl_platform` empty and the build fails immediately with unresolved `sdl_platform` imports.
-
-```bash
-# fresh clone — pull the submodule at the same time
-git clone --recurse-submodules <repo-url>
-
-# already cloned without it? initialise it after the fact
-git submodule update --init --recursive
+```
+<parent>/
+  voxel-axle/     this repo
+  smalt/          the platform layer, compiled from source with the game
 ```
 
-Later, to pull upstream platform-layer changes: `git submodule update --remote`.
-
-### 1. Install the Axle compiler (v0.7.0+)
-
-This project must be built with Axle **v0.7.0 or newer** — codegen and the stdlib evolve between releases. Check what you have:
-
-```bash
-axle --version      # must print 0.7.0 or higher
-```
+### Install Axle
 
 <details>
-<summary><b>Missing or older? Install / upgrade Axle →</b></summary>
+<summary><b>Per-platform Axle setup →</b></summary>
 
 <br>
 
-- **Linux (apt)** — the official repo (details at [axle-lang.dev](https://axle-lang.dev)):
+- **Windows / Linux** — installer and packages at
+  [axle-lang.dev](https://axle-lang.dev).
+- **From source** —
   ```bash
-  sudo install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://apt.axle-lang.dev/key.asc \
-      | sudo gpg --dearmor -o /etc/apt/keyrings/axle.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/axle.gpg arch=amd64] https://apt.axle-lang.dev stable main" \
-      | sudo tee /etc/apt/sources.list.d/axle.list
-  sudo apt update && sudo apt install axle   # LLVM 18 + lld pulled in automatically
+  git clone <axle-repo> && cd axle
+  cargo build --release -p axle_cli   # -> target/release/axle (add to PATH)
   ```
-- **Windows** — install the Windows x64 `.msi` from the `v0.7.0` (or newer) release; it installs `axle.exe` to `C:\Program Files (x86)\Axle\` and onto your `PATH`. Or build from source from the `axle` compiler repo:
-  ```powershell
-  # needs Visual C++ Build Tools + LLVM 18 (see the axle repo's SETUP-WINDOWS.md)
-  $env:LLVM_SYS_181_PREFIX = "C:\Program Files\LLVM"
-  cargo build --release -p axle_cli   # -> target/release/axle.exe (add to PATH)
-  ```
-- **macOS / no apt** — use the Docker image or build from source (see [axle-lang.dev](https://axle-lang.dev)).
+- **macOS** — build from source (see [axle-lang.dev](https://axle-lang.dev)).
 
 </details>
 
-### 2. Install the SDL2 library
+### What the produced binary links
 
-The engine links against SDL2 and needs `SDL2.dll` next to the binary at runtime.
+Nothing you have to install on Windows: `kernel32`, `user32`, `gdi32` and
+`winmm` ship with the OS.
 
-<details>
-<summary><b>Per-platform SDL2 setup →</b></summary>
-
-<br>
-
-- **Windows (vcpkg)** —
-  ```powershell
-  vcpkg install sdl2:x64-windows
-  ```
-  Then point `axle.toml`'s `[link] paths` at both vcpkg's **`lib`** (holds `SDL2.lib`, linked against) and **`bin`** (holds `SDL2.dll`) directories — e.g. `C:/vcpkg/installed/x64-windows/lib` and `…/bin`. Listing `bin` makes `axle build` auto-copy `SDL2.dll` next to the binary in `target/` on every build, so there is no manual DLL copy step.
-- **Linux** — `sudo apt install libsdl2-dev` (then set `[link] paths` to the system lib dir if needed).
-- **macOS** — `brew install sdl2`.
-
-</details>
+On Linux it links `libX11` and `libasound`, which every desktop
+distribution already has — `libx11-6` and `libasound2` are on the box if
+anything with a window or a sound has ever run on it. Building from a
+bare container needs their `-dev` packages
+(`sudo apt install libx11-dev libasound2-dev`), which is a *build*
+prerequisite and not a runtime one.
 
 ## 🛠️ Build & run
 
-From this directory, with the `vendor/sdl_platform` submodule initialised, `axle --version` reporting 0.7.0+ and SDL2 installed:
+From this directory, with `smalt` checked out beside it and
+`axle --version` reporting 0.12.1+:
 
 ```bash
-axle run            # compile + run
+axle build          # compile to target/voxel
+./target/voxel      # run
 ```
 
-Other useful commands: `axle build` (compile to a binary without running) and `axle check` (type-check only). Make sure `SDL2.dll` and `atlas.raw` sit next to the produced binary (in `target/`).
+`atlas.raw` must sit next to the produced binary or one directory up —
+it is read at run time, so textures can be re-baked without rebuilding.
+
+Cross-compiling is the same command with a target:
+
+```bash
+axle build --target x86_64-unknown-linux-gnu
+```
+
+The platform overlay follows: the Linux build compiles smalt's X11 and
+ALSA backend and never sees a line of Win32.
 
 ## 🏛️ Architecture
 
@@ -249,16 +238,17 @@ Hot geometry and call-sites are bundled in value `struct`s instead of long argum
 A `use` that crosses folders is written from the source root with a `crate::` prefix (like Rust); same-folder siblings import by bare name.
 
 ```
-vendor/sdl_platform/       SDL2 + libc platform layer — a git SUBMODULE whose src/
+(../smalt)                 the platform layer — a sibling checkout whose src/
                            compiles with ours (window, renderer, audio mixer, raw
-                           memory, file IO, atlas load); `use sdl_platform::…`
+                           memory, file IO); `use smalt::…`
 src/
   main.axle                composition root: window + buffers + worker threads,
                            wire the kernels, inject the game content, run the loop
-  config.axle              re-export hub for every tunable in configs/*
-  configs/                 screen, render, atlas, light, time, water, noise, world,
-                           biomes, blocks, trees, physics, mobs, gameplay, health,
-                           hud, audio, face — change the feel here
+  configs/                 one class of `static` tunables per area — Screen,
+                           Render, Atlas/Tile, Light, Daylight, Water, Noise,
+                           World, Motion, Mobs, Trees, Gameplay, Health, Hotbar,
+                           Audio — plus the Block / BiomeId / TreeKind / MobKind
+                           / FaceDir / AudioMaterial enums. Change the feel here
 
   kernel/                  the reusable ENGINE (never names game content)
     seams.axle             the kernel↔kernel capability contracts (single source
@@ -310,9 +300,9 @@ src/
 
 ## 🖼️ Textures
 
-Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of **128 px (HD)** tiles (grass, dirt, stone, sand, snow, gravel, oak/birch logs, leaves, water, …). The engine **loads `atlas.raw` at runtime** (`sdl.loadAtlas`, tried from the project dir or `target/`) — it is not embedded in the source, so textures can be re-baked without rebuilding. `kblock` maps a block face to its tile, the mesher stores the tile per face, and the rasteriser samples it through the mip-chain with anisotropic taps. Re-bake with `python bake_atlas.py`.
+Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of **128 px (HD)** tiles (grass, dirt, stone, sand, snow, gravel, oak/birch logs, leaves, water, …). The engine **loads `atlas.raw` at runtime** (`Assets::loadAtlas`, tried from the project dir or `target/`) — it is not embedded in the source, so textures can be re-baked without rebuilding. `kblock` maps a block face to its tile, the mesher stores the tile per face, and the rasteriser samples it through the mip-chain with anisotropic taps. Re-bake with `python bake_atlas.py`.
 
-**Mobs** are skinned from the Minecraft entity textures under `assets/textures/entity/`. `bake_mobs.py` crops a tile per body part and appends them to the atlas; `config::useMobTextures` toggles textured vs flat-colour mobs.
+**Mobs** are skinned from the Minecraft entity textures under `assets/textures/entity/`. `bake_mobs.py` crops a tile per body part and appends them to the atlas; `Atlas::USE_MOB_TEXTURES` toggles textured vs flat-colour mobs.
 
 ## 🧷 Seams for new features
 
@@ -326,7 +316,7 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 
 - Collision is **voxel-accurate**: the body AABB is tested against every overlapping voxel (trunks and placed blocks included; leaf canopies stay passable). Partial blocks use their real box height.
 - Edits are not persisted: a chunk that streams out of the loaded ring and back is regenerated, discarding edits made to it.
-- The loop runs a **fixed timestep** (`config::tickHz`, default 60): the simulation advances by real elapsed time (catching up after a slow frame), so movement is frame-rate independent, and the frame clock caps the CPU instead of relying on v-sync.
+- The loop runs a **fixed timestep** (`World::TICK_HZ`, default 60): the simulation advances by real elapsed time (catching up after a slow frame), so movement is frame-rate independent, and the frame clock caps the CPU instead of relying on v-sync.
 - `axle.toml`'s lib path is machine-specific; DLL + `atlas.raw` deployment next to the binary is manual.
 
 ---

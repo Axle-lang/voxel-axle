@@ -10,24 +10,32 @@
 // Add a biome: one arm in `biomeDef` (+ a branch in `biomeAt`). No new class,
 // file, field or getter.
 
-use crate::config;
-use crate::config::{ Block, BiomeId, TreeKind };
+use crate::configs::biomes::{ BiomeId };
+use crate::configs::blocks::{ Block };
+use crate::configs::noise::{ Noise };
+use crate::configs::trees::{ TreeKind };
+use crate::configs::world::{ World };
 
-// Surface rule selectors. SURF_CONST just returns `BiomeDef.surf`; the others
-// compute the top block from the column height (see `biomeSurface`).
-const SURF_CONST : i32 = 0;
-const SURF_MOUNTAIN : i32 = 1;
-const SURF_BADLANDS : i32 = 2;
-const SURF_OCEAN : i32 = 3;
+/**
+ * Which rule picks a column's top block. `Constant` just answers
+ * `BiomeDef.surf`; the other three read the column height (see
+ * `biomeSurface`), and they are the only per-biome behaviour left.
+ */
+enum SurfaceRule : i32 {
+    Constant,
+    Mountain,
+    Badlands,
+    Ocean,
+}
 
 /** One biome's full parameter set — plain data, resolved by id from a table. */
 struct BiomeDef {
-    filler : Block,      // block a few voxels below the surface
-    treeThresh : f64,    // a column grows a tree when its tree-hash exceeds this (>= 1.1 = none)
-    treeKind : TreeKind, // which tree to stamp
-    treeHt : i32,        // trunk height for that tree
-    surf : Block,        // constant top block (used when surfMode == SURF_CONST)
-    surfMode : i32,      // which surface rule picks the top block
+    pub(crate) filler : Block,      // block a few voxels below the surface
+    pub(crate) treeThresh : f64,    // a column grows a tree when its tree-hash exceeds this (>= 1.1 = none)
+    pub(crate) treeKind : TreeKind, // which tree to stamp
+    pub(crate) treeHt : i32,        // trunk height for that tree
+    surf : Block,                   // constant top block (used when surfMode is `Constant`)
+    surfMode : SurfaceRule,         // which surface rule picks the top block
 }
 
 /**
@@ -39,25 +47,25 @@ struct BiomeDef {
  */
 fn biomeDef(b : BiomeId) : BiomeDef {
     return match b {
-        BiomeId::Beach          => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SURF_CONST },
-        BiomeId::Plains         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.992, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::Grass,         surfMode: SURF_CONST },
-        BiomeId::Forest         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.928, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::Grass,         surfMode: SURF_CONST },
-        BiomeId::Desert         => BiomeDef { filler: Block::Sandstone,    treeThresh: 0.992, treeKind: TreeKind::Cactus,      treeHt: 3,  surf: Block::Sand,          surfMode: SURF_CONST },
-        BiomeId::Savanna        => BiomeDef { filler: Block::Dirt,         treeThresh: 0.993, treeKind: TreeKind::Acacia,      treeHt: 5,  surf: Block::GrassSavanna,  surfMode: SURF_CONST },
-        BiomeId::Snowy          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.984, treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::Snow,          surfMode: SURF_CONST },
-        BiomeId::Mountain       => BiomeDef { filler: Block::Stone,        treeThresh: 1.05,  treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::Grass,         surfMode: SURF_MOUNTAIN },
-        BiomeId::Taiga          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.918, treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::GrassTaiga,    surfMode: SURF_CONST },
-        BiomeId::Jungle         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.865, treeKind: TreeKind::Jungle,      treeHt: 8,  surf: Block::GrassJungle,   surfMode: SURF_CONST },
-        BiomeId::Swamp          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.985, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::GrassSwamp,    surfMode: SURF_CONST },
-        BiomeId::Badlands       => BiomeDef { filler: Block::RedSandstone, treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Terracotta,    surfMode: SURF_BADLANDS },
-        BiomeId::BirchForest    => BiomeDef { filler: Block::Dirt,         treeThresh: 0.930, treeKind: TreeKind::Birch,       treeHt: 6,  surf: Block::Grass,         surfMode: SURF_CONST },
-        BiomeId::FrozenOcean    => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SURF_OCEAN },
-        BiomeId::BambooJungle   => BiomeDef { filler: Block::Dirt,         treeThresh: 0.80,  treeKind: TreeKind::Bamboo,      treeHt: 12, surf: Block::GrassJungle,   surfMode: SURF_CONST },
-        BiomeId::CherryGrove    => BiomeDef { filler: Block::Dirt,         treeThresh: 0.965, treeKind: TreeKind::Cherry,      treeHt: 5,  surf: Block::Grass,         surfMode: SURF_CONST },
-        BiomeId::MushroomFields => BiomeDef { filler: Block::Dirt,         treeThresh: 0.955, treeKind: TreeKind::RedMushroom, treeHt: 4,  surf: Block::Mycelium,      surfMode: SURF_CONST },
+        BiomeId::Beach          => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SurfaceRule::Constant },
+        BiomeId::Plains         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.992, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::Grass,         surfMode: SurfaceRule::Constant },
+        BiomeId::Forest         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.928, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::Grass,         surfMode: SurfaceRule::Constant },
+        BiomeId::Desert         => BiomeDef { filler: Block::Sandstone,    treeThresh: 0.992, treeKind: TreeKind::Cactus,      treeHt: 3,  surf: Block::Sand,          surfMode: SurfaceRule::Constant },
+        BiomeId::Savanna        => BiomeDef { filler: Block::Dirt,         treeThresh: 0.993, treeKind: TreeKind::Acacia,      treeHt: 5,  surf: Block::GrassSavanna,  surfMode: SurfaceRule::Constant },
+        BiomeId::Snowy          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.984, treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::Snow,          surfMode: SurfaceRule::Constant },
+        BiomeId::Mountain       => BiomeDef { filler: Block::Stone,        treeThresh: 1.05,  treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::Grass,         surfMode: SurfaceRule::Mountain },
+        BiomeId::Taiga          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.918, treeKind: TreeKind::Spruce,      treeHt: 6,  surf: Block::GrassTaiga,    surfMode: SurfaceRule::Constant },
+        BiomeId::Jungle         => BiomeDef { filler: Block::Dirt,         treeThresh: 0.865, treeKind: TreeKind::Jungle,      treeHt: 8,  surf: Block::GrassJungle,   surfMode: SurfaceRule::Constant },
+        BiomeId::Swamp          => BiomeDef { filler: Block::Dirt,         treeThresh: 0.985, treeKind: TreeKind::Oak,         treeHt: 4,  surf: Block::GrassSwamp,    surfMode: SurfaceRule::Constant },
+        BiomeId::Badlands       => BiomeDef { filler: Block::RedSandstone, treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Terracotta,    surfMode: SurfaceRule::Badlands },
+        BiomeId::BirchForest    => BiomeDef { filler: Block::Dirt,         treeThresh: 0.930, treeKind: TreeKind::Birch,       treeHt: 6,  surf: Block::Grass,         surfMode: SurfaceRule::Constant },
+        BiomeId::FrozenOcean    => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SurfaceRule::Ocean },
+        BiomeId::BambooJungle   => BiomeDef { filler: Block::Dirt,         treeThresh: 0.80,  treeKind: TreeKind::Bamboo,      treeHt: 12, surf: Block::GrassJungle,   surfMode: SurfaceRule::Constant },
+        BiomeId::CherryGrove    => BiomeDef { filler: Block::Dirt,         treeThresh: 0.965, treeKind: TreeKind::Cherry,      treeHt: 5,  surf: Block::Grass,         surfMode: SurfaceRule::Constant },
+        BiomeId::MushroomFields => BiomeDef { filler: Block::Dirt,         treeThresh: 0.955, treeKind: TreeKind::RedMushroom, treeHt: 4,  surf: Block::Mycelium,      surfMode: SurfaceRule::Constant },
         // Ocean is the default (deep water everywhere the climate map doesn't
         // pick a land biome).
-        _               => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SURF_OCEAN },
+        _               => BiomeDef { filler: Block::Sand,         treeThresh: 1.1,   treeKind: TreeKind::None,        treeHt: 0,  surf: Block::Sand,          surfMode: SurfaceRule::Ocean },
     };
 }
 
@@ -71,38 +79,58 @@ fn biomeDef(b : BiomeId) : BiomeDef {
  */
 fn biomeSurface(b : BiomeId, height : i32) : Block {
     let d : BiomeDef = biomeDef(b);
-    if (d.surfMode == SURF_MOUNTAIN) {
+    return match d.surfMode {
         // Snow on the peaks, bare stone higher up, grass at the foot.
-        if (height > config::seaLevel + 44) {
-            return Block::Snow;
-        }
-        if (height > config::seaLevel + 38) {
-            return Block::Stone;
-        }
-        return Block::Grass;
-    }
-    if (d.surfMode == SURF_BADLANDS) {
+        SurfaceRule::Mountain => mountainSurface(height),
         // Red sand near the waterline, otherwise banded terracotta.
-        if (height <= config::seaLevel + 2) {
-            return Block::RedSand;
-        }
-        let band : i32 = (height / 3) % 3;
-        if (band == 0) {
-            return Block::Terracotta;
-        }
-        if (band == 1) {
-            return Block::TerracottaOrange;
-        }
-        return Block::TerracottaWhite;
-    }
-    if (d.surfMode == SURF_OCEAN) {
+        SurfaceRule::Badlands => badlandsSurface(height),
         // Gravel in the deeps, sand in the shallows.
-        if (height < config::seaLevel - 6) {
-            return Block::Gravel;
-        }
-        return Block::Sand;
+        SurfaceRule::Ocean => oceanSurface(height),
+        _ => d.surf,
+    };
+}
+
+/**
+ * Mountain top block: snow cap, bare stone below it, grass at the foot.
+ * @param height  the column's surface height
+ * @return the surface block id
+ */
+fn mountainSurface(height : i32) : Block {
+    if (height > World::SEA_LEVEL + 44) {
+        return Block::Snow;
     }
-    return d.surf;
+    if (height > World::SEA_LEVEL + 38) {
+        return Block::Stone;
+    }
+    return Block::Grass;
+}
+
+/**
+ * Badlands top block: red sand near the waterline, banded terracotta above.
+ * @param height  the column's surface height
+ * @return the surface block id
+ */
+fn badlandsSurface(height : i32) : Block {
+    if (height <= World::SEA_LEVEL + 2) {
+        return Block::RedSand;
+    }
+    return match (height / 3) % 3 {
+        0 => Block::Terracotta,
+        1 => Block::TerracottaOrange,
+        _ => Block::TerracottaWhite,
+    };
+}
+
+/**
+ * Ocean floor block: gravel in the deeps, sand in the shallows.
+ * @param height  the column's surface height
+ * @return the surface block id
+ */
+fn oceanSurface(height : i32) : Block {
+    if (height < World::SEA_LEVEL - 6) {
+        return Block::Gravel;
+    }
+    return Block::Sand;
 }
 
 /**
@@ -115,21 +143,21 @@ fn biomeSurface(b : BiomeId, height : i32) : Block {
  * @return the chosen biome id
  */
 fn biomeAt(temp : f64, humid : f64, height : i32) : BiomeId {
-    if (height <= config::seaLevel) {
+    if (height <= World::SEA_LEVEL) {
         if (temp < 0.26) {
             return BiomeId::FrozenOcean;
         }
         return BiomeId::Ocean;
     }
-    if (height <= config::seaLevel + 1) {
+    if (height <= World::SEA_LEVEL + 1) {
         return BiomeId::Beach;
     }
-    if (height >= config::seaLevel + 34) {
+    if (height >= World::SEA_LEVEL + 34) {
         return BiomeId::Mountain;
     }
     // Cool the climate with altitude: higher ground trends toward taiga / snow
     // even in a warm region, so foothills and uplands read coherently.
-    let t : f64 = temp - ((height - config::seaLevel) as f64) * config::altitudeCooling;
+    let t : f64 = temp - ((height - World::SEA_LEVEL) as f64) * Noise::ALTITUDE_COOLING;
     if (t < 0.0) {
         t = 0.0;
     }
@@ -157,7 +185,7 @@ fn biomeAt(temp : f64, humid : f64, height : i32) : BiomeId {
     if (humid > 0.90 && t > 0.42 && t < 0.60) {
         return BiomeId::MushroomFields;
     }
-    if (humid > 0.68 && height <= config::seaLevel + 5) {
+    if (humid > 0.68 && height <= World::SEA_LEVEL + 5) {
         return BiomeId::Swamp;
     }
     if (t > 0.50 && t < 0.64 && humid > 0.52 && humid < 0.66) {

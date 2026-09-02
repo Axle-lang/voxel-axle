@@ -1,17 +1,89 @@
-// input — physical key bindings as SDL scancodes. These map "which key does
-// what" for this game, so they live with the game rather than the platform
-// crate (which exposes the keyboard-state buffer via `keyboardBase`; read a key
-// with `readU8(kb, SC_x as i64)`). SDL scancodes are stable ABI values.
+// input — physical key bindings, as positions on the keyboard.
+//
+// A `Scancode` names a *position*, not a character: `Scancode::W` is the
+// key above `Scancode::S` on every layout, which is the key an AZERTY
+// board calls Z. That is what a movement binding wants, and it is why
+// none of this consults the keyboard layout — text, where the layout does
+// matter, arrives as a separate event.
+//
+// The bindings live here rather than in the platform layer because
+// "which key does what" is this game's decision. What smalt supplies is
+// the held state (`Events.isKeyDown`), and what this file supplies is
+// which key to ask about.
 
-pub const SC_A : i32 = 4;
-pub const SC_D : i32 = 7;
-pub const SC_S : i32 = 22;
-pub const SC_W : i32 = 26;
-pub const SC_SPACE : i32 = 44;
-pub const SC_ESC : i32 = 41;
-pub const SC_LSHIFT : i32 = 225;
-pub const SC_LCTRL : i32 = 224;
-pub const SC_F3 : i32 = 60;
-pub const SC_F4 : i32 = 61;
-// Number row: SDL scancodes for 1..9 are contiguous (1 = 30 … 9 = 38).
-pub const SC_1 : i32 = 30;
+use smalt::Scancode;
+
+/** What each key does in this game. */
+pub class Keys {
+    /** Walk forward. */
+    pub(crate) static fn forward() : Scancode {
+        return Scancode::W;
+    }
+
+    /** Walk back. */
+    pub(crate) static fn back() : Scancode {
+        return Scancode::S;
+    }
+
+    /** Strafe left. */
+    pub(crate) static fn left() : Scancode {
+        return Scancode::A;
+    }
+
+    /** Strafe right. */
+    pub(crate) static fn right() : Scancode {
+        return Scancode::D;
+    }
+
+    /** Jump, swim up, or fly up in creative. */
+    pub(crate) static fn up() : Scancode {
+        return Scancode::Space;
+    }
+
+    /** Fly down in creative. */
+    pub(crate) static fn down() : Scancode {
+        return Scancode::LeftShift;
+    }
+
+    /** Latch a sprint. */
+    pub(crate) static fn sprint() : Scancode {
+        return Scancode::LeftControl;
+    }
+
+    /** Half of the game-mode chord. */
+    pub(crate) static fn gameModeA() : Scancode {
+        return Scancode::F3;
+    }
+
+    /** The other half. */
+    pub(crate) static fn gameModeB() : Scancode {
+        return Scancode::F4;
+    }
+
+    /** Open and close the pause menu. */
+    pub(crate) static fn pause() : Scancode {
+        return Scancode::Escape;
+    }
+
+    /**
+     * The number-row key that selects hotbar slot `slot` (0-based).
+     *
+     * Written out rather than derived by adding `slot` to `Num1`. The
+     * digits are contiguous as scancode *numbers*, but an enum is not an
+     * integer here, and a table that says which key it means is the same
+     * length as the arithmetic that would hide it.
+     */
+    pub(crate) static fn hotbar(slot : i32) : Scancode {
+        return match slot {
+            0 => Scancode::Num1,
+            1 => Scancode::Num2,
+            2 => Scancode::Num3,
+            3 => Scancode::Num4,
+            4 => Scancode::Num5,
+            5 => Scancode::Num6,
+            6 => Scancode::Num7,
+            7 => Scancode::Num8,
+            _ => Scancode::Num9,
+        };
+    }
+}

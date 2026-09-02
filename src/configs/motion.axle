@@ -1,0 +1,49 @@
+// configs::motion — grounded movement with gravity, for the player and mobs.
+//
+// Gravity is a single symmetric value applied every tick whether the body is
+// rising or falling, so a jump traces a parabola and the descent accelerates
+// downward instead of gliding. The player gets a gentle pull for a realistic
+// ~1.25-block jump; mobs get a snappier one so their hops stay small. `velY`
+// is clamped to `Motion::TERMINAL_VEL` on the way down (see `Entity.grav` / `Entity.fall`).
+
+/** Grounded movement, swimming, flight and the body's dimensions. */
+class Motion {
+    static GRAVITY : f64 = 0.0085;     // player accel, blocks/frame² (jump apex ~1.25)
+    static MOB_GRAVITY : f64 = 0.055;  // mob hop accel — small, quick hops
+    static TERMINAL_VEL : f64 = 0.9;   // max fall speed, blocks/frame
+    static JUMP_VEL : f64 = 0.145;     // initial jump speed → ~1.25-block apex
+    static WALK_SPEED : f64 = 0.0775;
+    static SPRINT_SPEED : f64 = 0.155; // 2× walk (Ctrl)
+    static SWIM_SPEED : f64 = 0.080;   // horizontal swim, ~walk pace (was sluggish)
+
+    // ── Water / swimming ────────────────────────────────────────
+    // In water gravity is heavily damped so you sink SLOWLY (you do drift down when
+    // idle), and you rise only while Space is held. Shift dives faster. Sink and
+    // rise speeds are capped so motion eases. Tuned so a held Space surfaces you
+    // comfortably and you can step out onto a bank.
+    static WATER_GRAVITY_SCALE : f64 = 0.22; // gravity is much weaker underwater
+    static WATER_SINK_MAX : f64 = 0.028;     // gentle sink speed when not swimming up
+    static SWIM_UP_ACCEL : f64 = 0.022;      // Space: additive upward thrust per tick
+    static SWIM_UP_MAX : f64 = 0.085;        // cap on upward swim speed (gentle, no launch)
+    static SWIM_DOWN_SPEED : f64 = 0.030;    // Shift: dive thrust per tick
+    static WATER_PUSH : f64 = 0.006;         // current strength per level of flow gradient (gentle, clamped ±2)
+    static FLY_SPEED : f64 = 0.26;           // creative horizontal fly
+    static FLY_SPRINT_SPEED : f64 = 0.52;    // creative fly + Ctrl
+    static FLY_VERT_SPEED : f64 = 0.30;      // creative up/down
+    static EYE_HEIGHT : f64 = 1.62;
+    static STEP_HEIGHT : f64 = 1.05;
+    // Max downward drop the body glides over while grounded (step-down assist): a
+    // partial-block / snow-level descent eases smoothly instead of a micro
+    // free-fall. Kept above the tallest snow layer (0.75) and below a full block
+    // (1.0) so real ledges still fall normally.
+    static STEP_DOWN_ASSIST : f64 = 0.8;
+    // Auto-step raises the body instantly (collision is exact); the camera's
+    // step-up offset shrinks by this factor each tick so the rise looks smooth
+    // instead of snapping. Lower = quicker catch-up.
+    static STEP_SMOOTH_DECAY : f64 = 0.6;
+    static PLAYER_RADIUS : f64 = 0.30;
+    static PLAYER_HEIGHT : f64 = 1.80;   // body AABB height for voxel collision
+    static MOB_RADIUS : f64 = 0.28;
+    static MOUSE_SENS : f64 = 0.0024;
+    static PITCH_MAX : f64 = 1.45;
+}

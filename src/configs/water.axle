@@ -1,46 +1,49 @@
 // configs::water — the procedural "living water" look (no texture assets).
 //
 // Submerged, the renderer paints a deep teal background and runs a per-pixel
-// underwater pass that fogs the scene toward `waterFog*` by real depth (read
+// underwater pass that fogs the scene toward `Water::FOG_*` by real depth (read
 // from the z-buffer) and adds a moving caustic light pattern — animated, not a
 // flat filter. The water surface itself is drawn double-sided and its UVs are
-// wobbled by `waterRipple*` so it shimmers and scrolls, alive from above and
-// below.
+// wobbled by `Water::RIPPLE_SPEED` so it shimmers and scrolls, alive from
+// above and below.
 
-// Clear colour while the eye is underwater (the "void" becomes deep water).
-const waterDeepR : i32 = 12;
-const waterDeepG : i32 = 58;
-const waterDeepB : i32 = 92;
+/** The procedural living-water look: colour, fog, caustics and glint. */
+class Water {
+    // Clear colour while the eye is underwater (the "void" becomes deep water).
+    static DEEP_R : i32 = 12;
+    static DEEP_G : i32 = 58;
+    static DEEP_B : i32 = 92;
 
-// Depth-fog target colour and how fast it saturates (blocks of depth). A near
-// fog range makes submersion read as a dense blue volume immediately.
-const waterFogR : i32 = 20;
-const waterFogG : i32 = 80;
-const waterFogB : i32 = 120;
-const waterFogFar : f64 = 18.0;   // depth at which fog reaches its max
-const waterFogMax : f64 = 0.96;   // max fog opacity (keep a little detail near)
+    // Depth-fog target colour and how fast it saturates (blocks of depth). A near
+    // fog range makes submersion read as a dense blue volume immediately.
+    static FOG_R : i32 = 20;
+    static FOG_G : i32 = 80;
+    static FOG_B : i32 = 120;
+    static FOG_FAR : f64 = 18.0; // depth at which fog reaches its max
+    static FOG_MAX : f64 = 0.96; // max fog opacity (keep a little detail near)
 
-// Moving caustic light pattern: spatial frequency and brightness amplitude.
-const causticFreq : f64 = 0.05;
-const causticAmp : f64 = 16.0;
+    // Moving caustic light pattern: spatial frequency and brightness amplitude.
+    static CAUSTIC_FREQ : f64 = 0.05;
+    static CAUSTIC_AMP : f64 = 16.0;
 
-// Flowing-water edge height: what an air neighbour contributes to a surface
-// corner. Higher = the edge keeps more body and the slope is gentler / starts
-// later (less of a steep ramp at the border); 0 = dives straight to the drop.
-const waterEdgeHeight : f64 = 0.3;
+    // Flowing-water edge height: what an air neighbour contributes to a surface
+    // corner. Higher = the edge keeps more body and the slope is gentler / starts
+    // later (less of a steep ramp at the border); 0 = dives straight to the drop.
+    static EDGE_HEIGHT : f64 = 0.3;
 
-// Rising bubbles: how many motes and how fast they rise (px/phase).
-const bubbleCount : i32 = 70;
-const bubbleSpeed : f64 = 18.0;
+    // Rising bubbles: how many motes and how fast they rise (px/phase).
+    static BUBBLE_COUNT : i32 = 70;
+    static BUBBLE_SPEED : f64 = 18.0;
 
-// Phase speed (time rate) and how fast flowing water scrolls its texture.
-const waterRippleSpeed : f64 = 0.05;
-const waterFlowSpeed : f64 = 0.16;
+    // Phase speed (time rate) and how fast flowing water scrolls its texture.
+    static RIPPLE_SPEED : f64 = 0.05;
+    static FLOW_SPEED : f64 = 0.16;
 
-// Sun reflection on water. The renderer multiplies texel × light, so the glint
-// is a strong warm multiplicative over-brightening where the sun reflects (cos^32
-// of the half-vector); bloom then blows it into a glowing golden streak. Fresnel
-// brightens the water at grazing view angles (a sky-reflection sheen).
-const waterSpecStrength : f64 = 7.0;    // sun-glint intensity (multiplier boost)
-const waterFresnelStrength : f64 = 0.6; // grazing-angle reflection sheen
-const waterF0 : f64 = 0.03;             // base reflectance facing straight on
+    // Sun reflection on water. The renderer multiplies texel × light, so the glint
+    // is a strong warm multiplicative over-brightening where the sun reflects (cos^32
+    // of the half-vector); bloom then blows it into a glowing golden streak. Fresnel
+    // brightens the water at grazing view angles (a sky-reflection sheen).
+    static SPEC_STRENGTH : f64 = 7.0;    // sun-glint intensity (multiplier boost)
+    static FRESNEL_STRENGTH : f64 = 0.6; // grazing-angle reflection sheen
+    static F0 : f64 = 0.03;              // base reflectance facing straight on
+}

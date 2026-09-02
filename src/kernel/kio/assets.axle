@@ -1,0 +1,41 @@
+// assets — where this game's runtime files are, and how they are read.
+//
+// The texture atlas is loaded at run time rather than compiled in, so it
+// can be re-baked without rebuilding the game. That means the program
+// has to find it, and where it looks is a property of *this* project's
+// layout — the binary lands in `target/`, so the atlas is either beside
+// it or one directory up, and the copy in the Axle repository's test
+// corpus is at a third path.
+//
+// None of that belongs in the platform layer. smalt reads a file into a
+// block a caller owns; which candidate paths are worth trying is the
+// game's own knowledge, and it lives here.
+
+use smalt::AssetFile;
+
+/** Where this game keeps the files it reads at run time. */
+pub class Assets {
+    /** The atlas file's name, wherever it turns out to live. */
+    static ATLAS_FILE : string = "atlas.raw";
+
+    /**
+     * Read the texture atlas into `base`, answering how many bytes
+     * arrived.
+     *
+     * A short read is a failure the caller reports and survives: a
+     * missing atlas leaves the buffer as it was and the world renders
+     * with blank textures, which is a game you can still walk around in
+     * rather than one that would not start.
+     */
+    pub(crate) static fn loadAtlas(base : i64, bytes : i64) : i64 {
+        let got : i64 = AssetFile::readInto(Assets::ATLAS_FILE, base, bytes);
+        if (got == bytes) {
+            return got;
+        }
+        got = AssetFile::readInto("../" + Assets::ATLAS_FILE, base, bytes);
+        if (got == bytes) {
+            return got;
+        }
+        return AssetFile::readInto("tests/programs/voxel/" + Assets::ATLAS_FILE, base, bytes);
+    }
+}

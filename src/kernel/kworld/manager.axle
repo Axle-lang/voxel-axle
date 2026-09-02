@@ -1,7 +1,7 @@
 // manager — the streaming voxel world (the kernel conductor).
 //
-// A fixed ring of `span × span` slots follows the camera: a chunk keeps its
-// slot (addressed by chunk-coord modulo `span`) as the player moves, so crossing
+// A fixed ring of `World::SPAN × World::SPAN` slots follows the camera: a chunk keeps its
+// slot (addressed by chunk-coord modulo `World::SPAN`) as the player moves, so crossing
 // a chunk border only regenerates the newly-entered ones. Each slot stores a
 // FULL voxel field padded by a one-voxel skirt that mirrors the neighbouring
 // chunks' edge columns, so the mesher culls seam faces without touching another
@@ -21,7 +21,8 @@
 // delegators for every kernel::seams method — so the surface downstream depends
 // on (VoxelQuery / VoxelEdit / LightSample) never moved.
 
-use sdl_platform::{ allocBytes };
+use std::sys::sleep;
+use smalt::Mem;
 use crate::kernel::kblock::blocks::{ isSolid, isCollidable, hasCollisionBox, partialBoxHeight };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
@@ -29,8 +30,8 @@ use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::ChunkMesher;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample };
-use crate::config;
-use crate::config::{ Block };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
 
 /**
  * The world-generation INJECTION seam: fill a freshly-streamed slot with terrain
@@ -54,15 +55,15 @@ trait Generator {
 //   * LightSample — baked per-voxel light reads the renderer samples per corner
 // It composes the components and delegates; the seam signatures are verbatim.
 class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
-    faces : FaceMesh,     // baked render faces (mesher writes, renderer reads)
-    torches : TorchField, // per-slot torch posts
-    cols : ColumnRing,    // per-slot chunk ownership + collision top
-    store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
-    leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
-    gen : dyn Generator[], // terrain generation seam (concrete impl injected by
-                          // the app), held in a one-slot array: a trait-typed
-                          // field cannot store a class implementer (E0709)
-    mesher : ChunkMesher, // voxel → face/torch/collision-top mesher
+    pub(crate) faces : FaceMesh,     // baked render faces (mesher writes, renderer reads)
+    pub(crate) torches : TorchField, // per-slot torch posts
+    pub(crate) cols : ColumnRing,    // per-slot chunk ownership + collision top
+    pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
+    pub(crate) leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
+    gen : dyn Generator[],           // terrain generation seam (concrete impl injected by
+                                     // the app), held in a one-slot array: a trait-typed
+                                     // field cannot store a class implementer (E0709)
+    mesher : ChunkMesher,            // voxel → face/torch/collision-top mesher
 
     /**
      * Allocate the slot ring + per-slot face / torch / collision buffers, compose
@@ -70,16 +71,16 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * unloaded.
      */
     constructor() {
-        let slots : i32 = config::span * config::span;
-        let faceCap : i32 = slots * config::maxFacesPerChunk;
-        let s : i32 = config::chunkSize;
-        let torchCap : i32 = slots * config::maxTorchesPerChunk;
+        let slots : i32 = World::SPAN * World::SPAN;
+        let faceCap : i32 = slots * World::MAX_FACES_PER_CHUNK;
+        let s : i32 = World::CHUNK_SIZE;
+        let torchCap : i32 = slots * World::MAX_TORCHES_PER_CHUNK;
         self.faces = FaceMesh {
             fcount: malloc<i32>(slots),
             fx: malloc<i32>(faceCap), fy: malloc<i32>(faceCap), fz: malloc<i32>(faceCap),
             ftile: malloc<i32>(faceCap),
-            flight: allocBytes((faceCap as i64) * 4),
-            fao: allocBytes((faceCap as i64) * 4),
+            flight: Mem::take((faceCap as i64) * 4),
+            fao: Mem::take((faceCap as i64) * 4),
         };
         self.torches = TorchField {
             tx: malloc<i32>(torchCap), ty: malloc<i32>(torchCap), tz: malloc<i32>(torchCap),
@@ -110,7 +111,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * concrete generator.
      * @param g  the generator implementation (ownership taken)
      */
-    fn attachGenerator(mut self, own g : dyn Generator) : void {
+    pub(crate) fn attachGenerator(mut self, own g : dyn Generator) : void {
         self.gen[0] = g;
     }
 
@@ -122,7 +123,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the wrapped index
      */
     fn wrap(self, v : i32) : i32 {
-        let s : i32 = config::span;
+        let s : i32 = World::SPAN;
         let m : i32 = v - (v / s) * s;
         if (m < 0) {
             m = m + s;
@@ -137,7 +138,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the slot index
      */
     fn slotFor(self, cx : i32, cz : i32) : i32 {
-        return self.wrap(cz) * config::span + self.wrap(cx);
+        return self.wrap(cz) * World::SPAN + self.wrap(cx);
     }
 
     /**
@@ -207,12 +208,12 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the terrain surface height
      */
     fn columnHeight(self, wx : i32, wz : i32) : i32 {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(wx, s);
         let cz : i32 = self.floorDiv(wz, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
-            return config::seaLevel;
+            return World::SEA_LEVEL;
         }
         return self.gen[0].heightAt(slot, wx - cx * s, wz - cz * s);
     }
@@ -225,12 +226,12 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the collision surface height
      */
     fn collisionHeight(self, wx : i32, wz : i32) : i32 {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(wx, s);
         let cz : i32 = self.floorDiv(wz, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
-            return config::seaLevel;
+            return World::SEA_LEVEL;
         }
         return self.cols.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)];
     }
@@ -320,8 +321,8 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param camCZ  the camera chunk z coordinate
      */
     fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32 {
-        let r : i32 = config::viewRadius;
-        let budget : i32 = config::chunkLoadsPerFrame;
+        let r : i32 = World::VIEW_RADIUS;
+        let budget : i32 = World::CHUNK_LOADS_PER_FRAME;
         if (budget < 1) {
             budget = 1;
         }
@@ -411,7 +412,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
 
     /** Re-mesh every slot whose light changed, then re-flag it for a sky-AO bake. */
     fn flushLightMesh(mut self) : void {
-        let slots : i32 = config::span * config::span;
+        let slots : i32 = World::SPAN * World::SPAN;
         let i : i32 = 0;
         while (i < slots) {
             if (self.leng.takeDirty(i)) {
@@ -437,10 +438,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         let wx : i32 = cell.x;
         let wy : i32 = cell.y;
         let wz : i32 = cell.z;
-        if (wy < 0 || wy >= config::worldHeight) {
+        if (wy < 0 || wy >= World::HEIGHT) {
             return;
         }
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(wx, s);
         let cz : i32 = self.floorDiv(wz, s);
         let dcz : i32 = 0 - 1;
@@ -528,7 +529,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     }
 
     /** One pass of the whole lighting system (sun shadows + sky-AO / bounce). */
-    fn stepLight(mut self) : void {
+    pub(file) fn stepLight(mut self) : void {
         self.leng.stepBake();
     }
 
@@ -543,7 +544,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     }
 
     /** Whether the background light thread should keep running. */
-    fn lightAlive(self) : bool {
+    pub(file) fn lightAlive(self) : bool {
         return self.leng.lightAlive();
     }
 }
@@ -559,7 +560,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
 fn lightLoop(man : ChunkManager) : i32 {
     while (man.lightAlive()) {
         man.stepLight();
-        System::sleep(8);
+        sleep(8);
     }
     return 0;
 }

@@ -1,15 +1,18 @@
 // configs::screen — window size, framebuffer size and the camera projection.
 //
-// The window is `screenW × screenH`; the world is rasterised into a smaller
-// `renderW × renderH` framebuffer that SDL upscales to the window. Fewer
+// The window is `Screen::WINDOW_W × Screen::WINDOW_H`; the world is rasterised into a smaller
+// `Screen::RENDER_W × Screen::RENDER_H` framebuffer the blit upscales to the window. Fewer
 // pixels to fill is the main per-frame speed lever — the projection constants
-// (`halfW/halfH/focal`) match the RENDER size.
+// (`Screen::HALF_W/Screen::HALF_H/Screen::FOCAL`) match the RENDER size.
 
-const screenW : i32 = 960;
-const screenH : i32 = 600;
-const renderW : i32 = 640;
-const renderH : i32 = 400;
-const halfW : f64 = 320.0;
-const halfH : f64 = 200.0;
-const focal : f64 = 330.0;   // wider FOV (~62° vert) — less "zoomed" than 373
-const nearPlane : f64 = 0.12;
+/** Window size, framebuffer size and the camera projection. */
+class Screen {
+    static WINDOW_W : i32 = 960;
+    static WINDOW_H : i32 = 600;
+    static RENDER_W : i32 = 640;
+    static RENDER_H : i32 = 400;
+    static HALF_W : f64 = 320.0;
+    static HALF_H : f64 = 200.0;
+    static FOCAL : f64 = 330.0;   // wider FOV (~62° vert) — less "zoomed" than 373
+    static NEAR_PLANE : f64 = 0.12;
+}

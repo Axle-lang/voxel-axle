@@ -1,49 +1,52 @@
 // configs::world — the streamed chunk world and the simulation tick rate.
 //
-// A fixed ring of `span × span` chunks follows the camera. Terrain is
-// generated up to `maxHeight`; each column is `worldHeight` voxels tall so the
+// A fixed ring of `World::SPAN × World::SPAN` chunks follows the camera. Terrain is
+// generated up to `World::MAX_HEIGHT`; each column is `World::HEIGHT` voxels tall so the
 // headroom above the terrain lets the player build/stack, and neighbour
 // lookups in the mesher never read uninitialised memory (the mesher only
 // scans up to a chunk's recorded `maxFY`, so the empty sky costs nothing).
 
-const chunkSize : i32 = 16;
-const viewRadius : i32 = 6;  // chunks loaded each side → 13×13
-const span : i32 = 13;  // 2*viewRadius + 1
-const maxFacesPerChunk : i32 = 14000;
-// Streamed chunk (re)builds per frame: spreads the cost of entering new chunks
-// over several frames (nearest-first) instead of a single stutter when crossing
-// a chunk border. Generation stays on the main thread (the world is read every
-// tick by physics + the render + the light thread, so it must not change
-// mid-frame), so this amortises rather than offloads.
-const chunkLoadsPerFrame : i32 = 2;
-const maxTorchesPerChunk : i32 = 256;  // thin-post torches collected per chunk
-const seaLevel : i32 = 24;
-const maxHeight : i32 = 96;
-const worldHeight : i32 = 128;
+/** The streamed chunk world, the tick rate and the block-update sim. */
+class World {
+    static CHUNK_SIZE : i32 = 16;
+    static VIEW_RADIUS : i32 = 6; // chunks loaded each side → 13×13
+    static SPAN : i32 = 13;       // 2*viewRadius + 1
+    static MAX_FACES_PER_CHUNK : i32 = 14000;
+    // Streamed chunk (re)builds per frame: spreads the cost of entering new chunks
+    // over several frames (nearest-first) instead of a single stutter when crossing
+    // a chunk border. Generation stays on the main thread (the world is read every
+    // tick by physics + the render + the light thread, so it must not change
+    // mid-frame), so this amortises rather than offloads.
+    static CHUNK_LOADS_PER_FRAME : i32 = 2;
+    static MAX_TORCHES_PER_CHUNK : i32 = 256;  // thin-post torches collected per chunk
+    static SEA_LEVEL : i32 = 24;
+    static MAX_HEIGHT : i32 = 96;
+    static HEIGHT : i32 = 128;
 
-// ── Tick rate ───────────────────────────────────────────────
-// The main loop is held to this many iterations per second by the frame
-// clock (`platform::clock`). Physics/AI constants are tuned for this rate,
-// and capping it stops the CPU spinning at hundreds of fps when v-sync is
-// unavailable or disabled. 60 matches a typical display.
-const tickHz : i32 = 60;
+    // ── Tick rate ───────────────────────────────────────────────
+    // The main loop is held to this many iterations per second by the frame
+    // clock (`kio::clock`). Physics/AI constants are tuned for this rate,
+    // and capping it stops the CPU spinning at hundreds of fps when v-sync is
+    // unavailable or disabled. 60 matches a typical display.
+    static TICK_HZ : i32 = 60;
 
-// ── Scheduler cadences (see game::tick::TickManager) ────────
-// Heavy, low-urgency systems run on a coarser uniform cadence than physics.
-// The mob cull + spawn-ring scan (formerly every tick) only needs to top the
-// population up a few times a second; it is invisible because spawning is
-// random and out of view. World streaming is event-driven (chunk-border
-// cross), not periodic, so it has no constant here.
-const maintainTicks : i32 = 10;  // mob cull + spawn scan every 10 ticks (~6 Hz)
+    // ── Scheduler cadences (see `game::tick::TickManager`) ──────
+    // Heavy, low-urgency systems run on a coarser uniform cadence than physics.
+    // The mob cull + spawn-ring scan (formerly every tick) only needs to top the
+    // population up a few times a second; it is invisible because spawning is
+    // random and out of view. World streaming is event-driven (chunk-border
+    // cross), not periodic, so it has no constant here.
+    static MAINTAIN_TICKS : i32 = 10;  // mob cull + spawn scan every 10 ticks (~6 Hz)
 
-// ── Block-update sim (world::blocksim) ──────────────────────
-// Falling blocks + edit-driven water flow are stepped on this cadence, with a
-// per-step cell budget so a big disturbance spreads over a few frames instead
-// of spiking. The queue caps total pending cells (drop-on-full keeps it
-// stable). Idle cost is zero when nothing is active.
-// One ring of water spread / one block of a fall advances per step, so this
-// cadence sets how fast fluids flow — slower = calmer, more Minecraft-like.
-const simTicks : i32 = 8;       // step the sim every 8 ticks (~7.5 Hz)
-const simBudget : i32 = 256;    // max cells processed per step (one generation)
-const simQueueCap : i32 = 16384; // max pending cells (drop-on-full)
-const flowSearch : i32 = 5;     // how far water looks for a downhill drop to flow toward
+    // ── Block-update sim (`kworld::blocksim`) ───────────────────
+    // Falling blocks + edit-driven water flow are stepped on this cadence, with a
+    // per-step cell budget so a big disturbance spreads over a few frames instead
+    // of spiking. The queue caps total pending cells (drop-on-full keeps it
+    // stable). Idle cost is zero when nothing is active.
+    // One ring of water spread / one block of a fall advances per step, so this
+    // cadence sets how fast fluids flow — slower = calmer, more Minecraft-like.
+    static SIM_TICKS : i32 = 8;         // step the sim every 8 ticks (~7.5 Hz)
+    static SIM_BUDGET : i32 = 256;      // max cells processed per step (one generation)
+    static SIM_QUEUE_CAP : i32 = 16384; // max pending cells (drop-on-full)
+    static FLOW_SEARCH : i32 = 5;       // how far water looks for a downhill drop to flow toward
+}

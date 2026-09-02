@@ -15,13 +15,15 @@ use crate::kernel::kblock::blocks::{ isLeaves };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::game::world::treegen::{ stampTree };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::config;
-use crate::config::{ Block };
-use crate::config::{ BiomeId };
+use crate::configs::biomes::{ BiomeId };
+use crate::configs::blocks::{ Block };
+use crate::configs::noise::{ Noise };
+use crate::configs::trees::{ Trees };
+use crate::configs::world::{ World };
 
 class TerrainGen : Generator {
-    store : VoxStore,   // shared voxel storage (aliased from the manager)
-    hmap : i32[],       // padded per-slot terrain top (tree-free), owned here
+    store : VoxStore, // shared voxel storage (aliased from the manager)
+    hmap : i32[],     // padded per-slot terrain top (tree-free), owned here
 
     /**
      * Allocate the padded heightmap over a shared store. Biome parameters are a
@@ -30,7 +32,7 @@ class TerrainGen : Generator {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(own store : VoxStore, slots : i32) {
-        let hSide : i32 = config::chunkSize + 2;
+        let hSide : i32 = World::CHUNK_SIZE + 2;
         self.store = store;
         self.hmap = malloc<i32>(slots * hSide * hSide);
     }
@@ -43,7 +45,7 @@ class TerrainGen : Generator {
      * @return the terrain top height
      */
     fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32 {
-        let hSide : i32 = config::chunkSize + 2;
+        let hSide : i32 = World::CHUNK_SIZE + 2;
         return self.hmap[slot * hSide * hSide + (lz + 1) * hSide + (lx + 1)];
     }
 
@@ -65,7 +67,7 @@ class TerrainGen : Generator {
      * @param cz    the chunk z coordinate
      */
     fn genHeightmap(mut self, slot : i32, cx : i32, cz : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let hSide : i32 = s + 2;
         let base : i32 = slot * hSide * hSide;
         let lz : i32 = 0 - 1;
@@ -74,12 +76,12 @@ class TerrainGen : Generator {
             while (lx <= s) {
                 let wx : f64 = (cx * s + lx) as f64;
                 let wz : f64 = (cz * s + lz) as f64;
-                let h : i32 = Math::floorToInt(terrainHeight(wx, wz)) as i32;
+                let h : i32 = (terrainHeight(wx, wz)).floorToInt() as i32;
                 if (h < 2) {
                     h = 2;
                 }
-                if (h > config::maxHeight - 1) {
-                    h = config::maxHeight - 1;
+                if (h > World::MAX_HEIGHT - 1) {
+                    h = World::MAX_HEIGHT - 1;
                 }
                 self.hmap[base + (lz + 1) * hSide + (lx + 1)] = h;
                 lx = lx + 1;
@@ -96,12 +98,12 @@ class TerrainGen : Generator {
      * @return the clamped terrain height
      */
     fn colHeightWorld(self, wx : i32, wz : i32) : i32 {
-        let h : i32 = Math::floorToInt(terrainHeight(wx as f64, wz as f64)) as i32;
+        let h : i32 = (terrainHeight(wx as f64, wz as f64)).floorToInt() as i32;
         if (h < 2) {
             h = 2;
         }
-        if (h > config::maxHeight - 1) {
-            h = config::maxHeight - 1;
+        if (h > World::MAX_HEIGHT - 1) {
+            h = World::MAX_HEIGHT - 1;
         }
         return h;
     }
@@ -117,7 +119,7 @@ class TerrainGen : Generator {
      * @return the block id (ore or stone)
      */
     fn oreAt(self, cell : IVec3) : Block {
-        let r : f64 = hashI(cell.x * 7 + cell.y * 131, cell.z * 13 + cell.y * 977, config::seedI + 9171);
+        let r : f64 = hashI(cell.x * 7 + cell.y * 131, cell.z * 13 + cell.y * 977, Noise::SEED + 9171);
         if (cell.y < 14) {
             if (r > 0.9930) {
                 return Block::DiamondOre;
@@ -152,7 +154,7 @@ class TerrainGen : Generator {
      * @param cz    the chunk z coordinate
      */
     fn genVoxels(mut self, slot : i32, cx : i32, cz : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         self.store.maxFY[slot] = 0;
         let lz : i32 = 0 - 1;
         while (lz <= s) {
@@ -166,12 +168,12 @@ class TerrainGen : Generator {
                 let surf : Block = biomeSurface(biome, h);
                 let filler : Block = biomeDef(biome).filler;
                 let topY : i32 = h - 1;
-                if (h <= config::seaLevel) {
-                    topY = config::seaLevel;
+                if (h <= World::SEA_LEVEL) {
+                    topY = World::SEA_LEVEL;
                 }
                 self.store.bumpFY(slot, topY);
                 let ly : i32 = 0;
-                while (ly < config::worldHeight) {
+                while (ly < World::HEIGHT) {
                     let id : Block = Block::Air;
                     if (ly < h) {
                         if (ly == h - 1) {
@@ -181,10 +183,10 @@ class TerrainGen : Generator {
                         } else {
                             id = self.oreAt(ivec3(wx, ly, wz));
                         }
-                    } else if (h <= config::seaLevel && ly <= config::seaLevel) {
+                    } else if (h <= World::SEA_LEVEL && ly <= World::SEA_LEVEL) {
                         id = Block::Water;
                         // Frozen ocean: the water surface freezes to ice.
-                        if (biome == BiomeId::FrozenOcean && ly == config::seaLevel) {
+                        if (biome == BiomeId::FrozenOcean && ly == World::SEA_LEVEL) {
                             id = Block::Ice;
                         }
                     }
@@ -194,7 +196,7 @@ class TerrainGen : Generator {
                 // Cold-biome ground: a thin, noise-varied snow layer on top of the
                 // surface (bare patches where the noise is low, the odd full block
                 // where it's high) — so the ground carries snow like the trees.
-                if (self.coldBiome(biome) && h > config::seaLevel && h < config::worldHeight) {
+                if (self.coldBiome(biome) && h > World::SEA_LEVEL && h < World::HEIGHT) {
                     let frac : f64 = snowDepth(wx as f64, wz as f64);
                     if (frac > 0.0) {
                         let sb : Block = Block::SnowLayer;
@@ -222,7 +224,7 @@ class TerrainGen : Generator {
      * @param cz    the chunk z coordinate
      */
     fn stampTrees(mut self, slot : i32, cx : i32, cz : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let olz : i32 = 0 - 2;
         while (olz <= s + 1) {
             let olx : i32 = 0 - 2;
@@ -230,13 +232,13 @@ class TerrainGen : Generator {
                 let wx : i32 = cx * s + olx;
                 let wz : i32 = cz * s + olz;
                 let h : i32 = self.colHeightWorld(wx, wz);
-                if (h > config::seaLevel) {
+                if (h > World::SEA_LEVEL) {
                     let biome : BiomeId = biomeAt(temperature(wx as f64, wz as f64),
                         humidity(wx as f64, wz as f64), h);
                     // Thin every biome's trees toward sparser, airier woods.
                     let bd : BiomeDef = biomeDef(biome);
                     let thr : f64 = bd.treeThresh;
-                    thr = thr + (1.0 - thr) * config::treeThin;
+                    thr = thr + (1.0 - thr) * Trees::THIN;
                     if (treeHash(wx as f64, wz as f64) > thr) {
                         stampTree(self.store, bd.treeKind, bd.treeHt, slot, ivec3(olx, h, olz));
                         // Cold biomes: dust the canopy with a thin snow cap.
@@ -263,10 +265,10 @@ class TerrainGen : Generator {
      * @param cz0     the chunk's world-z origin (cz * chunkSize)
      */
     fn snowCapTree(mut self, slot : i32, olx : i32, olz : i32, baseY : i32, height : i32, cx0 : i32, cz0 : i32) : void {
-        let s : i32 = config::chunkSize;
+        let s : i32 = World::CHUNK_SIZE;
         let topSearch : i32 = baseY + height + 4;
-        if (topSearch >= config::worldHeight) {
-            topSearch = config::worldHeight - 1;
+        if (topSearch >= World::HEIGHT) {
+            topSearch = World::HEIGHT - 1;
         }
         let dz : i32 = 0 - 2;
         while (dz <= 2) {
@@ -305,7 +307,7 @@ class TerrainGen : Generator {
             return;   // no leaf in this column
         }
         // The leaf needs open air directly above to hold the snow.
-        if (y + 1 >= config::worldHeight || self.store.getVox(slot, ivec3(lx, y + 1, lz)) != Block::Air) {
+        if (y + 1 >= World::HEIGHT || self.store.getVox(slot, ivec3(lx, y + 1, lz)) != Block::Air) {
             return;
         }
         // Only cap columns whose own ground biome is cold, so the canopy snow

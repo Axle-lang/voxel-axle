@@ -2,10 +2,8 @@
 // wander AI, melee, and the hostile creeper.
 //
 // Aggression ranges are 3D (they fold in the Y gap), so a player flying high
-// overhead is out of range: `creeperMaxVertical` is an extra hard cap on the
+// overhead is out of range: `Mobs::CREEPER_MAX_VERTICAL` is an extra hard cap on the
 // vertical gap so hovering above a creeper never trips its fuse.
-
-const mobCap : i32 = 32;
 
 // The creature species. Discriminants double as the per-species array selector
 // in the manager's melee path, so keep this order in sync there.
@@ -16,42 +14,47 @@ enum MobKind : i32 {
     Creeper,
     Pig,
 }
-const mobChickenHp : i32 = 4;
-const mobSheepHp : i32 = 8;
-const mobCowHp : i32 = 10;
-const mobCreeperHp : i32 = 12;
-const mobPigHp : i32 = 10;
-const mobPigSpeed : f64 = 0.030;
 
-// ── Creeper (hostile: approaches, charges, explodes) ────────
-const mobCreeperSpeed : f64 = 0.034;     // calm walk toward the player
-const creeperChaseDist : f64 = 20.0;     // only homes in within this 3D range
-const creeperTriggerDist : f64 = 2.6;    // starts its fuse within this 3D range
-const creeperMaxVertical : f64 = 3.0;    // never charges a player this far above/below
-const creeperFuseFrames : i32 = 148;     // ~2.47 s — matches the shortened charge.wav
-const creeperBlastRadius : f64 = 2.6;    // blocks destroyed / hurt radius
-const creeperDamage : i32 = 16;          // peak player damage at the centre
+/** Population, per-species hit points and speeds, the wander AI, melee, and the creeper. */
+class Mobs {
+    static CAP : i32 = 32;
+    static CHICKEN_HP : i32 = 4;
+    static SHEEP_HP : i32 = 8;
+    static COW_HP : i32 = 10;
+    static CREEPER_HP : i32 = 12;
+    static PIG_HP : i32 = 10;
+    static PIG_SPEED : f64 = 0.030;
 
-// ── Passive animals (wander AI) ─────────────────────────────
-const mobWanderSpeed : f64 = 0.034;
-const mobSheepSpeed : f64 = 0.030;
-const mobCowSpeed : f64 = 0.024;
-const mobSpawnRadius : i32 = 30;  // blocks from player
-const mobSpawnMin : i32 = 12;
-// Skip spawn directions whose dot with the camera forward exceeds this, so
-// creatures appear off-screen (≈ outside a 60° front cone), not in view.
-const mobSpawnFovDot : f64 = 0.5;
-const mobDespawnDist : f64 = 56.0;
-const mobTargetCount : i32 = 18;
-const mobTurnEveryMin : i32 = 40;
-const mobTurnEveryRand : i32 = 110;
-const mobTurnRate : f64 = 0.10;   // radians/frame the heading eases toward target
-const mobIdleChance : f64 = 0.34; // chance a turn picks "stand and graze"
-const mobFleeFrames : i32 = 70;   // panic-run duration after being hit
-const mobFleeSpeed : f64 = 0.085;
-const chickenGravityScale : f64 = 0.42;  // chickens flutter down slowly
-const deathFrames : i32 = 38;     // collapse animation length before removal
-const attackRange : f64 = 3.4;
-const attackDamage : i32 = 4;
-const attackCooldown : i32 = 18;
-const hurtFlashFrames : i32 = 10;  // frames a struck mob glows red
+    // ── Creeper (hostile: approaches, charges, explodes) ────────
+    static CREEPER_SPEED : f64 = 0.034;      // calm walk toward the player
+    static CREEPER_CHASE_DIST : f64 = 20.0;  // only homes in within this 3D range
+    static CREEPER_TRIGGER_DIST : f64 = 2.6; // starts its fuse within this 3D range
+    static CREEPER_MAX_VERTICAL : f64 = 3.0; // never charges a player this far above/below
+    static CREEPER_FUSE_FRAMES : i32 = 148;  // ~2.47 s — matches the shortened charge.wav
+    static CREEPER_BLAST_RADIUS : f64 = 2.6; // blocks destroyed / hurt radius
+    static CREEPER_DAMAGE : i32 = 16;        // peak player damage at the centre
+
+    // ── Passive animals (wander AI) ─────────────────────────────
+    static WANDER_SPEED : f64 = 0.034;
+    static SHEEP_SPEED : f64 = 0.030;
+    static COW_SPEED : f64 = 0.024;
+    static SPAWN_RADIUS : i32 = 30;  // blocks from player
+    static SPAWN_MIN : i32 = 12;
+    // Skip spawn directions whose dot with the camera forward exceeds this, so
+    // creatures appear off-screen (≈ outside a 60° front cone), not in view.
+    static SPAWN_FOV_DOT : f64 = 0.5;
+    static DESPAWN_DIST : f64 = 56.0;
+    static TARGET_COUNT : i32 = 18;
+    static TURN_EVERY_MIN : i32 = 40;
+    static TURN_EVERY_RAND : i32 = 110;
+    static TURN_RATE : f64 = 0.10;             // radians/frame the heading eases toward target
+    static IDLE_CHANCE : f64 = 0.34;           // chance a turn picks "stand and graze"
+    static FLEE_FRAMES : i32 = 70;             // panic-run duration after being hit
+    static FLEE_SPEED : f64 = 0.085;
+    static CHICKEN_GRAVITY_SCALE : f64 = 0.42; // chickens flutter down slowly
+    static DEATH_FRAMES : i32 = 38;            // collapse animation length before removal
+    static ATTACK_RANGE : f64 = 3.4;
+    static ATTACK_DAMAGE : i32 = 4;
+    static ATTACK_COOLDOWN : i32 = 18;
+    static HURT_FLASH_FRAMES : i32 = 10;       // frames a struck mob glows red
+}

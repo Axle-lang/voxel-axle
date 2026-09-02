@@ -2,48 +2,87 @@
 // elapsed time instead of once per displayed frame.
 //
 // `steps()` accumulates the wall-clock time since the last call and
-// returns how many fixed `1000/tickHz`-ms simulation steps are due this
+// returns how many fixed `1000/World::TICK_HZ`-ms simulation steps are due this
 // frame: 1 at the target rate, more to catch up after a slow frame, 0 if
 // the frame came early — so jumping/walking run at the same real speed
 // whatever the frame rate (the accumulator is clamped so a long stall
 // can't trigger a "spiral of death" of hundreds of steps).
 //
 // `cap()` then sleeps any leftover frame budget so the loop doesn't spin
-// the CPU at hundreds of fps when v-sync is missing or disabled
-// (`SDL_RenderPresent` alone is not a guaranteed cap).
+// the CPU at hundreds of fps. The renderer here presents through a
+// framebuffer blit, which is synchronised to nothing — so this is the
+// *only* thing holding the loop down, not a backstop behind v-sync.
 //
-// Timing primitives come from the `sdl_platform` crate; the tick rate is a
-// game tunable, so this stays in the game rather than the platform layer.
+// Time comes from smalt's `Clock`, which is a monotonic counter on both
+// platforms — `QueryPerformanceCounter` or `clock_gettime(CLOCK_MONOTONIC)`
+// — so a system clock change cannot make `dt` negative or enormous. The
+// tick rate is a game tunable, so the pacing stays here rather than in
+// the platform layer.
+//
+// Milliseconds are `i64` because that is what a monotonic counter
+// answers in: an `i32` of them wraps after twenty-five days, and the
+// frame that wrapped would see `dt` go hugely negative.
 
-use sdl_platform::{ticks, delay};
-use crate::config;
+use smalt::Clock;
+use crate::configs::world::{ World };
 
 /**
- * Fixed-timestep pacing capability: how many simulation steps are due this frame
- * (`steps`) and sleeping the leftover budget (`cap`). Lets the main loop drive
- * pacing through a capability rather than a concrete clock type.
+ * Fixed-timestep pacing capability: how many simulation steps are due this
+ * frame (`steps`) and sleeping the leftover budget (`cap`). Lets the main
+ * loop drive pacing through a capability rather than a concrete clock type.
+ *
+ * Named `Pacer` and not `Clock`: smalt's `Clock` is the monotonic counter
+ * this is built on, and one compilation unit cannot hold two of a name.
  */
-trait Clock {
+trait Pacer {
     fn steps(mut self) : i32;
     fn cap(mut self) : void;
 }
 
-class GameClock : Clock {
-    msPerTick : i32,
-    maxAccum : i32,
-    accLast : i32,
-    acc : i32,
-    capLast : i32,
+/**
+ * The game's pacer.
+ *
+ * Owns a smalt `Clock`, which holds the platform's reading slot — so
+ * this is `Closeable` and `main` closes it.
+ */
+class GameClock : Pacer, Closeable {
+    /**
+     * How far behind the simulation may fall before it stops catching up.
+     *
+     * A stall longer than this leaves the world running slow for a frame,
+     * which is the failure a player forgives — chasing it with a hundred
+     * steps is the one that never catches up at all.
+     */
+    static MAX_CATCHUP_STEPS : i64 = 8;
 
     /**
-     * Start the clock at the current time with an empty accumulator.
+     * The monotonic counter, and the stamp the event pump reads.
+     *
+     * Exposed as a field rather than through a getter: handing a
+     * `Closeable` out of a call reads as a transfer, and the call site
+     * would then owe a `close()` of its own (E0511). This object owns
+     * the only clock in the program — a second one would answer from a
+     * different origin, and two timelines in one frame loop is a bug
+     * waiting for someone to subtract them.
      */
+    pub(crate) sys : Clock = new Clock();
+
+    /** Milliseconds of real time one simulation step stands for. */
+    msPerTick : i64 = (1000 / World::TICK_HZ) as i64;
+
+    /** Real time owed to the simulation but not yet stepped. */
+    acc : i64 = 0;
+
+    /** The reading `steps` last measured its delta against. */
+    accLast : i64 = 0;
+
+    /** The reading `cap` last held the loop to. */
+    capLast : i64 = 0;
+
+    /** Start the clock at the current time with an empty accumulator. */
     constructor() {
-        self.msPerTick = 1000 / config::tickHz;
-        self.maxAccum = self.msPerTick * 8;   // cap catch-up to 8 steps
-        self.accLast = ticks();
-        self.acc = 0;
-        self.capLast = ticks();
+        self.accLast = self.sys.ticks();
+        self.capLast = self.accLast;
     }
 
     /**
@@ -51,31 +90,37 @@ class GameClock : Clock {
      * @return how many fixed simulation steps are due this frame
      */
     fn steps(mut self) : i32 {
-        let now : i32 = ticks();
-        let dt : i32 = now - self.accLast;
+        let now : i64 = self.sys.ticks();
+        let dt : i64 = now - self.accLast;
         self.accLast = now;
         if (dt < 0) {
             dt = 0;
         }
         self.acc = self.acc + dt;
-        if (self.acc > self.maxAccum) {
-            self.acc = self.maxAccum;
+        let maxAccum : i64 = self.msPerTick * GameClock::MAX_CATCHUP_STEPS;
+        if (self.acc > maxAccum) {
+            self.acc = maxAccum;
         }
-        let n : i32 = self.acc / self.msPerTick;
+        let n : i64 = self.acc / self.msPerTick;
         self.acc = self.acc - n * self.msPerTick;
-        return n;
+        return n as i32;
     }
 
     /**
-     * Sleep any unused frame budget to hold the loop near `tickHz` and
+     * Sleep any unused frame budget to hold the loop near `World::TICK_HZ` and
      * keep the CPU idle between frames.
      */
     fn cap(mut self) : void {
-        let now : i32 = ticks();
-        let dt : i32 = now - self.capLast;
+        let now : i64 = self.sys.ticks();
+        let dt : i64 = now - self.capLast;
         if (dt >= 0 && dt < self.msPerTick) {
-            delay(self.msPerTick - dt);
+            self.sys.delay((self.msPerTick - dt) as i32);
         }
-        self.capLast = ticks();
+        self.capLast = self.sys.ticks();
+    }
+
+    /** Release the platform clock. */
+    fn close(self) : void {
+        self.sys.close();
     }
 }
