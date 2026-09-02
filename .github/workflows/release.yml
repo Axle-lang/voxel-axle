@@ -156,31 +156,18 @@ jobs:
             if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing from $dir" }
           }
           Add-Content -Path $env:GITHUB_PATH -Value $dir
-
-      # `axle` links Windows binaries by running `lld-link.exe`, which it
-      # looks for on PATH and nowhere else (`locate_windows_linker`). The
-      # runner image ships LLVM, but the job says so out loud rather than
-      # inheriting it by luck.
-      - name: Put the MSVC-flavoured lld on PATH
-        shell: pwsh
-        run: |
-          if (Get-Command lld-link.exe -ErrorAction SilentlyContinue) {
-            "lld-link.exe already on PATH: $((Get-Command lld-link.exe).Source)"
-            exit 0
-          }
-          $llvm = 'C:\Program Files\LLVM\bin'
-          if (-not (Test-Path (Join-Path $llvm 'lld-link.exe'))) {
-            choco install llvm -y --no-progress
-          }
-          if (-not (Test-Path (Join-Path $llvm 'lld-link.exe'))) {
-            throw 'lld-link.exe is not available; axle cannot link a Windows binary without it'
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $llvm
-
-      - name: Check the compiler is new enough
-        shell: pwsh
-        run: |
-          $got = (((axle --version) -split ' ')[1] -split '-')[0]
+          # `axle` links a Windows binary by running `lld-link.exe`, which
+          # it looks for on PATH and nowhere else (`locate_windows_linker`).
+          # The runner image ships LLVM and puts its bin on the machine
+          # PATH, so this asserts rather than installs — and if that ever
+          # stops being true, it says so here instead of surfacing as a
+          # linker error three steps later.
+          $lld = Get-Command lld-link.exe -ErrorAction SilentlyContinue
+          if (-not $lld) { throw 'lld-link.exe is not on PATH; axle cannot link a Windows binary without it (install LLVM)' }
+          "linker: $($lld.Source)"
+          # Same guard as the Linux job: the MSI is whatever is current, so
+          # check it instead of assuming.
+          $got = (((& (Join-Path $dir 'axle.exe') --version) -split ' ')[1] -split '-')[0]
           if ([version]$got -lt [version]$env:AXLE_MIN) {
             throw "axle $got is older than the required $env:AXLE_MIN"
           }
