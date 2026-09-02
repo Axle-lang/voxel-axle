@@ -1,0 +1,3 @@
+[submodule "vendor/smalt"]
+	path = vendor/smalt
+	url = https://github.com/Axle-lang/smalt

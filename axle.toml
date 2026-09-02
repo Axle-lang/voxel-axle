@@ -6,7 +6,15 @@ version = "0.1.0"
 # The platform layer: window, event queue, framebuffer blit, monotonic
 # clock, software audio mixer, whole-file reads and raw buffers. Written
 # in Axle, calling Win32 or X11 + ALSA directly depending on the build's
-# target. There is no `[link]` section here because there is nothing to
-# put in one: every library the link line needs is named by the
+# target.
+#
+# It is the `vendor/smalt` git submodule, so a clone pins the exact
+# platform layer a given commit of the game was built against, and its
+# src/ compiles together with ours. A clone without the submodule leaves
+# the directory empty and the build stops at the first `use smalt::…`;
+# `git submodule update --init` is the fix.
+#
+# There is no `[link]` section here because there is nothing to put in
+# one: every library the link line needs is named by the
 # `extern "C" from "…"` block inside smalt that imports from it.
-smalt = { path = "../smalt" }
+smalt = { path = "vendor/smalt" }

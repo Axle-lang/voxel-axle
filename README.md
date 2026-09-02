@@ -79,7 +79,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 ## 🚀 Quick start
 
 ```bash
-git clone <repo-url>
+git clone --recurse-submodules <repo-url>   # the platform layer is a submodule
 cd voxel-axle
 axle --version      # must print 0.12.1 or newer
 axle build          # compile
@@ -88,8 +88,8 @@ axle build          # compile
 
 That is the whole list: a compiler, and this repo. There is no library to
 install, no DLL to copy, and no `[link]` section to point at a package
-manager — the platform layer is [**smalt**](../smalt), which is Axle
-calling Win32 or X11 + ALSA directly and lives in a sibling checkout.
+manager — the platform layer is [**smalt**](https://github.com/Axle-lang/smalt), which is Axle calling
+Win32 or X11 + ALSA directly and rides along as a submodule.
 
 ## 🧩 Built with Axle
 
@@ -99,15 +99,28 @@ This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern 
 
 ## 📦 Prerequisites
 
-Two things: the **Axle compiler** (v0.12.1+) and a checkout of
-[**smalt**](../smalt) beside this one, which `axle.toml` names as a path
-dependency.
+Two things: the **Axle compiler** (v0.12.1+) and this repo **with its
+submodule**.
 
+### Clone the repo and its platform submodule
+
+The platform layer — window, event queue, framebuffer blit, monotonic
+clock, software audio mixer, whole-file reads and raw buffers — is
+[**smalt**](https://github.com/Axle-lang/smalt), pinned here as the
+**`vendor/smalt` git submodule**. Its `src/` compiles together with ours
+(`use smalt::…`), so a clone without the submodule leaves `vendor/smalt`
+empty and the build stops at the first unresolved `smalt` import.
+
+```bash
+# fresh clone — pull the submodule at the same time
+git clone --recurse-submodules <repo-url>
+
+# already cloned without it? initialise it after the fact
+git submodule update --init --recursive
 ```
-<parent>/
-  voxel-axle/     this repo
-  smalt/          the platform layer, compiled from source with the game
-```
+
+Later, to move to a newer platform layer:
+`git submodule update --remote vendor/smalt`, then commit the new pin.
 
 ### Install Axle
 
@@ -141,7 +154,7 @@ prerequisite and not a runtime one.
 
 ## 🛠️ Build & run
 
-From this directory, with `smalt` checked out beside it and
+From this directory, with the submodule initialised and
 `axle --version` reporting 0.12.1+:
 
 ```bash
@@ -238,7 +251,7 @@ Hot geometry and call-sites are bundled in value `struct`s instead of long argum
 A `use` that crosses folders is written from the source root with a `crate::` prefix (like Rust); same-folder siblings import by bare name.
 
 ```
-(../smalt)                 the platform layer — a sibling checkout whose src/
+vendor/smalt               the platform layer — a git submodule whose src/
                            compiles with ours (window, renderer, audio mixer, raw
                            memory, file IO); `use smalt::…`
 src/

@@ -1,7 +1,8 @@
 # CLAUDE.md — voxel-axle
 
 A Minecraft-style voxel game written in **Axle** and software-rendered into a
-window opened by [**smalt**](../smalt), the platform layer — also Axle, calling
+window opened by [**smalt**](https://github.com/Axle-lang/smalt), the platform layer —
+also Axle, calling
 Win32 or X11 + ALSA depending on the build's target. Source under `src/**.axle`,
 config in `axle.toml`. See `README.md` for the architecture and controls.
 
@@ -51,8 +52,10 @@ Two ways to get 0.12.1+:
 
 ## Runtime prerequisites for THIS project
 
-- A `smalt` checkout **beside this repo** (`../smalt`) — `axle.toml` names it as
-  a path dependency and its `src/` compiles with ours.
+- The **`vendor/smalt` submodule**, initialised — `axle.toml` names it as the
+  path dependency `vendor/smalt` and its `src/` compiles with ours. Clone with
+  `git clone --recurse-submodules`, or run `git submodule update --init` in an
+  existing checkout; without it the build stops at the first `smalt` import.
 - Nothing to install on Windows. On Linux the binary links `libX11` and
   `libasound`, which any desktop already has; building needs their `-dev`
   packages.

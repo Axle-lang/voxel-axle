@@ -13,6 +13,13 @@ on:
 permissions:
   contents: write   # needed to create the GitHub Release
 
+env:
+  # The compiler version these sources need (see CLAUDE.md). The apt repo
+  # serves whatever is current, so the build checks instead of assuming:
+  # an older `axle` then fails with one clear line rather than a hundred
+  # confusing errors further down.
+  AXLE_MIN: '0.12.1'
+
 jobs:
   linux:
     name: Build & release (Debian x86_64)
@@ -22,9 +29,13 @@ jobs:
     container: debian:bookworm-slim
     steps:
       # Install the toolchain first (no repo needed yet): the Axle compiler
-      # from its apt repo (LLVM 18 + lld are pulled in automatically) plus
-      # SDL2 dev for linking and git for checkout.
-      - name: Install Axle + SDL2
+      # from its apt repo (LLVM 18 + lld are pulled in automatically), git
+      # for the checkout and its submodule, and the X11 + ALSA headers
+      # smalt's Linux port links against. Those two are `-dev` packages for
+      # the linker's sake only — the produced binary runs against the
+      # libX11 and libasound any desktop already has, which is why nothing
+      # is bundled into the package below.
+      - name: Install Axle and the Linux link dependencies
         run: |
           set -eux
           apt-get update
@@ -34,14 +45,38 @@ jobs:
           echo "deb [signed-by=/etc/apt/keyrings/axle.gpg arch=amd64] https://apt.axle-lang.dev stable main" \
             > /etc/apt/sources.list.d/axle.list
           apt-get update
-          apt-get install -y axle libsdl2-dev
+          apt-get install -y axle libx11-dev libasound2-dev
+          # The checkout lands in a workspace this container does not own,
+          # which git refuses to read from — and it has to read it to
+          # clone the submodule — until it is told that is fine.
+          git config --global --add safe.directory '*'
           axle --version
 
+      - name: Check the compiler is new enough
+        run: |
+          set -eu
+          got=$(axle --version | awk '{print $2}' | cut -d- -f1)
+          if [ "$(printf '%s\n%s\n' "$AXLE_MIN" "$got" | sort -V | head -n1)" != "$AXLE_MIN" ]; then
+            echo "axle $got is older than the required $AXLE_MIN" >&2
+            exit 1
+          fi
+          echo "axle $got satisfies >= $AXLE_MIN"
+
+      # `submodules: recursive` is not optional: the platform layer is the
+      # `vendor/smalt` submodule and its src/ compiles with ours, so a
+      # checkout without it leaves the directory empty and the build stops
+      # at the first `use smalt::…`.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Build
         run: axle build
 
+      # The package is the binary and the atlas it reads at run time, and
+      # that is the whole list: there is no shared library to ship, so
+      # nothing is copied out of the image and no launcher script has to
+      # put anything on LD_LIBRARY_PATH.
       - name: Package
         run: |
           set -eux
@@ -49,21 +84,21 @@ jobs:
           mkdir -p "dist/$PKG"
           cp target/voxel "dist/$PKG/"
           cp atlas.raw "dist/$PKG/"
-          # Bundle the SDL2 runtime so the game runs without a system
-          # install; fall back to a note if it can't be located.
-          SDL_SO=$(ldconfig -p | awk '/libSDL2-2.0.so.0/ {print $NF; exit}')
-          if [ -n "${SDL_SO:-}" ] && [ -f "$SDL_SO" ]; then
-            cp "$SDL_SO" "dist/$PKG/"
-          fi
-          cat > "dist/$PKG/run.sh" <<'SH'
-          #!/usr/bin/env bash
-          # Launch with the bundled SDL2 (if present) on the library path.
-          here="$(cd "$(dirname "$0")" && pwd)"
-          LD_LIBRARY_PATH="$here:${LD_LIBRARY_PATH:-}" exec "$here/voxel"
-          SH
-          chmod +x "dist/$PKG/run.sh"
-          printf '%s\n' 'Run ./run.sh (bundles SDL2). If SDL2 is missing: sudo apt install libsdl2-2.0-0' \
-            > "dist/$PKG/README.txt"
+          chmod +x "dist/$PKG/voxel"
+          # Which smalt this binary was built against — the submodule pin,
+          # recorded so a release names its own platform layer.
+          smalt_sha=$(git -C vendor/smalt rev-parse --short HEAD)
+          cat > "dist/$PKG/README.txt" <<EOF
+          voxel — a Minecraft-style survival world, software-rendered on the CPU.
+
+          Run:  ./voxel        (atlas.raw must stay beside the binary)
+
+          There is nothing to install. The binary links libX11 and libasound,
+          which every Linux desktop already has; on a bare container those
+          are the packages libx11-6 and libasound2.
+
+          Built with $(axle --version) against smalt $smalt_sha.
+          EOF
           tar -C dist -czf "$PKG.tar.gz" "$PKG"
 
       - name: Upload build artifact
