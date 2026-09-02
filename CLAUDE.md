@@ -55,7 +55,8 @@ Two ways to get 0.12.1+:
 - The **`vendor/smalt` submodule**, initialised — `axle.toml` names it as the
   path dependency `vendor/smalt` and its `src/` compiles with ours. Clone with
   `git clone --recurse-submodules`, or run `git submodule update --init` in an
-  existing checkout; without it the build stops at the first `smalt` import.
+  existing checkout; without it `axle build` stops immediately with
+  ``dependency `smalt` … has no axle.toml at …/vendor/smalt``.
 - Nothing to install on Windows. On Linux the binary links `libX11` and
   `libasound`, which any desktop already has; building needs their `-dev`
   packages.

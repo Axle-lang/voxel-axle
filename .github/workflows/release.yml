@@ -64,8 +64,8 @@ jobs:
 
       # `submodules: recursive` is not optional: the platform layer is the
       # `vendor/smalt` submodule and its src/ compiles with ours, so a
-      # checkout without it leaves the directory empty and the build stops
-      # at the first `use smalt::…`.
+      # checkout without it leaves the directory empty and `axle build`
+      # stops on a missing dependency before it reads any source.
       - uses: actions/checkout@v4
         with:
           submodules: recursive

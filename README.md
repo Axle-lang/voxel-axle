@@ -109,7 +109,8 @@ clock, software audio mixer, whole-file reads and raw buffers — is
 [**smalt**](https://github.com/Axle-lang/smalt), pinned here as the
 **`vendor/smalt` git submodule**. Its `src/` compiles together with ours
 (`use smalt::…`), so a clone without the submodule leaves `vendor/smalt`
-empty and the build stops at the first unresolved `smalt` import.
+empty and the build stops before reading a line of source:
+``dependency `smalt` … has no axle.toml at …/vendor/smalt``.
 
 ```bash
 # fresh clone — pull the submodule at the same time
