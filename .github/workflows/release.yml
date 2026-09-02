@@ -115,3 +115,118 @@ jobs:
         with:
           files: voxel-axle-linux-x86_64.tar.gz
           generate_release_notes: true
+
+  windows:
+    name: Build & release (Windows x86_64)
+    runs-on: windows-latest
+    steps:
+      # There is no apt repo here, and no cross-build from the Linux job
+      # either: `axle build --target x86_64-pc-windows-msvc` needs
+      # `axle_stdlib.lib` / `axle_runtime.lib` (COFF) plus the MSVC import
+      # libraries the link line asks for (kernel32, ucrt, msvcrt,
+      # vcruntime, bcrypt …), and the Debian package ships only the ELF
+      # `libaxle_stdlib.a`. So the Windows binary is built on Windows,
+      # where the MSI supplies the .lib pair and the toolchain the rest.
+      - name: Install Axle
+        shell: pwsh
+        run: |
+          $msi = Join-Path $env:RUNNER_TEMP 'axle.msi'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri 'https://dl.axle-lang.dev/latest/axle-windows-x86_64.msi' -OutFile $msi
+          $p = Start-Process msiexec.exe -Wait -PassThru `
+            -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart'
+          if ($p.ExitCode -ne 0) { throw "msiexec failed with exit code $($p.ExitCode)" }
+          # The installer puts itself on PATH, but a step already running
+          # does not see that, so resolve the directory and export it. The
+          # package is 32-bit, so its breadcrumb lands under WOW6432Node;
+          # both keys and both Program Files are tried rather than
+          # hard-coding a layout that has already moved once.
+          $dir = $null
+          foreach ($k in 'HKLM:\SOFTWARE\WOW6432Node\Axle', 'HKLM:\SOFTWARE\Axle') {
+            if (-not $dir -and (Test-Path $k)) {
+              $dir = (Get-ItemProperty $k -Name InstallDir -ErrorAction SilentlyContinue).InstallDir
+            }
+          }
+          foreach ($c in 'C:\Program Files (x86)\Axle', 'C:\Program Files\Axle') {
+            if (-not $dir -and (Test-Path (Join-Path $c 'axle.exe'))) { $dir = $c }
+          }
+          if (-not $dir) { throw 'the MSI installed, but axle.exe was not found' }
+          $dir = $dir.TrimEnd('\')
+          foreach ($f in 'axle.exe', 'axle_stdlib.lib', 'axle_runtime.lib') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing from $dir" }
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+      # `axle` links Windows binaries by running `lld-link.exe`, which it
+      # looks for on PATH and nowhere else (`locate_windows_linker`). The
+      # runner image ships LLVM, but the job says so out loud rather than
+      # inheriting it by luck.
+      - name: Put the MSVC-flavoured lld on PATH
+        shell: pwsh
+        run: |
+          if (Get-Command lld-link.exe -ErrorAction SilentlyContinue) {
+            "lld-link.exe already on PATH: $((Get-Command lld-link.exe).Source)"
+            exit 0
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path (Join-Path $llvm 'lld-link.exe'))) {
+            choco install llvm -y --no-progress
+          }
+          if (-not (Test-Path (Join-Path $llvm 'lld-link.exe'))) {
+            throw 'lld-link.exe is not available; axle cannot link a Windows binary without it'
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $llvm
+
+      - name: Check the compiler is new enough
+        shell: pwsh
+        run: |
+          $got = (((axle --version) -split ' ')[1] -split '-')[0]
+          if ([version]$got -lt [version]$env:AXLE_MIN) {
+            throw "axle $got is older than the required $env:AXLE_MIN"
+          }
+          "axle $got satisfies >= $env:AXLE_MIN"
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: axle build
+
+      # `axle build` names its artefact after the machine it runs on, so
+      # here it is `voxel.exe` — the same command writes `voxel` in the
+      # Linux job above.
+      - name: Package
+        shell: pwsh
+        run: |
+          $PKG = 'voxel-axle-windows-x86_64'
+          New-Item -ItemType Directory -Path "dist\$PKG" -Force | Out-Null
+          Copy-Item 'target\voxel.exe' "dist\$PKG\"
+          Copy-Item 'atlas.raw' "dist\$PKG\"
+          $smalt = (git -C vendor/smalt rev-parse --short HEAD)
+          @"
+          voxel — a Minecraft-style survival world, software-rendered on the CPU.
+
+          Run:  voxel.exe      (atlas.raw must stay beside the binary)
+
+          There is nothing to install: kernel32, user32, gdi32 and winmm
+          ship with Windows, and no DLL is bundled because none is needed.
+
+          Built with $(axle --version) against smalt $smalt.
+          "@ | Set-Content -Encoding utf8 "dist\$PKG\README.txt"
+          Compress-Archive -Path "dist\$PKG\*" -DestinationPath "$PKG.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voxel-axle-windows-x86_64
+          path: voxel-axle-windows-x86_64.zip
+
+      # Publish only for real version tags; manual dispatch stops at the
+      # uploaded artifact above.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: voxel-axle-windows-x86_64.zip
+          generate_release_notes: true
