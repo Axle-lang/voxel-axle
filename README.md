@@ -81,9 +81,8 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 ```bash
 git clone --recurse-submodules <repo-url>   # the platform layer is a submodule
 cd voxel-axle
-axle --version      # must print 0.12.1 or newer
-axle build          # compile
-./target/voxel      # run
+axle --version                              # must print 0.12.1 or newer
+axle run                                    # compile and play
 ```
 
 That is the whole list: a compiler, and this repo. There is no library to
@@ -159,9 +158,15 @@ From this directory, with the submodule initialised and
 `axle --version` reporting 0.12.1+:
 
 ```bash
-axle build          # compile to target/voxel
-./target/voxel      # run
+axle run                         # compile and play, in one step
+axle build && ./target/voxel     # or in two — on Linux / macOS
+axle build; .\target\voxel.exe   # …and on Windows
 ```
+
+The extension follows the machine you are *building on*, not the target
+you are building for: the same `axle build` writes `target/voxel.exe` on
+Windows and `target/voxel` everywhere else. `axle run` picks the right
+one for you, which is why it is the line above.
 
 `atlas.raw` must sit next to the produced binary or one directory up —
 it is read at run time, so textures can be re-baked without rebuilding.
@@ -173,7 +178,10 @@ axle build --target x86_64-unknown-linux-gnu
 ```
 
 The platform overlay follows: the Linux build compiles smalt's X11 and
-ALSA backend and never sees a line of Win32.
+ALSA backend and never sees a line of Win32. The *file name* does not —
+a Linux binary cross-built on Windows is still written to
+`target/voxel.exe`, because the extension is chosen by the host. Rename
+it when you ship it, or let the release workflow build it on Linux.
 
 ## 🏛️ Architecture
 
