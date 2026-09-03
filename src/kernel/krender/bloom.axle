@@ -12,6 +12,7 @@
 // the blur is single-threaded.
 
 use smalt::Mem;
+use crate::configs::screen::{ Screen };
 use crate::kernel::krender::raster::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
 
@@ -22,16 +23,55 @@ class Bloom : PostEffect {
     btR : i64, // blur scratch (R/G/B)
     btG : i64,
     btB : i64,
+    cap : i64, // half-resolution pixels each buffer currently holds
 
-    /** Allocate the six half-resolution f64 buffers (sized for the max frame). */
+    /**
+     * Start with room for the configured frame; `fit` grows it if the
+     * frame ever does.
+     *
+     * The capacity used to be the literal `640 * 200`, which is neither
+     * the frame size nor derived from it — it happened to be twice what
+     * a 640x400 frame needs at half resolution, and exactly what the
+     * main loop's 1280-wide clamp needs at that same height. Change the
+     * render HEIGHT and it is a segmentation fault, which is what
+     * raising the resolution to 960x600 found.
+     */
     constructor() {
-        let blMax : i64 = 640 * 200;
-        self.blR = Mem::take(blMax * 8);
-        self.blG = Mem::take(blMax * 8);
-        self.blB = Mem::take(blMax * 8);
-        self.btR = Mem::take(blMax * 8);
-        self.btG = Mem::take(blMax * 8);
-        self.btB = Mem::take(blMax * 8);
+        self.cap = 0;
+        self.blR = 0;
+        self.blG = 0;
+        self.blB = 0;
+        self.btR = 0;
+        self.btG = 0;
+        self.btB = 0;
+        self.fit(halfCount(Screen::RENDER_W, Screen::RENDER_H));
+    }
+
+    /**
+     * Make sure the six buffers hold `want` half-resolution pixels each.
+     *
+     * Grows and never shrinks: a frame that got smaller will get bigger
+     * again when the window is dragged back, and a realloc per resize
+     * step is a stutter for nothing.
+     * @param want  half-resolution pixels the pass is about to touch
+     */
+    pub(file) fn fit(mut self, want : i64) : void {
+        if (want <= self.cap) {
+            return;
+        }
+        Mem::release(self.blR);
+        Mem::release(self.blG);
+        Mem::release(self.blB);
+        Mem::release(self.btR);
+        Mem::release(self.btG);
+        Mem::release(self.btB);
+        self.cap = want;
+        self.blR = Mem::take(want * 8);
+        self.blG = Mem::take(want * 8);
+        self.blB = Mem::take(want * 8);
+        self.btR = Mem::take(want * 8);
+        self.btG = Mem::take(want * 8);
+        self.btB = Mem::take(want * 8);
     }
 
     /**
@@ -57,6 +97,7 @@ class Bloom : PostEffect {
         }
         let dw : i32 = (w + 1) / 2;
         let dh : i32 = (h + 1) / 2;
+        self.fit(halfCount(w, h));
         // 1) Bright extraction + downsample — two threads (disjoint output rows).
         let halfD : i32 = dh / 2;
         let te : Task<i32> = spawn bloomExtractJob(self, pixels, w, h, dw, dh, 0, halfD);
@@ -269,4 +310,18 @@ fn bloomExtractJob(b : Bloom, pixels : i64, w : i32, h : i32, dw : i32, dh : i32
 fn bloomCompositeJob(b : Bloom, pixels : i64, w : i32, h : i32, dw : i32, st : f64, y0 : i32, y1 : i32) : i32 {
     b.compositeRows(pixels, w, h, dw, st, y0, y1);
     return 0;
+}
+
+/**
+ * Half-resolution pixels a `w` by `h` frame needs.
+ *
+ * One expression, so the allocation and the pass that fills it cannot
+ * round the halving differently — which is the shape of an overflow that
+ * only shows at an odd width.
+ * @param w  frame width
+ * @param h  frame height
+ * @return the half-resolution pixel count
+ */
+fn halfCount(w : i32, h : i32) : i64 {
+    return (((w + 1) / 2) as i64) * (((h + 1) / 2) as i64);
 }
