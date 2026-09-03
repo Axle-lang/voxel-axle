@@ -16,10 +16,12 @@
 // `assets/sounds/` (next to the binary or one dir up — the prefix is resolved
 // once). Missing files are silent.
 //
-// `audioLoop` pumps the device on its own OS thread so a slow render/bake frame
-// can't starve the queue and stutter the sound.
+// The device is pumped on its own OS thread so a slow render/bake frame
+// can't starve the queue and stutter the sound. That loop, the flag that
+// ends it and the lock that makes it safe are all smalt's now
+// (`smalt::mixerLoop`); this file used to carry a spinlock and a
+// thirty-line pump loop of its own for them.
 
-use std::sys::sleep;
 use smalt::{AssetFile, Mixer, SoundBank};
 
 use crate::kernel::kblock::blocks::materialOf;
@@ -259,13 +261,13 @@ trait Listener {
 }
 
 class AudioManager : Listener, Closeable {
-    mixer : Mixer,
+    /**
+     * The device and the voices. Public to the crate because `main`
+     * hands it to `smalt::mixerLoop` — the pump thread takes the mixer,
+     * not this manager, and the mixer takes its own lock.
+     */
+    pub(crate) mixer : Mixer,
     banks : BankLoader,          // the one owner of every decoded clip; closed last
-    lock : AtomicBoolean,        // spinlock guarding the mixer between the main
-                                 // thread (play / setListener) and the audio thread
-                                 // (pump) — see audioLoop. AtomicBoolean is the only
-                                 // std lock primitive with a usable constructor.
-    running : AtomicBoolean,     // false tells the audio thread to exit (on quit)
     materials : MaterialSound[], // footstep + dig cues, indexed by AudioMaterial
     voices : MobVoice[],         // one voice per MobKind, indexed by its discriminant
     playerHurtCue : Cue,
@@ -277,8 +279,6 @@ class AudioManager : Listener, Closeable {
     /** Open the mixer, resolve the sounds/ prefix and load every cue. */
     constructor() {
         self.mixer = new Mixer();
-        self.lock = new AtomicBoolean(false);
-        self.running = new AtomicBoolean(true);
         self.banks = new BankLoader();
 
         // Per-material footstep + dig cues. `m` IS the AudioMaterial discriminant,
@@ -357,59 +357,35 @@ class AudioManager : Listener, Closeable {
      * @param z  listener z
      */
     fn setListener(self, x : f64, y : f64, z : f64) : void {
-        self.acquire();
         self.mixer.setListener(x, y, z);
-        self.release();
-    }
-
-    /** Spin until this thread owns the mixer lock (short critical sections). */
-    fn acquire(self) : void {
-        while (!self.lock.compareAndSet(false, true)) {
-        }
-    }
-
-    /** Release the mixer lock. */
-    fn release(self) : void {
-        self.lock.set(false);
     }
 
     /**
-     * Emit a non-positional cue under the mixer lock.
+     * Emit a non-positional cue.
+     *
+     * No lock here any more: `Mixer` takes its own, so the pump thread
+     * and this one are serialised inside the library rather than by an
+     * agreement between two files that both had to remember it.
      * @param cue  the cue to play
      * @param rnd  variant selector in [0, 1)
      */
     fn emit(self, cue : Cue, rnd : f64) : void {
-        self.acquire();
         cue.play(self.mixer, rnd);
-        self.release();
     }
 
     /**
-     * Emit a positional cue at `pos` under the mixer lock.
+     * Emit a positional cue at `pos`.
      * @param cue  the cue to play
      * @param rnd  variant selector in [0, 1)
      * @param pos  the source world position
      */
     fn emitAt(self, cue : Cue, rnd : f64, pos : Vec3) : void {
-        self.acquire();
         cue.playAt(self.mixer, rnd, pos);
-        self.release();
     }
 
-    /**
-     * Top up the audio device queue under the lock. Called by the dedicated
-     * audio thread (audioLoop), NOT per frame — so a slow render/bake frame can
-     * no longer starve the queue and make the sound stutter.
-     */
-    pub(file) fn pumpTick(self) : void {
-        self.acquire();
-        self.mixer.pump();
-        self.release();
-    }
-
-    /** Signal the audio thread to stop (call before joining it on quit). */
+    /** Ask the pump thread to finish (call before joining it on quit). */
     pub(crate) fn stop(self) : void {
-        self.running.set(false);
+        self.mixer.requestStop();
     }
 
     /**
@@ -425,11 +401,6 @@ class AudioManager : Listener, Closeable {
     fn close(self) : void {
         self.mixer.close();
         self.banks.close();
-    }
-
-    /** Whether the audio thread should keep running. */
-    pub(file) fn isRunning(self) : bool {
-        return self.running.get();
     }
 
     /**
@@ -540,19 +511,4 @@ class AudioManager : Listener, Closeable {
     pub(crate) fn creeperBlast(self, pos : Vec3) : void {
         self.emitAt(self.creeperBlastCue, 0.0, pos);
     }
-}
-
-/**
- * The audio thread body: top up the device queue continuously, decoupled from
- * the frame loop, so heavy render/light-bake frames can't starve the sound. Runs
- * on its own OS thread (spawned in main); exits when the manager is stopped.
- * @param sfx  the audio manager to pump
- * @return 0 (Task result unused)
- */
-fn audioLoop(sfx : AudioManager) : i32 {
-    while (sfx.isRunning()) {
-        sfx.pumpTick();
-        sleep(4);
-    }
-    return 0;
 }

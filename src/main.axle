@@ -23,10 +23,9 @@
 // lives in `game::ray`, the HUD in `krender::hud`.
 
 use smalt::{
-    AssetFile, Clock, Event, EventKind, Events, Mem, MouseButton, Platform, PlatformError,
-    Scancode, Surface, Window, WINDOW_RESIZABLE,
+    AssetFile, BitmapFont, Clock, Event, EventKind, Events, Face, FramePacer, Mem, mixerLoop,
+    MouseButton, Platform, PlatformError, Scancode, Surface, Window, WindowDesc,
 };
-use crate::kernel::kio::clock::GameClock;
 use crate::kernel::kio::input::Keys;
 use crate::kernel::kio::assets::Assets;
 use crate::kernel::kworld::manager::{ ChunkManager, lightLoop };
@@ -37,14 +36,13 @@ use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::ray::{Picker, cellInPlayer};
-use crate::kernel::kio::sfx::{ AudioManager, audioLoop };
+use crate::kernel::kio::sfx::{ AudioManager };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::game::tick::TickManager;
 use crate::kernel::krender::render::Renderer;
 use crate::kernel::krender::raster::FrameBuf;
 use crate::kernel::krender::hud::drawHud;
 use crate::kernel::krender::menu::{drawPauseMenu, menuHit};
-use crate::kernel::krender::color::Canvas;
 use crate::configs::atlas::{ Atlas };
 use crate::configs::audio::{ Audio };
 use crate::configs::blocks::{ Block };
@@ -115,8 +113,9 @@ fn run() : i32 ! PlatformError {
     let winH : i32 = Screen::WINDOW_H;
 
     let platform : Platform = new Platform()?;
-    let win : Window = platform.createWindow(
-        "Axle Voxel — survival", winW, winH, WINDOW_RESIZABLE)?;
+    let win : Window = platform.open(
+        WindowDesc { title: "Axle Voxel — survival", w: winW, h: winH, resizable: true }
+    )?;
     let events : Events = new Events();
 
     // The framebuffer this game's own renderer fills. `base()` is its
@@ -133,6 +132,7 @@ fn run() : i32 ! PlatformError {
     let swallowLook : bool = true;
 
     Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
+
     let man : ChunkManager = new ChunkManager();
     // Inject the game's concrete terrain generator (biome tables + ore / tree
     // rules — all app content) over the manager's shared voxel store. The kernel
@@ -157,6 +157,10 @@ fn run() : i32 ! PlatformError {
     // the kernel's MobManager builds mobs through the MobSpawner seam.
     mobs.attachSpawner(new Fauna());
     let renderer : Renderer = new Renderer();
+    // The overlay's face, smalt's. Built once and held — the glyph tables
+    // are minted by the call, so a face per frame would be three
+    // allocations and a copy of the whole font every frame.
+    let hudFont : BitmapFont = BitmapFont::baked(Face::Ui);
 
     // Block + mob texture atlas, loaded at runtime from `atlas.raw`.
     let tpx : i64 = Atlas::TILE_PX as i64;
@@ -171,7 +175,18 @@ fn run() : i32 ! PlatformError {
     // renderer (mip level 0) wherever they're still needed (the HUD hotbar).
     Mem::release(atlas);
 
-    let clock : GameClock = new GameClock();
+    // The monotonic clock and the loop's metronome, both smalt's — the
+    // two halves this game used to carry its own `GameClock` for.
+    //
+    // Both rates are `World::TICK_HZ`, which is what the old clock did:
+    // `tick` sleeps whatever is left of the frame budget (the CPU cap,
+    // independent of v-sync), and `steps` drains that same measurement
+    // into whole simulation steps. Naming the tick rate as well as the
+    // frame rate is not redundant — it pins it, so a later change to the
+    // frame cap cannot silently retime the physics with it.
+    let clock : Clock = new Clock();
+    let pacer : FramePacer = new FramePacer(World::TICK_HZ);
+    pacer.setTickRate(World::TICK_HZ);
     // Isochronous scheduler: physics runs every tick, while chunk streaming
     // (on chunk-border cross) and the mob cull/spawn scan run on a coarser
     // uniform cadence to cut wasted CPU. See `game::tick`.
@@ -187,7 +202,7 @@ fn run() : i32 ! PlatformError {
     // Pump the audio device on its own OS thread so a heavy render/light-bake
     // frame can't starve the queue and stutter the sound (the queue is topped up
     // every few ms regardless of frame time). Stopped + joined at quit.
-    let audioTask : Task<i32> = spawn audioLoop(sfx);
+    let audioTask : Task<i32> = spawn mixerLoop(sfx.mixer);
     // The whole lighting system (sun shadows + sky-access + colour bounce) runs
     // on its own OS thread, reading the time of day the main loop publishes. It
     // updates the per-voxel light maps continuously and independently of the
@@ -211,7 +226,11 @@ fn run() : i32 ! PlatformError {
     let lastHover : i32 = 0 - 2;
     let running : bool = true;
     while (running) {
-        events.pump(win, clock.sys);
+        // Sleeps to the frame boundary and measures what the last frame
+        // actually took; `pacer.steps()` below drains that measurement, so
+        // the simulation and the frame share one timeline.
+        pacer.tick(clock);
+        events.pump(win, clock);
         while (events.hasNext()) {
             let e : Event = events.next();
             if (e.kind == EventKind::Quit) {
@@ -339,7 +358,7 @@ fn run() : i32 ! PlatformError {
             // and the per-step audio timers all advance HERE, on the tick —
             // so footstep and ambience cadence are isochronous (tied to ticks,
             // never to the displayed frame rate).
-            let nsteps : i32 = clock.steps();
+            let nsteps : i32 = pacer.steps();
             prevHp = player.hp;
             let stp : i32 = 0;
             while (stp < nsteps) {
@@ -512,7 +531,11 @@ fn run() : i32 ! PlatformError {
             }
             // Soft warm glow on bright pixels (sun, halo, shafts, water, snow).
             renderer.bloomPass(fb);
-            let cv : Canvas = Canvas { base: pixels, w: w, h: h };
+            // The overlay's drawing view of the same pixels the world was
+            // rasterised into. Taken fresh each frame rather than kept: a
+            // resize moves the buffer, and a `Frame` held across one is the
+            // dangling address this game used to have to remember about.
+            let cv = screen.frame();
             if (!paused) {
                 if (picker.hit == 1) {
                     renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
@@ -521,7 +544,7 @@ fn run() : i32 ! PlatformError {
                 drawHud(cv, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
                 renderer.crosshair(fb);
             } else {
-                drawPauseMenu(cv, hover);
+                drawPauseMenu(cv, hudFont, hover);
             }
 
             // One blit, scaled to the client area — the framebuffer keeps
@@ -529,10 +552,8 @@ fn run() : i32 ! PlatformError {
             screen.present(win);
         }
         // Update the listener at the player so positional sounds attenuate live;
-        // the dedicated audio thread does the actual device feeding (pumpTick).
+        // smalt's `mixerLoop`, on its own thread, does the device feeding.
         sfx.setListener(player.pos.x, player.pos.y, player.pos.z);
-        // Hold the loop to the tick rate (CPU cap independent of v-sync).
-        clock.cap();
     }
 
     // Stop the worker threads (audio + lighting) and wait for them before

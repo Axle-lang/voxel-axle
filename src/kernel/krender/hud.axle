@@ -5,7 +5,8 @@
 
 use crate::kernel::krender::hotbar::{drawHotbar, hotbarPanelW, hotbarPanelH};
 use crate::configs::blocks::{ Block };
-use crate::kernel::krender::color::{Widget, Canvas};
+use crate::kernel::krender::color::{Widget};
+use smalt::{Frame};
 use crate::kernel::krender::health::{drawHealth, healthHeight};
 
 /**
@@ -21,8 +22,8 @@ struct HotbarBar : Widget {
     selected : i32,
 
     /** Paint the hotbar panel + slots. */
-    fn draw(self, cv : Canvas) : void {
-        drawHotbar(cv, self.x0, self.y0, self.atlas, self.hotbar, self.selected);
+    fn draw(self, f : Frame) : void {
+        drawHotbar(f, self.x0, self.y0, self.atlas, self.hotbar, self.selected);
     }
 }
 
@@ -37,30 +38,30 @@ struct HeartRow : Widget {
     maxHp : i32,
 
     /** Paint the heart row. */
-    fn draw(self, cv : Canvas) : void {
-        drawHealth(cv, self.x0, self.y0, self.hp, self.maxHp);
+    fn draw(self, f : Frame) : void {
+        drawHealth(f, self.x0, self.y0, self.hp, self.maxHp);
     }
 }
 
 /**
  * Draw the full HUD overlay by composing its widgets. `atlas` supplies the
  * hotbar item textures. The body lays out a set of `Widget`s and draws each.
- * @param cv        the draw surface.
+ * @param f         the frame to draw into.
  * @param atlas     atlas supplying the hotbar item textures.
  * @param hp        current health.
  * @param maxHp     maximum health.
  * @param hotbar    hotbar slot block ids.
  * @param selected  index of the active hotbar slot.
  */
-fn drawHud(cv : Canvas, atlas : i64, hp : i32, maxHp : i32, hotbar : Block[], selected : i32) : void {
+fn drawHud(f : Frame, atlas : i64, hp : i32, maxHp : i32, hotbar : Block[], selected : i32) : void {
     let pw : i32 = hotbarPanelW();
     let ph : i32 = hotbarPanelH();
-    let hx : i32 = (cv.w - pw) / 2;
-    let hy : i32 = cv.h - 8 - ph;
+    let hx : i32 = (f.w - pw) / 2;
+    let hy : i32 = f.h - 8 - ph;
 
     let bar : HotbarBar = HotbarBar { x0: hx, y0: hy, atlas: atlas, hotbar: hotbar, selected: selected };
     let hearts : HeartRow = HeartRow { x0: hx, y0: hy - healthHeight() - 6, hp: hp, maxHp: maxHp };
 
-    bar.draw(cv);
-    hearts.draw(cv);
+    bar.draw(f);
+    hearts.draw(f);
 }

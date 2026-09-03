@@ -3,9 +3,8 @@
 // the renderer and the mouse hit-test agree. All coordinates are in the
 // 640×400 framebuffer; `main` maps the window-space cursor into it.
 
-use smalt::Color;
-use crate::kernel::krender::color::{fillRect, dimScreen, Widget, Canvas};
-use crate::kernel::krender::font::{drawText, textWidth};
+use smalt::{BitmapFont, Color, Frame, Rect};
+use crate::kernel::krender::color::{Widget};
 
 /**
  * Pixel width of the pause panel.
@@ -100,7 +99,7 @@ fn menuHit(fbW : i32, fbH : i32, mx : i32, my : i32) : i32 {
 
 /**
  * A panel border drawn as four `t`-thick edges.
- * @param cv     the draw surface.
+ * @param f      the frame to draw into.
  * @param x      border left.
  * @param y      border top.
  * @param ww     border width.
@@ -108,23 +107,23 @@ fn menuHit(fbW : i32, fbH : i32, mx : i32, my : i32) : i32 {
  * @param t      edge thickness.
  * @param color  border colour.
  */
-fn border(cv : Canvas, x : i32, y : i32, ww : i32, hh : i32, t : i32, color : i32) : void {
-    fillRect(cv, x, y, ww, t, color);
-    fillRect(cv, x, y + hh - t, ww, t, color);
-    fillRect(cv, x, y, t, hh, color);
-    fillRect(cv, x + ww - t, y, t, hh, color);
+fn border(f : Frame, x : i32, y : i32, ww : i32, hh : i32, t : i32, color : i32) : void {
+    f.fillRect(Rect::make(x, y, ww, t), color);
+    f.fillRect(Rect::make(x, y + hh - t, ww, t), color);
+    f.fillRect(Rect::make(x, y, t, hh), color);
+    f.fillRect(Rect::make(x + ww - t, y, t, hh), color);
 }
 
 /**
  * Draw button `i` with `label`, highlighted when hovered.
- * @param cv     the draw surface.
+ * @param f      the frame to draw into.
  * @param i      the button index.
  * @param label  the button label.
  * @param hover  index of the hovered button.
  */
-fn drawButton(cv : Canvas, i : i32, label : string, hover : i32) : void {
-    let bx : i32 = btnX(cv.w);
-    let by : i32 = btnY(cv.h, i);
+fn drawButton(f : Frame, font : BitmapFont, i : i32, label : string, hover : i32) : void {
+    let bx : i32 = btnX(f.w);
+    let by : i32 = btnY(f.h, i);
     let on : bool = hover == i;
     let bg : i32 = Color::packBytes(44, 48, 58);
     let edge : i32 = Color::packBytes(70, 76, 90);
@@ -134,11 +133,12 @@ fn drawButton(cv : Canvas, i : i32, label : string, hover : i32) : void {
         edge = Color::packBytes(150, 230, 150);
         txt = Color::packBytes(16, 22, 16);
     }
-    fillRect(cv, bx, by, btnW(), btnH(), bg);
-    border(cv, bx, by, btnW(), btnH(), 2, edge);
-    let sc : i32 = 2;
-    let tw : i32 = textWidth(label, sc);
-    drawText(cv, bx + (btnW() - tw) / 2, by + (btnH() - 7 * sc) / 2, sc, txt, label);
+    f.fillRect(Rect::make(bx, by, btnW(), btnH()), bg);
+    border(f, bx, by, btnW(), btnH(), 2, edge);
+    // Centred in the button by the face's own metrics, at both axes —
+    // `drawCentred` is the call that gets the baseline right, and a label
+    // sitting a pixel high is the most-repeated mistake in a hand-rolled UI.
+    font.drawCentred(f, Rect::make(bx, by, btnW(), btnH()), label, txt);
 }
 
 /**
@@ -148,42 +148,57 @@ fn drawButton(cv : Canvas, i : i32, label : string, hover : i32) : void {
  */
 struct PauseWidget : Widget {
     hover : i32,
+    font : BitmapFont,
 
     /** Paint the whole pause overlay, highlighting the hovered button. */
-    fn draw(self, cv : Canvas) : void {
-        dimScreen(cv, 0.35);
+    fn draw(self, f : Frame) : void {
+        f.shade(f.clipRect(), 0x000000, 65, 100);
 
-        let px : i32 = panelX(cv.w);
-        let py : i32 = panelY(cv.h);
+        let px : i32 = panelX(f.w);
+        let py : i32 = panelY(f.h);
         let pw : i32 = panelW();
         let ph : i32 = panelH();
 
-        fillRect(cv, px + 6, py + 8, pw, ph, Color::packBytes(0, 0, 0)); // drop shadow
-        fillRect(cv, px, py, pw, ph, Color::packBytes(24, 26, 32));      // panel
-        fillRect(cv, px, py, pw, 6, Color::packBytes(86, 180, 90));      // accent top bar
-        border(cv, px, py, pw, ph, 2, Color::packBytes(86, 180, 90));    // accent border
+        f.fillRect(Rect::make(px + 6, py + 8, pw, ph), Color::packBytes(0, 0, 0)); // drop shadow
+        f.fillRect(Rect::make(px, py, pw, ph), Color::packBytes(24, 26, 32));      // panel
+        f.fillRect(Rect::make(px, py, pw, 6), Color::packBytes(86, 180, 90));      // accent top bar
+        border(f, px, py, pw, ph, 2, Color::packBytes(86, 180, 90));    // accent border
 
+        // The title at twice the face's size — an integer multiple, so the
+        // coverage levels survive and the letters keep their edges.
         let title : string = "PAUSED";
-        let ts : i32 = 4;
-        let tw : i32 = textWidth(title, ts);
-        drawText(cv, px + (pw - tw) / 2, py + 26, ts, Color::packBytes(238, 240, 245), title);
+        let ts : i32 = 2;
+        let tw : i32 = self.font.widthScaled(title, ts);
+        self.font.drawScaled(
+            f,
+            px + (pw - tw) / 2,
+            self.font.baselineFor(py + 22, ts),
+            title,
+            ts,
+            Color::packBytes(238, 240, 245)
+        );
 
-        drawButton(cv, 0, "RESUME", self.hover);
-        drawButton(cv, 1, "QUIT", self.hover);
+        drawButton(f, self.font, 0, "Resume", self.hover);
+        drawButton(f, self.font, 1, "Quit", self.hover);
 
-        let hint : string = "ESC TO RESUME";
-        let hw : i32 = textWidth(hint, 1);
-        drawText(cv, px + (pw - hw) / 2, py + ph - 16, 1, Color::packBytes(150, 154, 166), hint);
+        let hint : string = "Esc to resume";
+        self.font.drawCentred(
+            f,
+            Rect::make(px, py + ph - 28, pw, 20),
+            hint,
+            Color::packBytes(150, 154, 166)
+        );
     }
 }
 
 /**
  * Draw the whole pause overlay, highlighting the hovered button. Public entry
  * `main` calls — delegates to a `PauseWidget`.
- * @param cv     the draw surface.
+ * @param f      the frame to draw into.
+ * @param font   the face the title, buttons and hint are drawn in.
  * @param hover  index of the hovered button.
  */
-fn drawPauseMenu(cv : Canvas, hover : i32) : void {
-    let w : PauseWidget = PauseWidget { hover: hover };
-    w.draw(cv);
+fn drawPauseMenu(f : Frame, font : BitmapFont, hover : i32) : void {
+    let w : PauseWidget = PauseWidget { hover: hover, font: font };
+    w.draw(f);
 }

@@ -1,99 +1,63 @@
-// color — colour math and the one rectangle-fill primitive used by the
-// HUD. Builds on `mem` (the raw `rgb` packer and `putPixel`); the base
-// `rgb` itself lives in `mem` so the world's block table can use it
-// without depending on gfx.
+// color — what this game adds to smalt's colour, and the widget contract
+// the overlay is composed from.
+//
+// Almost nothing, now. The packing, the channel reads, the clamp, the
+// scale and the mix all live in `smalt::Color`; the clipped surface, the
+// rectangle fill and the backdrop dim live on `smalt::Frame`. What is
+// left here is the one tint that is a *game* decision — the red flash a
+// struck mob wears — and the `Widget` seam the HUD composes through.
+//
+// The `Canvas` struct that used to head this file is gone. It bundled
+// `(base, w, h)` so the HUD primitives did not have to thread three
+// scalars, which is exactly what `Frame` is — with a clip rectangle on
+// top, so a widget that overruns its box is cut at the edge rather than
+// painting over its neighbour.
 
-use smalt::Mem;
-use smalt::Color;
+use smalt::{Color, Frame};
+
+/** How much red a hurt flash adds, out of 255. */
+const TINT_RED_LIFT : i32 = 110;
+
+/** What a hurt flash leaves of the other two channels, as a fraction. */
+const TINT_KEEP_NUM : i32 = 45;
+
+/** The denominator of that fraction. */
+const TINT_KEEP_DEN : i32 = 100;
 
 /**
- * The 2D draw surface: the colour-plane base pointer and the framebuffer size.
- * Bundles the `(base, fbW, fbH)` triple every HUD primitive used to thread
- * through as three loose scalars. HUD code never touches the z-buffer, so this
- * is lighter than `FrameBuf` and keeps the 2D cluster free of any raster
- * dependency.
- */
-struct Canvas {
-    pub(crate) base : i64,
-    pub(crate) w : i32,
-    pub(crate) h : i32,
-}
-
-/**
- * A self-contained overlay element that paints itself into the framebuffer.
- * Each HUD piece (the hotbar, the heart row, the pause menu) carries its own
- * layout + payload and implements `draw`, so the compositor (`drawHud`) walks a
- * SET of widgets instead of a hand-ordered call list — one uniform capability
- * for every 2D element. Positions live inside each widget, so `draw` only needs
- * the `Canvas` surface.
+ * A self-contained overlay element that paints itself into the frame.
+ *
+ * Each HUD piece (the hotbar, the heart row, the pause menu) carries its
+ * own layout and payload and implements `draw`, so the compositor walks a
+ * SET of widgets instead of a hand-ordered call list. Positions live
+ * inside each widget, so `draw` needs only the surface.
  */
 trait Widget {
-    fn draw(self, cv : Canvas) : void;
+    fn draw(self, f : Frame) : void;
 }
 
 /**
- * Clamp one colour channel to [0, 255].
- * @param v  the channel value
- * @return v clamped to 0..255
- */
-fn clamp255(v : i32) : i32 {
-    if (v < 0) {
-        return 0;
-    }
-    if (v > 255) {
-        return 255;
-    }
-    return v;
-}
-
-/**
- * Pack three channels into a 0x00RRGGBB framebuffer pixel (no alpha) — the
- * shared form of the `(r & 0xFF) * 65536 + …` literal that the world / sky /
- * god-ray / bloom / underwater passes open-coded.
- * @param r  red channel
- * @param g  green channel
- * @param b  blue channel
- * @return the packed pixel
- */
-fn packRgb(r : i32, g : i32, b : i32) : i32 {
-    return (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF);
-}
-
-/**
- * Multiply each channel of an ARGB-packed colour by `bright` (clamped).
- * @param color   the ARGB-packed colour.
- * @param bright  per-channel multiplier.
- * @return the scaled colour.
- */
-fn scaleRgb(color : i32, bright : f64) : i32 {
-    let r : i32 = clamp255((((color >> 16) & 0xFF) as f64 * bright).floorToInt() as i32);
-    let g : i32 = clamp255((((color >> 8) & 0xFF) as f64 * bright).floorToInt() as i32);
-    let b : i32 = clamp255(((color & 0xFF) as f64 * bright).floorToInt() as i32);
-    return Color::packBytes(r, g, b);
-}
-
-/**
- * Push a colour toward red (a hurt flash): lift red, damp green/blue.
- * @param color  the ARGB-packed colour.
+ * Push a colour towards red — the flash a mob wears when it is struck.
+ *
+ * The red channel is lifted and the other two damped, rather than the
+ * whole colour blended towards a fixed red: a white sheep and a black
+ * creeper both have to read as *the same mob, hurt*, and blending
+ * towards one red makes them both that red.
+ * @param color  the packed colour.
  * @return the red-tinted colour.
  */
 fn redTint(color : i32) : i32 {
-    let r : i32 = (color >> 16) & 0xFF;
-    let g : i32 = (color >> 8) & 0xFF;
-    let b : i32 = color & 0xFF;
-    r = r + 110;
-    if (r > 255) {
-        r = 255;
-    }
-    g = ((g as f64) * 0.45).floorToInt() as i32;
-    b = ((b as f64) * 0.45).floorToInt() as i32;
-    return Color::packBytes(r, g, b);
+    return Color::packBytes(
+        Color::clamp8(Color::red(color) + TINT_RED_LIFT),
+        (Color::green(color) * TINT_KEEP_NUM) / TINT_KEEP_DEN,
+        (Color::blue(color) * TINT_KEEP_NUM) / TINT_KEEP_DEN
+    );
 }
 
 /**
  * `redTint(color)` when `on`, else `color` unchanged.
  * @param on     whether to apply the red tint.
- * @param color  the ARGB-packed colour.
+ * @param color  the packed colour.
  * @return the tinted or original colour.
  */
 fn tintIf(on : bool, color : i32) : i32 {
@@ -101,56 +65,4 @@ fn tintIf(on : bool, color : i32) : i32 {
         return redTint(color);
     }
     return color;
-}
-
-/**
- * Darken the whole framebuffer by `bright` (0..1) — used as a dim backdrop
- * behind the pause menu. Reads each pixel and scales it.
- * @param cv      the draw surface.
- * @param bright  per-channel multiplier (0..1).
- */
-fn dimScreen(cv : Canvas, bright : f64) : void {
-    let n : i32 = cv.w * cv.h;
-    let i : i32 = 0;
-    while (i < n) {
-        Mem::putWordOf(cv.base, i, scaleRgb(Mem::dwordAt(cv.base, (i as i64) * 4), bright));
-        i = i + 1;
-    }
-}
-
-/**
- * Fill an axis-aligned rectangle of the framebuffer (HUD drawing).
- * @param cv     the draw surface.
- * @param x      rectangle left.
- * @param y      rectangle top.
- * @param rw     rectangle width.
- * @param rh     rectangle height.
- * @param color  fill colour.
- */
-fn fillRect(cv : Canvas, x : i32, y : i32, rw : i32, rh : i32, color : i32) : void {
-    let x0 : i32 = x;
-    let y0 : i32 = y;
-    let x1 : i32 = x + rw;
-    let y1 : i32 = y + rh;
-    if (x0 < 0) {
-        x0 = 0;
-    }
-    if (y0 < 0) {
-        y0 = 0;
-    }
-    if (x1 > cv.w) {
-        x1 = cv.w;
-    }
-    if (y1 > cv.h) {
-        y1 = cv.h;
-    }
-    let py : i32 = y0;
-    while (py < y1) {
-        let px : i32 = x0;
-        while (px < x1) {
-            Mem::putWordOf(cv.base, py * cv.w + px, color);
-            px = px + 1;
-        }
-        py = py + 1;
-    }
 }

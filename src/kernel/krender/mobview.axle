@@ -15,7 +15,7 @@
 
 use smalt::Mem;
 use smalt::Color;
-use crate::kernel::krender::color::{scaleRgb, tintIf};
+use crate::kernel::krender::color::{tintIf};
 use crate::kernel::krender::sky::{ DayState };
 use crate::kernel::krender::raster::{rasterTriTex, rasterTri, shadeLambert, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected};
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
@@ -181,7 +181,7 @@ class MobView {
                 c: RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 tile: mat.tile, wrap: 0 }, scene.atlas, scene.fog, band);
         } else {
-            let col : i32 = scaleRgb(tintIf(mat.hurt, mat.color), bright);
+            let col : i32 = Color::scaleBy(tintIf(mat.hurt, mat.color), bright);
             rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
             rasterTri(fb, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
         }
