@@ -275,15 +275,19 @@ class Entity : Damageable, Physics {
             // Motion::STEP_HEIGHT (unchanged) — the knob lives in ChunkManager.
             let stepAllow : f64 = Motion::STEP_HEIGHT + (world.floorScanPad() as f64) * 0.55;
             let stepY : f64 = self.pos.y + stepAllow;
-            if (!self.collidesAt(world, nx, stepY, self.pos.z)) {
-                let top : f64 = self.supportTop(world, nx, self.pos.z,
-                    self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
-                if (top > self.pos.y && top - self.pos.y <= stepAllow
-                    && !self.collidesAt(world, nx, top, self.pos.z)) {
-                    self.stepUp = self.stepUp + (top - self.pos.y);
-                    self.pos.x = nx;
-                    self.pos.y = top;
-                }
+            // Step to the height the ledge actually needs, and test the body
+            // THERE. Testing it at `stepY` first — the full allowance — asks
+            // for `stepAllow + height` of clearance to climb anything at all:
+            // 3.4 blocks, to step over a snow layer an eighth of a block deep.
+            // Under a canopy or an overhang that fails, and a dusting of snow
+            // becomes a wall. `top` is the only height the body has to fit at.
+            let top : f64 = self.supportTop(world, nx, self.pos.z,
+                self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
+            if (top > self.pos.y && top - self.pos.y <= stepAllow
+                && !self.collidesAt(world, nx, top, self.pos.z)) {
+                self.stepUp = self.stepUp + (top - self.pos.y);
+                self.pos.x = nx;
+                self.pos.y = top;
             }
         }
     }
@@ -320,15 +324,16 @@ class Entity : Damageable, Physics {
             // classic surface, so stepAllow == Motion::STEP_HEIGHT.
             let stepAllow : f64 = Motion::STEP_HEIGHT + (world.floorScanPad() as f64) * 0.55;
             let stepY : f64 = self.pos.y + stepAllow;
-            if (!self.collidesAt(world, self.pos.x, stepY, nz)) {
-                let top : f64 = self.supportTop(world, self.pos.x, nz,
-                    self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
-                if (top > self.pos.y && top - self.pos.y <= stepAllow
-                    && !self.collidesAt(world, self.pos.x, top, nz)) {
-                    self.stepUp = self.stepUp + (top - self.pos.y);
-                    self.pos.z = nz;
-                    self.pos.y = top;
-                }
+            // The body is tested at `top`, not at the full allowance — see
+            // `moveX` for why the difference is a snow layer that reads as a
+            // wall whenever the ceiling is under 3.4 blocks away.
+            let top : f64 = self.supportTop(world, self.pos.x, nz,
+                self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
+            if (top > self.pos.y && top - self.pos.y <= stepAllow
+                && !self.collidesAt(world, self.pos.x, top, nz)) {
+                self.stepUp = self.stepUp + (top - self.pos.y);
+                self.pos.z = nz;
+                self.pos.y = top;
             }
         }
     }

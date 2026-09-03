@@ -1,0 +1,150 @@
+// physcheck — the physics assertions a picture cannot make.
+//
+// A screenshot proves the world generates and the renderer draws it. It
+// proves nothing about whether the body can walk over a partial block,
+// because a body stuck against a snow layer looks exactly like a body
+// standing next to one.
+//
+// So this drives the REAL `Player` against the REAL `ChunkManager` over
+// terrain the real generator built, and reads the position back. It is
+// headless and deterministic — the world is a fixed seed and the probe
+// searches it rather than assuming a coordinate — so it runs unattended
+// and means the same thing every time.
+//
+// `voxel --physics-check` runs it and exits with the failure count.
+//
+// The case it was written for: a snow layer an eighth of a block deep,
+// under a canopy. The auto-step used to test the body at the FULL step
+// allowance rather than at the ledge's real height, which asks for 3.4
+// blocks of clearance to climb an eighth of one — so under any ceiling
+// a dusting of snow stopped the player dead. That is now the first
+// assertion here.
+
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::game::world::terraingen::TerrainGen;
+use crate::kernel::kentity::player::Player;
+use crate::kernel::kmath::vec3::{ ivec3 };
+use crate::kernel::kblock::blocks::{ hasCollisionBox };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/** Ticks a walk assertion runs for. */
+const WALK_TICKS : i32 = 40;
+
+/** How far a body must travel in that time to count as unobstructed. */
+const WALK_MIN : f64 = 1.0;
+
+/** Yaw whose forward is +X — forward for a yaw is (-sin, cos). */
+const YAW_PLUS_X : f64 = -1.5707963;
+
+/** Yaw whose forward is +Z. */
+const YAW_PLUS_Z : f64 = 0.0;
+
+/** How far out the probe searches the loaded ring for a test site. */
+const SCAN : i32 = 80;
+
+/**
+ * Walk a fresh body from (x, y, z) for `WALK_TICKS` and answer how far
+ * it travelled along the axis it was facing.
+ * @param man   the world to walk on
+ * @param x     start x
+ * @param y     start foot height
+ * @param z     start z
+ * @param yaw   facing
+ * @param alongX  whether to measure the x displacement rather than the z
+ * @return blocks travelled along that axis
+ */
+fn walk(man : ChunkManager, x : f64, y : f64, z : f64, yaw : f64, alongX : bool) : f64 {
+    let p : Player = new Player(x, y, z);
+    p.yaw = yaw;
+    p.refresh();
+    let sx : f64 = p.pos.x;
+    let sz : f64 = p.pos.z;
+    for (i of 0..WALK_TICKS) {
+        p.update(man, 1.0, 0.0, false, false, false);
+    }
+    if (alongX) {
+        return p.pos.x - sx;
+    }
+    return p.pos.z - sz;
+}
+
+/**
+ * Run every physics assertion; answer the number that failed.
+ * @return the failure count, 0 when green
+ */
+fn runPhysicsCheck() : i32 {
+    let fails : i32 = 0;
+    let man : ChunkManager = new ChunkManager();
+    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
+    while (man.ensureLoaded(0, 0) > 0) {
+    }
+
+    fails += checkSnowEdge(man, true);
+    fails += checkSnowEdge(man, false);
+
+    man.stopLight();
+    Console::println("physics failures: ${fails}");
+    return fails;
+}
+
+/**
+ * A body must be able to walk onto a partial block whatever the ceiling
+ * above it, on the axis asked for.
+ *
+ * The site is searched rather than hard-coded: a bare column with a
+ * partial block beside it and at most three clear cells overhead, which
+ * is the geometry the old step gate refused.
+ * @param man     the world to search and walk on
+ * @param alongX  whether to test the +X neighbour rather than the +Z one
+ * @return 1 when the body was stopped, 0 when it climbed
+ */
+fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
+    let axis : string = "+Z";
+    if (alongX) {
+        axis = "+X";
+    }
+    let z : i32 = 0 - SCAN;
+    while (z <= SCAN) {
+        let x : i32 = 0 - SCAN;
+        while (x <= SCAN) {
+            let h : i32 = man.columnHeight(x, z);
+            let nx : i32 = x;
+            let nz : i32 = z;
+            if (alongX) {
+                nx = x + 1;
+            } else {
+                nz = z + 1;
+            }
+            if (h > 0 && man.worldGet(ivec3(nx, h, nz)) == Block::SnowLayer
+                && !hasCollisionBox(man.worldGet(ivec3(x, h, z)))) {
+                let k : i32 = 0;
+                while (k < 6 && !hasCollisionBox(man.worldGet(ivec3(x, h + k, z)))) {
+                    k = k + 1;
+                }
+                if (k <= 3) {
+                    let deep : f64 = man.blockBoxHeight(ivec3(nx, h, nz));
+                    let yaw : f64 = YAW_PLUS_Z;
+                    if (alongX) {
+                        yaw = YAW_PLUS_X;
+                    }
+                    let moved : f64 = walk(
+                        man, (x as f64) + 0.5, h as f64, (z as f64) + 0.5, yaw, alongX
+                    );
+                    if (moved < WALK_MIN) {
+                        Console::println(
+                            "FAIL ${axis}: a ${deep}-deep layer at (${nx}, ${h}, ${nz}) stopped the body"
+                            + " under ${k} cells of headroom — moved ${moved}"
+                        );
+                        return 1;
+                    }
+                    return 0;
+                }
+            }
+            x = x + 1;
+        }
+        z = z + 1;
+    }
+    Console::println("SKIP ${axis}: no low-headroom partial-block edge in the spawn ring");
+    return 0;
+}

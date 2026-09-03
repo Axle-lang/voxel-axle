@@ -37,6 +37,7 @@ use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::start::{Spawn, openYaw, randomColumn};
+use crate::game::physcheck::runPhysicsCheck;
 use crate::game::ray::{Picker, cellInPlayer};
 use crate::kernel::kio::sfx::{ AudioManager };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
@@ -95,6 +96,13 @@ fn chunkOf(p : f64) : i32 {
  * input → simulate → render loop until the player quits.
  */
 fn main() : i32 {
+    // `--physics-check` drives the real body over the real world and
+    // exits with the failure count. Headless, so it runs unattended —
+    // and it is the net under any change to collision or the auto-step,
+    // where a regression looks exactly like standing still.
+    if (wantsPhysicsCheck()) {
+        return runPhysicsCheck();
+    }
     try {
         return run();
     } catch e : PlatformError {
@@ -664,4 +672,20 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
         i = i + 1;
     }
     return randomColumn(clock.counter());
+}
+
+/** Whether `--physics-check` was asked for. */
+fn wantsPhysicsCheck() : bool {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--physics-check") {
+                return true;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
 }
