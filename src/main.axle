@@ -608,7 +608,7 @@ fn run() : i32 ! PlatformError {
                     // thread, the fill is twelve.
                     let fillUs : i64 = renderer.fillMicros() / frames;
                     Console::println("  world = build ${tWorld / frames - fillUs}us"
-                        + " (1 thread) + fill ${fillUs}us (12 bands)"
+                        + " (6 workers) + fill ${fillUs}us (12 bands)"
                         + " over ${renderer.triCount()} tris");
                     Console::println("  per frame (us): world=${tWorld / frames}"
                         + " rays=${tRays / frames} bloom=${tBloom / frames}"

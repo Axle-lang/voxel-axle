@@ -39,6 +39,19 @@ use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };
 use crate::configs::light::{ Light };
 use crate::configs::render::{ Render };
+
+/**
+ * Independent world-raster workers, each with its own triangle queue and
+ * clipping scratch.
+ *
+ * A literal, and mirrored by the `Task` array in `drawWorld`, because a
+ * fixed-array size must be an integer literal — not a `const`, and not a
+ * `static` field, so the two are kept in step by hand.
+ */
+const BUILD_WORKERS : i32 = 6;
+
+/** Screen column bands the fill splits into; mirrored by its `Task` array. */
+const RASTER_BANDS : i32 = 12;
 use crate::configs::screen::{ Screen };
 use crate::configs::time::{ Daylight };
 use crate::configs::water::{ Water };
@@ -1127,18 +1140,48 @@ class ChunkRenderer {
      * @param day     the day/night state (sun / daylight for corner shading)
      * @param lcurve  the brightness-curve lookup
      */
-    pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera, phase : f64,
-        own atlas : MipAtlas, own fog : Rgb, own day : DayState, lcurve : i64) : void {
+    /**
+     * Snapshot the per-frame render context onto this component.
+     *
+     * Copied onto every worker rather than threaded through each call:
+     * the band rasteriser and the projection both read it a hundred
+     * thousand times a frame, and it does not change within one.
+     * @param atlas   the texture atlas mip chain view
+     * @param fog     the distance-fog colour (this frame's sky colour)
+     * @param day     the day/night state (sun / daylight for corner shading)
+     * @param lcurve  the brightness-curve lookup
+     */
+    pub(file) fn setFrame(mut self, atlas : MipAtlas, fog : Rgb, day : DayState, lcurve : i64) : void {
         self.atlas = atlas;
         self.fog = fog;
         self.day = day;
         self.lcurve = lcurve;
-        // World pass — single thread: project / light / clip every visible face
-        // into the triangle queue (self.triBuf / triN). Then the queue is
-        // rasterised in parallel column bands below.
         self.triN = 0;
+    }
+
+    /**
+     * Project / light / clip the faces of every `stride`-th loaded chunk
+     * from `first` into THIS component's triangle queue.
+     *
+     * The share is taken by striding the slot ring rather than by cutting
+     * it into contiguous runs: chunks differ enormously in how many faces
+     * they carry — a hillside against open sky — and adjacent slots are
+     * the ones most likely to be alike, so contiguous shares are the ones
+     * that come out lopsided.
+     *
+     * Each worker owns its own queue and its own clipping scratch, so
+     * nothing here is shared and nothing needs a lock.
+     * @param man     chunk manager holding the loaded chunks and baked faces
+     * @param p       player providing the eye position (for chunk culling)
+     * @param cam     the camera (eye + orientation + projection width)
+     * @param phase   animation time phase (scrolls flowing-water textures)
+     * @param first   the first slot this worker takes
+     * @param stride  how many workers there are
+     */
+    pub(file) fn buildSlots(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64,
+        first : i32, stride : i32) : void {
         let slots : i32 = World::SPAN * World::SPAN;
-        let slot : i32 = 0;
+        let slot : i32 = first;
         while (slot < slots) {
             if (man.cols.loaded[slot] == 1 && chunkVisible(p, man.cols.cxs[slot], man.cols.czs[slot])) {
                 let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
@@ -1149,49 +1192,9 @@ class ChunkRenderer {
                     fi = fi + 1;
                 }
             }
-            slot = slot + 1;
+            slot = slot + stride;
         }
         self.queuedTris = self.triN;
-        let tFill : i64 = monotonicNanos();
-        // Tiled rasterise: worker threads each fill a disjoint column band while
-        // the main thread fills band 0 — no two threads touch the same z-buffer
-        // pixel. Explicit handles (the one-shot Task checker dislikes joining an
-        // array in a loop), so 1 / 2 / 4 bands.
-        let w : i32 = fb.w;
-        let nT : i32 = Render::RASTER_TILES;
-        if (nT >= 12) {
-            let bw : i32 = (w + 11) / 12;
-            let jobs : Task<i32>[11];
-            for (i of 0..11) {
-                let x0 : i32 = bw * (i + 1);
-                let x1 : i32 = bw * (i + 2);
-                if (i == 10) {
-                    x1 = w;
-                }
-                jobs[i] = spawn rasterTilesJob(self, fb, x0, x1);
-            }
-            self.rasterizeBand(fb, 0, bw);
-            for (i of 0..11) {
-                let d : i32 = jobs[i].join();
-            }
-        } else if (nT >= 4) {
-            let bw : i32 = (w + 3) / 4;
-            let ta : Task<i32> = spawn rasterTilesJob(self, fb, bw, bw * 2);
-            let tb : Task<i32> = spawn rasterTilesJob(self, fb, bw * 2, bw * 3);
-            let tc : Task<i32> = spawn rasterTilesJob(self, fb, bw * 3, w);
-            self.rasterizeBand(fb, 0, bw);
-            let da : i32 = ta.join();
-            let db : i32 = tb.join();
-            let dc : i32 = tc.join();
-        } else if (nT == 2) {
-            let bw : i32 = (w + 1) / 2;
-            let ta : Task<i32> = spawn rasterTilesJob(self, fb, bw, w);
-            self.rasterizeBand(fb, 0, bw);
-            let da : i32 = ta.join();
-        } else {
-            self.rasterizeBand(fb, 0, w);
-        }
-        self.fillUs = self.fillUs + (monotonicNanos() - tFill) / 1000;
     }
 
     /**
@@ -1226,7 +1229,17 @@ class Renderer {
                           // updated on resize so the aspect / FOV track the window
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     day : DayLighting,    // owns the day/night colour + brightness cache
-    world : ChunkRenderer,// the world-face raster (queue + tiled parallel fill)
+    /**
+     * The world-face raster crew: `BUILD_WORKERS` independent components,
+     * each with its own triangle queue and clipping scratch.
+     *
+     * One was not enough for the reason the frame timings gave: the
+     * projection / clip / light pass over eighty-eight thousand faces ran
+     * on ONE thread and was two thirds of the world pass, while the fill
+     * it feeds already spread over twelve. Crew member 0 is the primary —
+     * the main thread's share — and is where the frame counters live.
+     */
+    crew : ChunkRenderer[],
     bloom : Bloom,   // soft-glow post-process (owns its half-res buffers + jobs)
     mobs : MobView,  // mob box-model renderer (owns its own projection scratch)
     sel : Selection, // targeted-block selection wireframe (owns its own scratch)
@@ -1239,7 +1252,10 @@ class Renderer {
         self.hw = Screen::HALF_W;
         self.atlas = new TextureAtlas();
         self.day = new DayLighting();
-        self.world = new ChunkRenderer();
+        self.crew = malloc<ChunkRenderer>(BUILD_WORKERS as i64);
+        for (i of 0..BUILD_WORKERS) {
+            self.crew[i as i64] = new ChunkRenderer();
+        }
         self.bloom = new Bloom();
         self.mobs = new MobView();
         self.sel = new Selection();
@@ -1290,14 +1306,80 @@ class Renderer {
      * @param phase      animation time phase (scrolls flowing-water textures)
      * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
      */
+    /**
+     * One frame's opaque terrain: build the triangle queues in parallel,
+     * then fill them in disjoint parallel column bands.
+     *
+     * Two different parallel shapes, because the two halves are different
+     * problems. The BUILD splits by chunk — every worker owns its queue,
+     * so nothing is shared. The FILL splits by screen column — every band
+     * owns its pixels, so no two threads touch the same z-buffer word,
+     * and each band walks every worker's queue.
+     * @param man     chunk manager holding the loaded chunks and baked faces
+     * @param p       player providing the eye position and orientation
+     * @param fb      the render target (framebuffer + z-buffer + size)
+     * @param cam     the camera (eye + orientation + projection width)
+     * @param phase   animation time phase (scrolls flowing-water textures)
+     * @param atlas   the texture atlas mip chain view
+     * @param fog     the distance-fog colour (this frame's sky colour)
+     * @param day     the day/night state
+     * @param lcurve  the brightness-curve lookup
+     */
+    pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera,
+        phase : f64, atlas : MipAtlas, fog : Rgb, day : DayState, lcurve : i64) : void {
+        for (i of 0..BUILD_WORKERS) {
+            self.crew[i as i64].setFrame(atlas, fog, day, lcurve);
+        }
+        let builders : Task<i32>[5];
+        for (i of 0..5) {
+            builders[i] = spawn buildSlotsJob(self.crew[(i + 1) as i64], man, p, cam, phase,
+                i + 1, BUILD_WORKERS);
+        }
+        self.crew[0].buildSlots(man, p, cam, phase, 0, BUILD_WORKERS);
+        for (i of 0..5) {
+            let d : i32 = builders[i].join();
+        }
+
+        let tFill : i64 = monotonicNanos();
+        let w : i32 = fb.w;
+        let bw : i32 = (w + RASTER_BANDS - 1) / RASTER_BANDS;
+        let fillers : Task<i32>[11];
+        for (i of 0..11) {
+            let x0 : i32 = (bw * (i + 1)).min(w);
+            let x1 : i32 = (bw * (i + 2)).min(w);
+            fillers[i] = spawn fillBandJob(self, fb, x0, x1);
+        }
+        self.fillBand(fb, 0, bw.min(w));
+        for (i of 0..11) {
+            let d : i32 = fillers[i].join();
+        }
+        self.crew[0].fillUs = self.crew[0].fillUs + (monotonicNanos() - tFill) / 1000;
+    }
+
+    /**
+     * Fill one screen column band from every worker's queue.
+     * @param fb   the render target
+     * @param bx0  first column (inclusive)
+     * @param bx1  last column (exclusive)
+     */
+    pub(file) fn fillBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
+        for (i of 0..BUILD_WORKERS) {
+            self.crew[i as i64].rasterizeBand(fb, bx0, bx1);
+        }
+    }
+
     /** Triangles the world pass queued in the last frame. */
     pub(crate) fn triCount(self) : i32 {
-        return self.world.queuedTris;
+        let n : i32 = 0;
+        for (i of 0..BUILD_WORKERS) {
+            n = n + self.crew[i as i64].queuedTris;
+        }
+        return n;
     }
 
     /** Microseconds the banded fill has taken, accumulated over the run. */
     pub(crate) fn fillMicros(self) : i64 {
-        return self.world.fillUs;
+        return self.crew[0].fillUs;
     }
 
     pub(crate) fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
@@ -1320,7 +1402,7 @@ class Renderer {
         // face this frame; the world raster owns the rest of the pass.
         let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: self.hw };
         let fog : Rgb = Rgb { r: ds.skyColR, g: ds.skyColG, b: ds.skyColB };
-        self.world.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), fog, ds, self.day.curve());
+        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), fog, ds, self.day.curve());
     }
 
     // ── Post-processing (god-rays, bloom, underwater) ──
@@ -1542,8 +1624,15 @@ fn godRaysJob(fx : GodRayFX, fb : FrameBuf, y0 : i32, y1 : i32) : i32 {
     return 0;
 }
 
-/** Worker job: rasterise the world triangle queue into one column band. */
-fn rasterTilesJob(r : ChunkRenderer, fb : FrameBuf, bx0 : i32, bx1 : i32) : i32 {
-    r.rasterizeBand(fb, bx0, bx1);
+/** Worker job: project / clip / light one worker's share of the chunks. */
+fn buildSlotsJob(r : ChunkRenderer, man : ChunkManager, p : Player, cam : Camera, phase : f64,
+    first : i32, stride : i32) : i32 {
+    r.buildSlots(man, p, cam, phase, first, stride);
+    return 0;
+}
+
+/** Worker job: fill one screen column band from every worker's queue. */
+fn fillBandJob(rr : Renderer, fb : FrameBuf, bx0 : i32, bx1 : i32) : i32 {
+    rr.fillBand(fb, bx0, bx1);
     return 0;
 }
