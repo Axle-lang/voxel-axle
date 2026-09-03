@@ -1,11 +1,71 @@
 // start — choosing where (and which way) the player starts. Scans columns
-// near the origin for the highest dry, open, roughly-flat hilltop, then
-// picks a yaw whose forward view stays open. Pulled out of `main` so the
-// entry point stays a thin setup + loop. (Named `start`, not `spawn`,
+// around a chosen centre for the highest dry, open, roughly-flat hilltop,
+// then picks a yaw whose forward view stays open. Pulled out of `main` so
+// the entry point stays a thin setup + loop. (Named `start`, not `spawn`,
 // because `spawn` is a reserved keyword.)
+//
+// **The centre is not the origin.** The terrain field is deterministic and
+// unbounded, so starting every run at (0, 0) meant starting every run on
+// the same hilltop looking at the same trees. `randomColumn` picks one a
+// long way out from the monotonic counter, which differs per run — and
+// prints it, so a world worth keeping can be returned to with `--at`.
+//
+// This varies the *place*, not the world. A different world means a
+// different `Noise::SEED`, and that constant is read by
+// `kblock::blocks::partialBoxHeight` — which sits behind the collision
+// capability — so making it a runtime value threads a seed through the
+// kernel's seams. Worth doing, and not the same change as this one.
 
 use crate::kernel::seams::VoxelQuery;
 use crate::configs::world::{ World };
+
+/** How far out a random start may land, in blocks, on each axis. */
+const START_SPREAD : i64 = 400000;
+
+/** Odd multiplier of the start hash. */
+const START_HASH_MUL : i64 = 6364136223846793005;
+
+/**
+ * The second draw's offset — an odd constant, chosen only for being
+ * unrelated to the multiplier.
+ *
+ * Written in decimal because the usual golden-ratio hex spelling is
+ * above `i64`'s range, and a literal there is a `u64` that will not mix
+ * with one.
+ */
+const START_HASH_OFFSET : i64 = 2685821657736338717;
+
+/**
+ * A column a long way from the origin, derived from `entropy`.
+ *
+ * Two independent draws from one input, so the two axes do not move
+ * together: a pair taken from adjacent bits of one multiply walks a
+ * diagonal, and a player who ran twice would notice.
+ * @param entropy  a value that differs between runs — a monotonic counter
+ * @return the (x, z) block column to search around
+ */
+fn randomColumn(entropy : i64) : (x: i32, z: i32) {
+    let a : i64 = (entropy * START_HASH_MUL) >> 17;
+    let b : i64 = ((entropy + START_HASH_OFFSET) * START_HASH_MUL) >> 29;
+    return (spread(a), spread(b));
+}
+
+/**
+ * `v` folded into `[-START_SPREAD, START_SPREAD)`.
+ *
+ * The remainder is taken to its magnitude first: `%` on a negative
+ * operand answers a negative remainder, so subtracting the half-width
+ * from it straight away gives a range one and a half times too wide and
+ * lopsided towards negative — which is a bug you only see by printing
+ * the numbers, since any column is a valid place to stand.
+ */
+fn spread(v : i64) : i32 {
+    let m : i64 = v % (START_SPREAD * 2);
+    if (m < 0) {
+        m = 0 - m;
+    }
+    return (m - START_SPREAD) as i32;
+}
 
 /**
  * A clearing to start in: the 3×3 columns around (gx, gz) are tree-free
@@ -99,16 +159,22 @@ class Spawn {
     }
 
     /**
-     * Search an 81×81 area around the origin for the highest dry, open
-     * hilltop. Falls back to sea level + 1 if nothing qualifies.
+     * Search an 81×81 area around (`cx`, `cz`) for the highest dry, open
+     * hilltop. Falls back to that centre at sea level + 1 if nothing
+     * qualifies — which is a beach or a lake, and still somewhere to
+     * stand.
      * @param man  the voxel-query surface to read heights from
+     * @param cx   centre column x of the search
+     * @param cz   centre column z of the search
      */
-    pub(crate) fn find(mut self, man : dyn VoxelQuery) : void {
+    pub(crate) fn find(mut self, man : dyn VoxelQuery, cx : i32, cz : i32) : void {
+        self.sx = cx;
+        self.sz = cz;
         let bestH : i32 = 0 - 1;
-        let gz : i32 = 0 - 40;
-        while (gz <= 40) {
-            let gx : i32 = 0 - 40;
-            while (gx <= 40) {
+        let gz : i32 = cz - 40;
+        while (gz <= cz + 40) {
+            let gx : i32 = cx - 40;
+            while (gx <= cx + 40) {
                 let hh : i32 = man.columnHeight(gx, gz);
                 if (hh > World::SEA_LEVEL + 2 && hh > bestH && openSpot(man, gx, gz)) {
                     bestH = hh;

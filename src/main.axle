@@ -23,9 +23,11 @@
 // lives in `game::ray`, the HUD in `krender::hud`.
 
 use smalt::{
-    AssetFile, BitmapFont, Clock, Event, EventKind, Events, Face, FramePacer, Mem, mixerLoop,
-    MouseButton, Platform, PlatformError, Scancode, Surface, Window, WindowDesc,
+    AssetFile, BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, FramePacer, Mem,
+    mixerLoop, MouseButton, Platform, PlatformError, Scancode, Surface, Window, WindowDesc,
 };
+use std::sys::process::{argc, argAt};
+use std::lang::{IndexOutOfBoundsException, ParseException};
 use crate::kernel::kio::input::Keys;
 use crate::kernel::kio::assets::Assets;
 use crate::kernel::kworld::manager::{ ChunkManager, lightLoop };
@@ -34,7 +36,7 @@ use crate::kernel::kworld::blocksim::BlockSim;
 use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
-use crate::game::start::{Spawn, openYaw};
+use crate::game::start::{Spawn, openYaw, randomColumn};
 use crate::game::ray::{Picker, cellInPlayer};
 use crate::kernel::kio::sfx::{ AudioManager };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
@@ -133,19 +135,39 @@ fn run() : i32 ! PlatformError {
 
     Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
 
+    // The monotonic clock and the loop's metronome, both smalt's — the
+    // two halves this game used to carry its own `GameClock` for. The
+    // clock is built here rather than beside the pacer because the start
+    // column is drawn from its counter, and that happens before the
+    // world is streamed.
+    //
+    // Both rates are `World::TICK_HZ`, which is what the old clock did:
+    // `tick` sleeps whatever is left of the frame budget (the CPU cap,
+    // independent of v-sync), and `steps` drains that same measurement
+    // into whole simulation steps. Naming the tick rate as well as the
+    // frame rate is not redundant — it pins it, so a later change to the
+    // frame cap cannot silently retime the physics with it.
+    let clock : Clock = new Clock();
+
     let man : ChunkManager = new ChunkManager();
     // Inject the game's concrete terrain generator (biome tables + ore / tree
     // rules — all app content) over the manager's shared voxel store. The kernel
     // drives it through the `Generator` seam and never names TerrainGen.
     man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
-    // Initial load: drive the per-call budget to completion so the whole spawn
-    // view is ready before play (no popping in at the start).
-    while (man.ensureLoaded(0, 0) > 0) {
+    // Where this run starts. Random unless `--at x z` names a column, and
+    // printed either way, so a world worth keeping can be returned to.
+    let (startX, startZ) = startColumn(clock);
+    Console::println("start column ${startX} ${startZ}  (replay with: --at ${startX} ${startZ})");
+
+    // The search reads heights, so the chunks around the centre have to
+    // exist before it runs — which is what the origin load used to do
+    // when the centre was always the origin.
+    while (man.ensureLoaded(chunkOf(startX as f64), chunkOf(startZ as f64)) > 0) {
     }
 
     // Choose an open hilltop to start on and a yaw facing the clearing.
     let sp : Spawn = new Spawn();
-    sp.find(man);
+    sp.find(man, startX, startZ);
     let player : Player = new Player((sp.sx as f64) + 0.5, sp.h as f64, (sp.sz as f64) + 0.5);
     player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
     player.refresh();
@@ -175,16 +197,6 @@ fn run() : i32 ! PlatformError {
     // renderer (mip level 0) wherever they're still needed (the HUD hotbar).
     Mem::release(atlas);
 
-    // The monotonic clock and the loop's metronome, both smalt's — the
-    // two halves this game used to carry its own `GameClock` for.
-    //
-    // Both rates are `World::TICK_HZ`, which is what the old clock did:
-    // `tick` sleeps whatever is left of the frame budget (the CPU cap,
-    // independent of v-sync), and `steps` drains that same measurement
-    // into whole simulation steps. Naming the tick rate as well as the
-    // frame rate is not redundant — it pins it, so a later change to the
-    // frame cap cannot silently retime the physics with it.
-    let clock : Clock = new Clock();
     let pacer : FramePacer = new FramePacer(World::TICK_HZ);
     pacer.setTickRate(World::TICK_HZ);
     // Isochronous scheduler: physics runs every tick, while chunk streaming
@@ -225,6 +237,12 @@ fn run() : i32 ! PlatformError {
     // when this changes — otherwise it idles, keeping the CPU near zero.
     let lastHover : i32 = 0 - 2;
     let running : bool = true;
+    // `--snap [ms]` plays for that long, writes `voxel.bmp` and quits. A
+    // capture for a report, or for a script, without anyone standing over
+    // the machine at the right moment — and the way this game's overlay
+    // is checked without a person looking at it.
+    let snapAtMs : i64 = snapDeadline();
+    let startMs : i64 = clock.ticks();
     while (running) {
         // Sleeps to the frame boundary and measures what the last frame
         // actually took; `pacer.steps()` below drains that measurement, so
@@ -550,6 +568,15 @@ fn run() : i32 ! PlatformError {
             // One blit, scaled to the client area — the framebuffer keeps
             // a fixed height and follows the window aspect in width.
             screen.present(win);
+
+            if (snapAtMs > 0 && clock.ticks() - startMs >= snapAtMs) {
+                if (Bmp::write("voxel.bmp", screen.frame())) {
+                    Console::println("wrote voxel.bmp");
+                } else {
+                    Console::println("could not write voxel.bmp");
+                }
+                running = false;
+            }
         }
         // Update the listener at the player so positional sounds attenuate live;
         // smalt's `mixerLoop`, on its own thread, does the device feeding.
@@ -578,4 +605,63 @@ fn run() : i32 ! PlatformError {
     platform.close();
     clock.close();
     return 0;
+}
+
+/**
+ * The instant a scripted capture is due, in milliseconds after the first
+ * frame, or `0` when `--snap` was not asked for.
+ *
+ * `--snap` on its own waits three seconds, which is long enough for the
+ * spawn view to have streamed in; `--snap <ms>` says how long instead.
+ */
+fn snapDeadline() : i64 {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--snap") {
+                if (i + 1 < argc()) {
+                    let ms : i64 = argAt(i + 1).toI64();
+                    if (ms > 0) {
+                        return ms;
+                    }
+                }
+                return 3000;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return 0;
+        } catch e : ParseException {
+            return 3000;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/**
+ * The column this run starts around.
+ *
+ * `--at <x> <z>` names one, so a world worth keeping can be returned to;
+ * anything else is a draw from the monotonic counter, which differs
+ * between runs. The counter rather than the wall clock because it is what
+ * this program already holds, and because a wall clock read twice in the
+ * same second answers twice the same.
+ * @param clock  the monotonic clock, read once for entropy
+ * @return the (x, z) block column to search for a start around
+ */
+fn startColumn(clock : Clock) : (x: i32, z: i32) {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--at" && i + 2 < argc()) {
+                return (argAt(i + 1).toI64() as i32, argAt(i + 2).toI64() as i32);
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--at wants two whole numbers; picking a random start");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return randomColumn(clock.counter());
 }
