@@ -9,10 +9,10 @@
 class Screen {
     static WINDOW_W : i32 = 960;
     static WINDOW_H : i32 = 600;
-    static RENDER_W : i32 = 640;
-    static RENDER_H : i32 = 400;
-    static HALF_W : f64 = 320.0;
-    static HALF_H : f64 = 200.0;
-    static FOCAL : f64 = 330.0;   // wider FOV (~62° vert) — less "zoomed" than 373
+    static RENDER_W : i32 = 960;
+    static RENDER_H : i32 = 600;
+    static HALF_W : f64 = 480.0;
+    static HALF_H : f64 = 300.0;
+    static FOCAL : f64 = 495.0;   // wider FOV (~62° vert) — less "zoomed" than 373
     static NEAR_PLANE : f64 = 0.12;
 }
