@@ -141,7 +141,6 @@ fn run() : i32 ! PlatformError {
     // camera that snaps on every un-pause.
     let swallowLook : bool = true;
 
-    Console::println("Survive! Mouse look, WASD move, Ctrl sprint, Space jump. Left-click dig/attack, right-click place, 1-9 pick block. Esc pauses.");
 
     // The monotonic clock and the loop's metronome, both smalt's — the
     // two halves this game used to carry its own `GameClock` for. The
@@ -332,12 +331,11 @@ fn run() : i32 ! PlatformError {
             let gmBoth : bool = events.isKeyDown(Keys::gameModeA())
                 && events.isKeyDown(Keys::gameModeB());
             if (gmBoth && !wasGmToggle) {
+                // The mode is a badge on the HUD. It used to be announced to
+                // a console a windowed game's player does not have open —
+                // and which said nothing to someone who toggled it ten
+                // minutes ago and forgot which way round they are.
                 player.toggleGameMode();
-                if (player.mode == GameMode::Creative) {
-                    Console::println("Creative — fly: Space up, Shift down, Ctrl boost.");
-                } else {
-                    Console::println("Survival.");
-                }
             }
             wasGmToggle = gmBoth;
 
@@ -493,7 +491,6 @@ fn run() : i32 ! PlatformError {
                 player.sinceHurt = 0;
                 player.pos.y = man.columnHeight(player.pos.x.floorToInt() as i32, player.pos.z.floorToInt() as i32) as f64;
                 player.refresh();
-                Console::println("You died — respawned.");
             }
         } else {
             // ── Paused: drive the menu with the free cursor. The window is
@@ -567,7 +564,8 @@ fn run() : i32 ! PlatformError {
                     renderer.drawSelection(player, fb, picker.bx, picker.by, picker.bz,
                         man.blockBoxHeight(ivec3(picker.bx, picker.by, picker.bz)));
                 }
-                drawHud(cv, renderer.atlasBase(), player.hp, player.maxHp, player.hotbar, player.selected);
+                drawHud(cv, hudFont, renderer.atlasBase(), player.hp, player.maxHp,
+                    player.hotbar, player.selected, player.mode == GameMode::Creative);
                 renderer.crosshair(fb);
             } else {
                 drawPauseMenu(cv, hudFont, hover);
@@ -576,15 +574,19 @@ fn run() : i32 ! PlatformError {
             // One blit, scaled to the client area — the framebuffer keeps
             // a fixed height and follows the window aspect in width.
             screen.present(win);
+        }
 
-            if (snapAtMs > 0 && clock.ticks() - startMs >= snapAtMs) {
-                if (Bmp::write("voxel.bmp", screen.frame())) {
-                    Console::println("wrote voxel.bmp");
-                } else {
-                    Console::println("could not write voxel.bmp");
-                }
-                running = false;
+        // Outside the render branch on purpose: a screenshot should capture
+        // what is ON SCREEN, which while paused is a menu drawn once and
+        // then left alone. Inside the branch it could only ever catch a
+        // frame the loop happened to be redrawing.
+        if (snapAtMs > 0 && clock.ticks() - startMs >= snapAtMs) {
+            if (Bmp::write("voxel.bmp", screen.frame())) {
+                Console::println("wrote voxel.bmp");
+            } else {
+                Console::println("could not write voxel.bmp");
             }
+            running = false;
         }
         // Update the listener at the player so positional sounds attenuate live;
         // smalt's `mixerLoop`, on its own thread, does the device feeding.

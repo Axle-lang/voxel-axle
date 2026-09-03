@@ -19,7 +19,7 @@ fn panelW() : i32 {
  * @return the panel height in pixels.
  */
 fn panelH() : i32 {
-    return 200;
+    return 300;
 }
 
 /**
@@ -181,12 +181,26 @@ struct PauseWidget : Widget {
         drawButton(f, self.font, 0, "Resume", self.hover);
         drawButton(f, self.font, 1, "Quit", self.hover);
 
-        let hint : string = "Esc to resume";
+        // The controls live here, where a player who has forgotten them
+        // actually looks. They used to be one line printed to stdout at
+        // startup, which is a console a windowed game's player does not
+        // have open and cannot get back.
+        let ink : i32 = Color::packBytes(150, 154, 166);
+        let keys : i32 = Color::packBytes(196, 202, 214);
+        // Anchored under the LAST button rather than measured back from the
+        // panel's bottom: the buttons are laid out from the top, so a
+        // bottom-relative row moves under them the moment the panel grows.
+        let line : i32 = btnY(f.h, 1) + btnH() + 20;
+        controlLine(f, self.font, px, pw, line, "Move", "W A S D  ·  Ctrl sprint", keys, ink);
+        controlLine(f, self.font, px, pw, line + 16, "Jump / swim", "Space", keys, ink);
+        controlLine(f, self.font, px, pw, line + 32, "Dig / place", "Left · Right click", keys, ink);
+        controlLine(f, self.font, px, pw, line + 48, "Hotbar", "1-9  ·  wheel", keys, ink);
+
         self.font.drawCentred(
             f,
-            Rect::make(px, py + ph - 28, pw, 20),
-            hint,
-            Color::packBytes(150, 154, 166)
+            Rect::make(px, py + ph - 26, pw, 20),
+            "Esc to resume",
+            ink
         );
     }
 }
@@ -201,4 +215,32 @@ struct PauseWidget : Widget {
 fn drawPauseMenu(f : Frame, font : BitmapFont, hover : i32) : void {
     let w : PauseWidget = PauseWidget { hover: hover, font: font };
     w.draw(f);
+}
+
+/**
+ * One row of the control list: a label on the left, its keys on the right.
+ * @param f      the frame to draw into
+ * @param font   the face
+ * @param px     panel left
+ * @param pw     panel width
+ * @param top    the row's top edge
+ * @param what   what the keys do
+ * @param keys   the keys themselves
+ * @param keyInk the ink the keys are drawn in
+ * @param ink    the ink the label is drawn in
+ */
+fn controlLine(
+    f : Frame,
+    font : BitmapFont,
+    px : i32,
+    pw : i32,
+    top : i32,
+    what : string,
+    keys : string,
+    keyInk : i32,
+    ink : i32
+) : void {
+    let base : i32 = font.baselineFor(top, 1);
+    font.draw(f, px + 22, base, what, ink);
+    font.drawRight(f, px + pw - 22, base, keys, keyInk);
 }

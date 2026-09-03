@@ -3,6 +3,7 @@
 // hotbar). Drawn straight into the framebuffer after the world and mobs.
 // Stateless: reads hp + the hotbar and paints pixels.
 
+use smalt::{BitmapFont, Color, Rect};
 use crate::kernel::krender::hotbar::{drawHotbar, hotbarPanelW, hotbarPanelH};
 use crate::configs::blocks::{ Block };
 use crate::kernel::krender::color::{Widget};
@@ -53,7 +54,16 @@ struct HeartRow : Widget {
  * @param hotbar    hotbar slot block ids.
  * @param selected  index of the active hotbar slot.
  */
-fn drawHud(f : Frame, atlas : i64, hp : i32, maxHp : i32, hotbar : Block[], selected : i32) : void {
+fn drawHud(
+    f : Frame,
+    font : BitmapFont,
+    atlas : i64,
+    hp : i32,
+    maxHp : i32,
+    hotbar : Block[],
+    selected : i32,
+    creative : bool
+) : void {
     let pw : i32 = hotbarPanelW();
     let ph : i32 = hotbarPanelH();
     let hx : i32 = (f.w - pw) / 2;
@@ -64,4 +74,17 @@ fn drawHud(f : Frame, atlas : i64, hp : i32, maxHp : i32, hotbar : Block[], sele
 
     bar.draw(f);
     hearts.draw(f);
+
+    // Creative is a MODE, so it needs a mode indicator. It used to be a
+    // line printed to stdout when it was toggled — which a windowed game's
+    // player never sees, and which says nothing at all to someone who
+    // toggled it ten minutes ago and forgot.
+    if (creative) {
+        let label : string = "CREATIVE";
+        let w : i32 = font.width(label) + 16;
+        let box : Rect = Rect::make(f.w - w - 8, 8, w, 20);
+        f.fillRound(box, 5, Color::mix(0x101418, 0x4CC2FF, 1, 4));
+        f.roundBorder(box, 5, 0x4CC2FF);
+        font.drawCentred(f, box, label, 0xDCEEFF);
+    }
 }
