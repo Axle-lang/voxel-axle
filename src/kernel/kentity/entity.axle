@@ -156,12 +156,14 @@ class Entity : Damageable, Physics {
     /**
      * Does the body AABB at (px, py, pz) overlap any collidable voxel?
      * The body is a `radius`-wide column `height` tall with feet at py.
-     * Each block is tested against its REAL per-type box (collideFloorCell):
-     * a full block fills its cube, a thin SnowLayer is solid only up to its
-     * partial top. So a low layer is a real obstacle of its true height in
-     * EVERY axis (you can't pass through it sideways) — yet short enough to be
-     * auto-stepped, never a wall. You stand on leaves, walk through canopy
-     * gaps, and can't pass into any solid block.
+     * Each block is tested against its REAL box (`collideFloorCell`), which
+     * is an interval within the cell rather than a height: a full block
+     * fills its cube, a snow layer is solid up to its stored level, and a
+     * box with a bottom — a top slab — is solid only between the two. So a
+     * low layer is a real obstacle of its true height in EVERY axis (you
+     * cannot pass through it sideways) yet short enough to be auto-stepped,
+     * never a wall. You stand on leaves, walk through canopy gaps, and
+     * cannot pass into any solid block.
      * @param world  chunk manager queried for collidable voxels
      * @param px     candidate body-centre X
      * @param py     candidate foot height
@@ -183,7 +185,7 @@ class Entity : Damageable, Physics {
             while (x <= x1) {
                 let z : i32 = z0;
                 while (z <= z1) {
-                    if (world.collideFloorCell(ivec3(x, y, z), py)) {
+                    if (world.collideFloorCell(ivec3(x, y, z), py, self.height)) {
                         return true;
                     }
                     z = z + 1;

@@ -82,6 +82,7 @@ fn runPhysicsCheck() : i32 {
 
     fails += checkSnowEdge(man, true);
     fails += checkSnowEdge(man, false);
+    fails += checkStoredBox(man);
 
     man.stopLight();
     Console::println("physics failures: ${fails}");
@@ -131,6 +132,10 @@ fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
                     let moved : f64 = walk(
                         man, (x as f64) + 0.5, h as f64, (z as f64) + 0.5, yaw, alongX
                     );
+                    Console::println(
+                        "  ${axis}: level-${man.blockLevel(ivec3(nx, h, nz))} layer (${deep} deep)"
+                        + " at (${nx}, ${h}, ${nz}) under ${k} cells — walk with --at ${x} ${z}"
+                    );
                     if (moved < WALK_MIN) {
                         Console::println(
                             "FAIL ${axis}: a ${deep}-deep layer at (${nx}, ${h}, ${nz}) stopped the body"
@@ -147,4 +152,58 @@ fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
     }
     Console::println("SKIP ${axis}: no low-headroom partial-block edge in the spawn ring");
     return 0;
+}
+
+/**
+ * The stored level, the box and the standable top must be the same fact.
+ *
+ * This is the assertion the old model could not make. The height used to
+ * come from noise sampled at the cell's coordinates, so there was no
+ * stored value to check it against — the box was correct by definition
+ * and wrong in every way that mattered. Now the generator writes a level
+ * and everything downstream reads it, so the three can be compared, and a
+ * chain that drifts says so here instead of on screen.
+ * @param man  the world to search
+ * @return the failure count
+ */
+fn checkStoredBox(man : ChunkManager) : i32 {
+    let seen : i32 = 0;
+    let fails : i32 = 0;
+    let z : i32 = 0 - SCAN;
+    while (z <= SCAN && seen < 24) {
+        let x : i32 = 0 - SCAN;
+        while (x <= SCAN && seen < 24) {
+            let h : i32 = man.columnHeight(x, z);
+            let cell : IVec3 = ivec3(x, h, z);
+            if (h > 0 && man.worldGet(cell) == Block::SnowLayer) {
+                seen = seen + 1;
+                let level : i32 = man.blockLevel(cell);
+                let want : f64 = (level as f64) / 8.0;
+                if (level < 1 || level > 8) {
+                    Console::println("FAIL stored level ${level} out of range at (${x}, ${h}, ${z})");
+                    fails += 1;
+                } else if ((man.blockBoxHeight(cell) - want).abs() > 0.0001) {
+                    Console::println(
+                        "FAIL box ${man.blockBoxHeight(cell)} disagrees with level ${level}"
+                        + " at (${x}, ${h}, ${z})"
+                    );
+                    fails += 1;
+                } else if ((man.supportHeight(cell) - ((h as f64) + want)).abs() > 0.0001) {
+                    Console::println(
+                        "FAIL support ${man.supportHeight(cell)} is not the box top"
+                        + " at (${x}, ${h}, ${z})"
+                    );
+                    fails += 1;
+                }
+            }
+            x = x + 1;
+        }
+        z = z + 1;
+    }
+    if (seen == 0) {
+        Console::println("SKIP stored box: no snow layer in the spawn ring");
+        return 0;
+    }
+    Console::println("  stored box: ${seen} layers agree with their level");
+    return fails;
 }

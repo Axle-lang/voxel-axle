@@ -209,6 +209,30 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
         return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
     }
 
+    /**
+     * The stored LEVEL of a world cell; 0 outside the loaded ring.
+     *
+     * The other half of a voxel. A block id says what is there and the
+     * level says how much of the cell it fills, and both have to be read
+     * through the same slot lookup or a partial block's height and its
+     * identity can come from two different chunks.
+     * @param cell  the world voxel
+     * @return the cell's level, or 0 for "the id's default box"
+     */
+    pub(crate) fn worldLevel(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 0;
+        }
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 0;
+        }
+        return self.store.getLevel(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
     // ── Per-slot mesh-dirty bridge (read back by the manager's flush) ──
 
     /** Flag a slot's light as changed so the manager re-meshes it. */

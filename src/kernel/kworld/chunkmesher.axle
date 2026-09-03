@@ -10,7 +10,7 @@
 // column's highest collidable voxel for entity physics.
 
 use smalt::Mem;
-use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, partialBoxHeight };
+use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, boxOf };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::manager::ChunkManager;
@@ -270,15 +270,19 @@ class ChunkMesher : Mesher {
      * @param myH   this block's box height
      * @return whether to emit the side wall toward the neighbour
      */
-    fn partialSideOpen(self, slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myH : f64) : bool {
-        let nb : Block = self.store.getVox(slot, ivec3(nlx, nly, nlz));
+    fn partialSideOpen(self, slot : i32, nlx : i32, nly : i32, nlz : i32, myH : f64) : bool {
+        let nl : IVec3 = ivec3(nlx, nly, nlz);
+        let nb : Block = self.store.getVox(slot, nl);
         if (nb == Block::Air) {
             return true;
         }
         if (!isPartialShape(nb)) {
             return false;
         }
-        return partialBoxHeight(nb, nwx as f64, nwz as f64) < myH - 0.001;
+        // The neighbour's box comes from the neighbour's own stored level,
+        // read through the same padded index as its id — so the wall a step
+        // between two snow depths shows is the step that is really there.
+        return boxOf(nb, self.store.getLevel(slot, nl)).yMax < myH - 0.001;
     }
 
     /**
@@ -367,17 +371,17 @@ class ChunkMesher : Mesher {
             // A partial, floor-resting block at its real height. Emit the top, and
             // a side wall toward a neighbour that is air OR a LOWER partial block.
             self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
-            let myH : f64 = partialBoxHeight(id, wx as f64, wz as f64);
-            if (self.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
+            let myH : f64 = boxOf(id, self.store.getLevel(slot, ivec3(lx, ly, lz))).yMax;
+            if (self.partialSideOpen(slot, lx + 1, ly, lz, myH)) {
                 self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
             }
-            if (self.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
+            if (self.partialSideOpen(slot, lx - 1, ly, lz, myH)) {
                 self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
             }
-            if (self.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
+            if (self.partialSideOpen(slot, lx, ly, lz + 1, myH)) {
                 self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
             }
-            if (self.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
+            if (self.partialSideOpen(slot, lx, ly, lz - 1, myH)) {
                 self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
             }
             return false;

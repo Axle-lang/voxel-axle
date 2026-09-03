@@ -21,6 +21,7 @@
 
 use crate::kernel::kmath::vec3::{ Vec3, IVec3 };
 use crate::configs::blocks::{ Block };
+use crate::kernel::kblock::blocks::{ BlockBox };
 use crate::configs::mobs::{ MobKind };
 
 // ─── Voxel read capabilities ────────────────────────────────────────────────
@@ -32,10 +33,18 @@ trait VoxelReader {
     fn solidAt(self, cell : IVec3) : bool;
 }
 
-/** Query the collision geometry an entity resolves its AABB against. */
+/**
+ * Query the collision geometry an entity resolves its AABB against.
+ *
+ * `blockBox` is the authority; the other three are what the physics and
+ * the overlays ask it for. A box is an INTERVAL within the cell, not a
+ * height, so `collideFloorCell` takes the body's height as well as its
+ * feet — a box with a bottom cannot be tested against a single point.
+ */
 trait CollisionField {
-    fn collideFloorCell(self, cell : IVec3, py : f64) : bool;
+    fn collideFloorCell(self, cell : IVec3, py : f64, bodyHeight : f64) : bool;
     fn supportHeight(self, cell : IVec3) : f64;
+    fn blockBox(self, cell : IVec3) : BlockBox;
     fn blockBoxHeight(self, cell : IVec3) : f64;
     fn floorScanPad(self) : i32;
 }

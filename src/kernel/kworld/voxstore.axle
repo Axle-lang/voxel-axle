@@ -17,15 +17,25 @@ use crate::configs::world::{ World };
 
 class VoxStore {
     vox : Block[],            // padded block field: slots × (chunkSize+2)² × worldHeight
+    lvl : i8[],               // per-voxel LEVEL, same layout; 0 = the id's default box
     pub(crate) maxFY : i32[], // per-slot highest-face Y watermark (bounds the mesh/light scan)
 
     /**
-     * Allocate the padded voxel field and the per-slot face-Y watermark.
+     * Allocate the padded voxel field, its level field and the per-slot
+     * face-Y watermark.
+     *
+     * The level is one byte a voxel beside the id — a quarter more memory
+     * for the field, and the thing that makes a partial block a piece of
+     * WORLD DATA rather than a function of where it happens to sit. A
+     * height derived from the coordinates cannot be placed, cannot be dug
+     * a layer at a time, and cannot differ between two cells the noise
+     * happens to agree about.
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
         let hSide : i32 = World::CHUNK_SIZE + 2;
         self.vox = malloc<Block>(slots * hSide * hSide * World::HEIGHT);
+        self.lvl = malloc<i8>(slots * hSide * hSide * World::HEIGHT);
         self.maxFY = malloc<i32>(slots);
     }
 
@@ -70,7 +80,43 @@ class VoxStore {
      * @param id     the block id to write
      */
     pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
-        self.vox[self.voxIdx(slot, local.x, local.y, local.z)] = id;
+        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        self.vox[at] = id;
+        // A write that says nothing about the level clears it, so a cell
+        // never inherits the level of whatever used to be there. Zero is
+        // "the id's own default box".
+        self.lvl[at] = 0;
+    }
+
+    /**
+     * Write block `id` at a padded local voxel with an explicit level.
+     *
+     * The door a layered block goes through: a snow layer, a slab, a
+     * fluid depth. `level` is 1..8 for a layered id and ignored by every
+     * other one, so a caller that does not know which it holds can pass
+     * the level it means and be right either way.
+     * @param slot   the slot index
+     * @param local  the padded local voxel coordinate
+     * @param id     the block id to write
+     * @param level  the block's level, 1..8; 0 for the id's default
+     */
+    pub(crate) fn setVoxLevel(mut self, slot : i32, local : IVec3, own id : Block, level : i32) : void {
+        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        self.vox[at] = id;
+        self.lvl[at] = level as i8;
+    }
+
+    /**
+     * The stored level of a padded local voxel; 0 outside the world.
+     * @param slot   the slot index
+     * @param local  the padded local voxel coordinate
+     * @return the cell's level, or 0 for "the id's default"
+     */
+    pub(crate) fn getLevel(self, slot : i32, local : IVec3) : i32 {
+        if (local.y < 0 || local.y >= World::HEIGHT) {
+            return 0;
+        }
+        return self.lvl[self.voxIdx(slot, local.x, local.y, local.z)] as i32;
     }
 
     /**

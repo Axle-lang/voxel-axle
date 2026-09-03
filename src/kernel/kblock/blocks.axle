@@ -18,7 +18,6 @@
 // and renderer stay Block-agnostic.
 
 use smalt::Color;
-use crate::kernel::kworld::noise::{ snowDepth };
 use crate::configs::atlas::{ Tile };
 use crate::configs::audio::{ AudioMaterial };
 use crate::configs::blocks::{ Block };
@@ -56,10 +55,13 @@ trait Fluid {
     fn fluidLevel(self) : i32;
 }
 
-/** Non-cube geometry: partial floor-resting boxes (snow layer today, slabs later). */
+/** Non-cube geometry: the block's box within its own cell. */
 trait Shaped {
     fn isSnowLayer(self) : bool;
     fn isPartialShape(self) : bool;
+
+    /** Whether the block's height is set by its stored level rather than fixed. */
+    fn isLayered(self) : bool;
 }
 
 /** Plant-family surfaces: leaves (light-leaking canopy) and grassy tops. */
@@ -226,27 +228,70 @@ fn flowOf(id : Block) : Flow {
     };
 }
 
+/**
+ * A block's box **within its own cell**, in cell units: 0 is the cell
+ * floor, 1 its ceiling.
+ *
+ * This is the engine's shape model, and it is deliberately an interval
+ * rather than a height. A height can only describe a box resting on the
+ * floor — a snow layer, a bottom slab — so with one the engine cannot
+ * represent a top slab, and every system that wanted to ask "does the
+ * body fit here" could only ask "is the body below the top".
+ *
+ * The defaults are a full cube, so a literal names only what it changes.
+ */
+struct BlockBox {
+    /** Bottom of the box, 0 at the cell floor. */
+    pub(crate) yMin : f64 = 0.0,
+
+    /** Top of the box, 1 at the cell ceiling. */
+    pub(crate) yMax : f64 = 1.0,
+
+    /** The box's vertical extent. @return the height in cell units */
+    pub(crate) fn height(self) : f64 { return self.yMax - self.yMin; }
+
+    /** Whether the box fills its cell. @return whether it is a full cube */
+    pub(crate) fn isFull(self) : bool { return self.yMin <= 0.0 && self.yMax >= 1.0; }
+
+    /** Whether the box has no extent at all. @return whether it is empty */
+    pub(crate) fn isEmpty(self) : bool { return self.yMax <= self.yMin; }
+
+    /** Whether the box sits on the cell floor. @return whether it rests on the floor */
+    pub(crate) fn restsOnFloor(self) : bool { return self.yMin <= 0.0; }
+
+    /** The box's top, in world Y, for a cell whose floor is at `cellY`. */
+    pub(crate) fn topAt(self, cellY : f64) : f64 { return cellY + self.yMax; }
+
+    /** The box's bottom, in world Y, for a cell whose floor is at `cellY`. */
+    pub(crate) fn bottomAt(self, cellY : f64) : f64 { return cellY + self.yMin; }
+}
+
 /** Non-cube geometry flags. */
 struct Shape : Shaped {
     snow : bool,
     partial : bool,
+    layered : bool,
 
     /** Whether the block is the thin partial-height snow layer. @return whether snow layer */
     fn isSnowLayer(self) : bool { return self.snow; }
 
     /** Whether the block has a partial, floor-resting box. @return whether partial */
     fn isPartialShape(self) : bool { return self.partial; }
+
+    /** Whether the stored level sets the height. @return whether layered */
+    fn isLayered(self) : bool { return self.layered; }
 }
 
 /**
- * Shape for a block: only the snow layer is a partial floor-resting box today.
+ * Shape for a block: only the snow layer is a partial floor-resting box
+ * today, and it is the one whose height its stored level sets.
  * @param id  the block
  * @return its shape capability
  */
 fn shapeOf(id : Block) : Shape {
     return match id {
-        Block::SnowLayer => Shape { snow: true, partial: true },
-        _ => Shape { snow: false, partial: false },
+        Block::SnowLayer => Shape { snow: true, partial: true, layered: true },
+        _ => Shape { snow: false, partial: false, layered: false },
     };
 }
 
@@ -583,38 +628,77 @@ fn isSnowLayer(id : Block) : bool {
 }
 
 /**
- * A block whose collision/visual box is SHORTER than a full cube but still
- * rests on the cell floor and fills the whole XZ footprint (a thin snow layer
- * today; bottom slabs later). Its real height comes from
- * `ChunkManager.blockBoxHeight`. The general "partial block" category every
- * system (physics, mesher, picker, selection) branches on instead of naming a
- * concrete block — add a block id here and to `blockBoxHeight` and it Just Works.
+ * A block whose box is not a full cube. The general category every
+ * system (physics, mesher, picker, selection) branches on instead of
+ * naming a concrete block.
  * @param id  the block
- * @return whether the block has a partial, floor-resting box
+ * @return whether the block's box is smaller than its cell
  */
 fn isPartialShape(id : Block) : bool {
     return shapeOf(id).isPartialShape();
 }
 
+/** Levels a layered block is quantised to — eighths of a cell, as Minecraft does. */
+const BLOCK_LEVELS : i32 = 8;
+
 /**
- * THE single authority for a block's real box HEIGHT (its vertical extent within
- * a cell): a full block is 1.0, a thin SnowLayer its noise-varied `snowDepth`.
- * Every system — collision (collideFloorCell / supportHeight), meshing, the
- * look-ray picker and the selection wireframe — resolves height through here (the
- * manager's blockBoxHeight seam and the mesher both call it), so the box, the
- * visual and the hitbox always agree. Adding a partial block (a slab, a carpet) =
- * one new arm here (plus listing it in `isPartialShape`); nothing else hard-codes
- * a height.
- * @param id  the block id occupying the cell
- * @param wx  the cell's world x (for the snow noise)
- * @param wz  the cell's world z (for the snow noise)
- * @return the cell box's real height in Y (1.0 full, snowDepth for snow)
+ * THE single authority for a block's box.
+ *
+ * A pure function of the **stored voxel** — its id and its level — and of
+ * nothing else. That is the whole point of the signature: the height used
+ * to come from noise sampled at the cell's world coordinates, which meant
+ * a snow layer could not be placed, dug or changed (it was whatever the
+ * noise said there), the block table had to import the terrain field, and
+ * through it the world seed reached behind the collision capability.
+ *
+ * `level` is the stored level, 1..8 for a layered block. **Zero means
+ * "unset"** and takes the id's own default, so every writer that does not
+ * care about levels keeps working and full blocks are unaffected.
+ *
+ * A block with no collision box answers an empty box rather than a full
+ * cube, so a caller that forgets the predicate gets "nothing here" rather
+ * than a phantom wall.
+ *
+ * @param id     the block id occupying the cell
+ * @param level  the cell's stored level; 0 for the id's default
+ * @return the block's box within its cell
  */
-fn partialBoxHeight(id : Block, wx : f64, wz : f64) : f64 {
-    return match id {
-        Block::SnowLayer => snowDepth(wx, wz),
-        _ => 1.0,
-    };
+fn boxOf(id : Block, level : i32) : BlockBox {
+    if (!hasCollisionBox(id)) {
+        return BlockBox { yMax: 0.0 };
+    }
+    if (!shapeOf(id).isLayered()) {
+        // One field named: an empty struct literal is not a form the parser
+        // accepts, even when every field has a default.
+        return BlockBox { yMax: 1.0 };
+    }
+    let n : i32 = level;
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > BLOCK_LEVELS) {
+        n = BLOCK_LEVELS;
+    }
+    return BlockBox { yMax: (n as f64) / (BLOCK_LEVELS as f64) };
+}
+
+/**
+ * The level a real height quantises to, 1..8.
+ *
+ * What a generator calls once, to turn a continuous field into the level
+ * it stores — after which nothing re-derives it.
+ * @param height  a height in cell units
+ * @return the level that height rounds to, at least 1
+ */
+fn levelOfHeight(height : f64) : i32 {
+    let n : i32 = (height * (BLOCK_LEVELS as f64)).round() as i32;
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > BLOCK_LEVELS) {
+        n = BLOCK_LEVELS;
+    }
+    return n;
 }
 
 /**

@@ -23,7 +23,7 @@
 
 use std::sys::sleep;
 use smalt::Mem;
-use crate::kernel::kblock::blocks::{ isSolid, isCollidable, hasCollisionBox, partialBoxHeight };
+use crate::kernel::kblock::blocks::{ isSolid, isCollidable, hasCollisionBox, boxOf, BlockBox };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };
@@ -271,11 +271,19 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param py    the body's foot height being tested
      * @return true if the cell's real box blocks the body at `py`
      */
-    fn collideFloorCell(self, cell : IVec3, py : f64) : bool {
-        if (!hasCollisionBox(self.worldGet(cell))) {
+    fn collideFloorCell(self, cell : IVec3, py : f64, bodyHeight : f64) : bool {
+        let b : BlockBox = self.blockBox(cell);
+        if (b.isEmpty()) {
             return false;
         }
-        return py < (cell.y as f64) + self.blockBoxHeight(cell);
+        let cy : f64 = cell.y as f64;
+        // Two intervals overlap when each starts before the other ends.
+        // The old test was only the first half — the body's feet below the
+        // box's top — which is right for a box resting on the cell floor
+        // and wrong for any other, because it says a body standing on a
+        // top slab's roof is inside it. Asking the whole question is what
+        // lets a box have a bottom at all.
+        return py < b.topAt(cy) && py + bodyHeight > b.bottomAt(cy);
     }
 
     /**
@@ -285,20 +293,48 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the standable top Y of the cell, or a very low value if none
      */
     fn supportHeight(self, cell : IVec3) : f64 {
-        if (!hasCollisionBox(self.worldGet(cell))) {
+        let b : BlockBox = self.blockBox(cell);
+        if (b.isEmpty()) {
             return 0.0 - 1000000.0;
         }
-        return (cell.y as f64) + self.blockBoxHeight(cell);
+        return b.topAt(cell.y as f64);
     }
 
     /**
-     * A cell box's real height in Y (its vertical extent): resolved through the
-     * single authority `partialBoxHeight`.
+     * THE cell's box, resolved from the stored voxel: its id and its level.
+     *
+     * Every system that needs geometry — collision, the auto-step, the
+     * mesher, the look-ray picker, the selection wireframe, the renderer's
+     * water surface — comes through here, so the hitbox, the visual and
+     * the thing you aim at cannot disagree. It reads the world and nothing
+     * else: no coordinates, no noise.
      * @param cell  the world voxel
-     * @return the cell box's real height (1.0 full, snowDepth for snow)
+     * @return the cell's box within its cell
+     */
+    fn blockBox(self, cell : IVec3) : BlockBox {
+        return boxOf(self.worldGet(cell), self.leng.worldLevel(cell));
+    }
+
+    /**
+     * The cell box's vertical extent, for a caller that only wants a
+     * height — the renderer's water surface, the selection wireframe.
+     * @param cell  the world voxel
+     * @return the box's height in cell units
      */
     fn blockBoxHeight(self, cell : IVec3) : f64 {
-        return partialBoxHeight(self.worldGet(cell), cell.x as f64, cell.z as f64);
+        return self.blockBox(cell).height();
+    }
+
+    /**
+     * The cell's stored level, 1..8 for a layered block and 0 otherwise.
+     *
+     * The other half of a voxel, published so a tool can read what is
+     * actually stored rather than infer it back out of a height.
+     * @param cell  the world voxel
+     * @return the stored level
+     */
+    pub(crate) fn blockLevel(self, cell : IVec3) : i32 {
+        return self.leng.worldLevel(cell);
     }
 
     /**

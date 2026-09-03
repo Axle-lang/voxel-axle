@@ -11,7 +11,7 @@
 use crate::kernel::kworld::manager::Generator;
 use crate::kernel::kworld::noise::{ terrainHeight, temperature, humidity, treeHash, hashI, snowDepth };
 use crate::game::world::biomes::{ biomeAt, biomeDef, biomeSurface, BiomeDef };
-use crate::kernel::kblock::blocks::{ isLeaves };
+use crate::kernel::kblock::blocks::{ isLeaves, levelOfHeight };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::game::world::treegen::{ stampTree };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
@@ -199,11 +199,18 @@ class TerrainGen : Generator {
                 if (self.coldBiome(biome) && h > World::SEA_LEVEL && h < World::HEIGHT) {
                     let frac : f64 = snowDepth(wx as f64, wz as f64);
                     if (frac > 0.0) {
-                        let sb : Block = Block::SnowLayer;
                         if (frac >= 0.95) {
-                            sb = Block::Snow;
+                            self.store.setVoxLocal(slot, ivec3(lx, h, lz), Block::Snow);
+                        } else {
+                            // The noise is sampled ONCE, here, and what it says
+                            // is stored as the cell's level. Nothing downstream
+                            // asks the terrain field how deep this snow is —
+                            // which is what lets it be dug a layer at a time,
+                            // and what keeps the world seed out of the collision
+                            // path.
+                            self.store.setVoxLevel(slot, ivec3(lx, h, lz),
+                                Block::SnowLayer, levelOfHeight(frac));
                         }
-                        self.store.setVoxLocal(slot, ivec3(lx, h, lz), sb);
                         self.store.bumpFY(slot, h);
                     }
                 }
@@ -323,11 +330,12 @@ class TerrainGen : Generator {
         if (frac <= 0.0) {
             return;
         }
-        let sb : Block = Block::SnowLayer;
         if (frac >= 0.95) {
-            sb = Block::Snow;
+            self.store.setVoxLocal(slot, ivec3(lx, y + 1, lz), Block::Snow);
+        } else {
+            self.store.setVoxLevel(slot, ivec3(lx, y + 1, lz),
+                Block::SnowLayer, levelOfHeight(frac));
         }
-        self.store.setVoxLocal(slot, ivec3(lx, y + 1, lz), sb);
         self.store.bumpFY(slot, y + 1);
     }
 }
