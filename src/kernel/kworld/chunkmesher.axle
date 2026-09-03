@@ -11,6 +11,18 @@
 
 use smalt::Mem;
 use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, boxOf };
+use smalt::Mem;
+
+/**
+ * Cells a greedy run may span.
+ *
+ * Not unbounded: the per-corner soft sun shadow is sampled at render time
+ * at the quad's corners, because the sun moves and the mesh does not, so
+ * a merged quad interpolates that shadow rather than sampling it per
+ * block. Eight cells is where the error stays inside what a soft shadow
+ * already blurs.
+ */
+const MESH_MAX_RUN : i32 = 8;
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::manager::ChunkManager;
@@ -33,6 +45,19 @@ class ChunkMesher : Mesher {
     fy : i32[],
     fz : i32[],
     ftile : i32[],
+    frun : i32[],
+    // The open greedy runs. `runU` carries the runs that grow along X — top,
+    // bottom and the two Z-facing walls — keyed by (dir, ly) and valid only
+    // while `lz` is fixed, because the scan's middle loop is the one that
+    // advances X. `runW` carries the X-facing walls, which grow along Z, keyed
+    // by (dir, lx, ly) and valid for the whole chunk, because Z is the outer
+    // loop. Two tables rather than one because the scan order makes the two
+    // families' runs live for different spans, and a run that outlives its
+    // span merges across a gap.
+    runU : i32[],    // open face index, or -1
+    runUAt : i32[],  // the last coordinate that run covered
+    runW : i32[],
+    runWAt : i32[],
     flight : i64,
     fao : i64,
     tx : i32[],
@@ -56,6 +81,11 @@ class ChunkMesher : Mesher {
         self.fy = m.faces.fy;
         self.fz = m.faces.fz;
         self.ftile = m.faces.ftile;
+        self.frun = m.faces.frun;
+        self.runU = malloc<i32>(6 * World::HEIGHT);
+        self.runUAt = malloc<i32>(6 * World::HEIGHT);
+        self.runW = malloc<i32>(2 * World::CHUNK_SIZE * World::HEIGHT);
+        self.runWAt = malloc<i32>(2 * World::CHUNK_SIZE * World::HEIGHT);
         self.flight = m.faces.flight;
         self.fao = m.faces.fao;
         self.tx = m.torches.tx;
@@ -116,6 +146,32 @@ class ChunkMesher : Mesher {
      * @param tile  the atlas tile index
      */
     fn addFace(mut self, slot : i32, cell : IVec3, own dir : FaceDir, tile : i32) : void {
+        self.addFaceRun(slot, cell, ivec3(0, 0, 0), dir, tile, false);
+    }
+
+    /**
+     * Emit one face, merging it onto the open run beside it where it can.
+     *
+     * The face is written and its corners baked FIRST, then compared with
+     * the run's head — the comparison is over baked light and AO, so
+     * there is nothing to compare until the bake has run. When it merges,
+     * the write is simply not committed: `fcount` does not advance and
+     * the head's `frun` does.
+     *
+     * `mergeable` is the caller's, because only the caller knows the
+     * block. A water face is out — its corners are per-column heights, so
+     * a merged quad would flatten the sloped surface. A partial block is
+     * out for the same reason: its top sits at its own stored level.
+     *
+     * @param slot       the ring slot
+     * @param cell       the face's world voxel
+     * @param local      the same cell in chunk-local coordinates
+     * @param dir        the face direction
+     * @param tile       the atlas tile
+     * @param mergeable  whether this face's geometry is a plain unit quad
+     */
+    fn addFaceRun(mut self, slot : i32, cell : IVec3, local : IVec3, own dir : FaceDir,
+        tile : i32, mergeable : bool) : void {
         let fc : i32 = self.fcount[slot];
         if (fc >= World::MAX_FACES_PER_CHUNK) {
             return;
@@ -128,8 +184,88 @@ class ChunkMesher : Mesher {
         // renderFace unpacks dir = ftile / 256, tile = ftile % 256.
         let di : i32 = dir as i32;
         self.ftile[i] = di * 256 + tile;
+        self.frun[i] = 1;
         self.bakeFaceCorners(i, cell, di);
+        if (!mergeable) {
+            self.fcount[slot] = fc + 1;
+            return;
+        }
+
+        if (di <= 1) {
+            // An X-facing wall grows along Z.
+            let k : i32 = (di * World::CHUNK_SIZE + local.x) * World::HEIGHT + local.y;
+            let head : i32 = self.runW[k];
+            if (head >= 0 && self.runWAt[k] == local.z - 1 && self.canMerge(head, i)) {
+                self.frun[head] = self.frun[head] + 1;
+                self.runWAt[k] = local.z;
+                return;
+            }
+            self.runW[k] = i;
+            self.runWAt[k] = local.z;
+        } else {
+            // Everything else grows along X.
+            let k : i32 = di * World::HEIGHT + local.y;
+            let head : i32 = self.runU[k];
+            if (head >= 0 && self.runUAt[k] == local.x - 1 && self.canMerge(head, i)) {
+                self.frun[head] = self.frun[head] + 1;
+                self.runUAt[k] = local.x;
+                return;
+            }
+            self.runU[k] = i;
+            self.runUAt[k] = local.x;
+        }
         self.fcount[slot] = fc + 1;
+    }
+
+    /**
+     * Whether face `b` may join the run headed by `a`.
+     *
+     * Same tile, and the SAME four baked corner light and AO values. The
+     * second half is the one that costs merges and cannot be dropped: a
+     * merged quad has four corners and Gouraud-interpolates between them,
+     * so absorbing a cell whose corners differ is throwing that cell's
+     * lighting away. Measured over a loaded ring, insisting on it turns
+     * 103k merge candidates into 74k — a quarter of the opportunity, for
+     * all of the lighting.
+     *
+     * The run is also capped. The per-corner soft sun shadow is sampled at
+     * RENDER time, at the quad's corners, because the sun moves; across a
+     * merged quad it is interpolated rather than sampled per block. Eight
+     * cells keeps that error to something a soft shadow can absorb.
+     *
+     * @param a  the run head
+     * @param b  the candidate
+     * @return whether they are the same face repeated
+     */
+    fn canMerge(self, a : i32, b : i32) : bool {
+        if (self.ftile[a] != self.ftile[b] || self.frun[a] >= MESH_MAX_RUN) {
+            return false;
+        }
+        for (k of 0..4) {
+            if (Mem::byteAt(self.flight, (a * 4 + k) as i64)
+                != Mem::byteAt(self.flight, (b * 4 + k) as i64)) {
+                return false;
+            }
+            if (Mem::byteAt(self.fao, (a * 4 + k) as i64)
+                != Mem::byteAt(self.fao, (b * 4 + k) as i64)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Forget every open run that grows along X — they do not cross a Z step. */
+    fn resetRunsU(mut self) : void {
+        for (k of 0..(6 * World::HEIGHT)) {
+            self.runU[k as i64] = 0 - 1;
+        }
+    }
+
+    /** Forget every open run that grows along Z — they do not cross a chunk. */
+    fn resetRunsW(mut self) : void {
+        for (k of 0..(2 * World::CHUNK_SIZE * World::HEIGHT)) {
+            self.runW[k as i64] = 0 - 1;
+        }
     }
 
     /**
@@ -302,8 +438,10 @@ class ChunkMesher : Mesher {
         let s : i32 = World::CHUNK_SIZE;
         let top : i32 = self.store.maxFY[slot];
         let air : Block = Block::Air;
+        self.resetRunsW();
         let lz : i32 = 0;
         while (lz < s) {
+            self.resetRunsU();
             let lx : i32 = 0;
             while (lx < s) {
                 let wx : i32 = cx * s + lx;
@@ -343,6 +481,9 @@ class ChunkMesher : Mesher {
     fn meshVoxel(mut self, slot : i32, lx : i32, ly : i32, lz : i32, wx : i32, wz : i32, id : Block) : bool {
         let air : Block = Block::Air;
         let cell : IVec3 = ivec3(wx, ly, wz);   // this voxel, for addFace / addTorch
+        // The same voxel in chunk-local coordinates: the greedy merge keys its
+        // open runs by these, because a run lives inside one chunk.
+        let local : IVec3 = ivec3(lx, ly, lz);
         if (id == Block::Torch) {
             // Torches emit no cube faces; a thin post is drawn separately.
             self.addTorch(slot, cell);
@@ -389,26 +530,26 @@ class ChunkMesher : Mesher {
         // A solid block shows a face wherever its neighbour is TRANSPARENT — air
         // or water — so submerged terrain stays visible through the water.
         if (isTransparent(self.store.getVox(slot, ivec3(lx + 1, ly, lz)))) {
-            self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            self.addFaceRun(slot, cell, local, FaceDir::PosX, tileFor(id, FaceDir::PosX), true);
         }
         if (isTransparent(self.store.getVox(slot, ivec3(lx - 1, ly, lz)))) {
-            self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            self.addFaceRun(slot, cell, local, FaceDir::NegX, tileFor(id, FaceDir::NegX), true);
         }
         // A partial block above (snow, a slab) is transparent but seals this top
         // from view (its own raised top renders double-sided). A normal
         // transparent block above keeps this top.
         let above : Block = self.store.getVox(slot, ivec3(lx, ly + 1, lz));
         if (isTransparent(above) && !isPartialShape(above)) {
-            self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+            self.addFaceRun(slot, cell, local, FaceDir::Top, tileFor(id, FaceDir::Top), true);
         }
         if (isTransparent(self.store.getVox(slot, ivec3(lx, ly - 1, lz)))) {
-            self.addFace(slot, cell, FaceDir::Bottom, tileFor(id, FaceDir::Bottom));
+            self.addFaceRun(slot, cell, local, FaceDir::Bottom, tileFor(id, FaceDir::Bottom), true);
         }
         if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz + 1)))) {
-            self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            self.addFaceRun(slot, cell, local, FaceDir::PosZ, tileFor(id, FaceDir::PosZ), true);
         }
         if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz - 1)))) {
-            self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            self.addFaceRun(slot, cell, local, FaceDir::NegZ, tileFor(id, FaceDir::NegZ), true);
         }
         return isCollidable(id);
     }

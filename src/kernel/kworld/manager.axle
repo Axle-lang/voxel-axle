@@ -79,6 +79,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
             fcount: malloc<i32>(slots),
             fx: malloc<i32>(faceCap), fy: malloc<i32>(faceCap), fz: malloc<i32>(faceCap),
             ftile: malloc<i32>(faceCap),
+            frun: malloc<i32>(faceCap),
             flight: Mem::take((faceCap as i64) * 4),
             fao: Mem::take((faceCap as i64) * 4),
         };

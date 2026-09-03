@@ -25,6 +25,7 @@ use crate::game::world::terraingen::TerrainGen;
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kmath::vec3::{ ivec3 };
 use crate::kernel::kblock::blocks::{ hasCollisionBox };
+use smalt::{Mem, SlotIndex};
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -83,6 +84,7 @@ fn runPhysicsCheck() : i32 {
     fails += checkSnowEdge(man, true);
     fails += checkSnowEdge(man, false);
     fails += checkStoredBox(man);
+    surveyFaces(man);
 
     man.stopLight();
     Console::println("physics failures: ${fails}");
@@ -206,4 +208,126 @@ fn checkStoredBox(man : ChunkManager) : i32 {
     }
     Console::println("  stored box: ${seen} layers agree with their level");
     return fails;
+}
+
+/**
+ * How the baked faces break down, and how much MORE a greedy merge could
+ * still absorb.
+ *
+ * Run after the merge, so the numbers are what is left on the table: the
+ * mesher merges along one axis per direction, and this counts the pairs
+ * that a second axis — a true 2-D greedy over runs — would still find.
+ *
+ * Indexed rather than scanned. A cell emits up to six faces, so two
+ * vertically adjacent faces of the same direction sit four to six
+ * entries apart in the array — comparing a face with its predecessor
+ * finds almost none of them, which is what a first attempt at this
+ * measured and why the number was wrong.
+ *
+ * Every face goes into a `SlotIndex` keyed by (direction, x, y, z), then
+ * each is asked whether the cell along each in-plane axis carries the
+ * same face. The strict rule needs the same tile AND the same four baked
+ * corner light and AO values, because a merged quad has four corners and
+ * interpolates between them; the loose count is geometry alone, and the
+ * gap between the two is what the lighting costs.
+ */
+fn surveyFaces(man : ChunkManager) : void {
+    let slots : i32 = World::SPAN * World::SPAN;
+    let byDir : i32[] = malloc<i32>(6);
+    for (d of 0..6) {
+        byDir[d as i64] = 0;
+    }
+    let total : i32 = 0;
+    for (slot of 0..slots) {
+        if (man.cols.loaded[slot] == 1) {
+            total = total + man.faces.fcount[slot];
+        }
+    }
+    let index : SlotIndex = new SlotIndex(total * 2);
+    for (slot of 0..slots) {
+        if (man.cols.loaded[slot] != 1) {
+            continue;
+        }
+        let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        for (fi of 0..man.faces.fcount[slot]) {
+            let i : i32 = base + fi;
+            byDir[(man.faces.ftile[i] / 256) as i64] = byDir[(man.faces.ftile[i] / 256) as i64] + 1;
+            index.put(faceKey(man, i), i);
+        }
+    }
+
+    // Along each direction's two in-plane axes, how many faces have an
+    // identical neighbour to merge onto.
+    let geom : i32 = 0;
+    let strict : i32 = 0;
+    for (slot of 0..slots) {
+        if (man.cols.loaded[slot] != 1) {
+            continue;
+        }
+        let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        for (fi of 0..man.faces.fcount[slot]) {
+            let i : i32 = base + fi;
+            let d : i32 = man.faces.ftile[i] / 256;
+            // The two axes that lie IN the face's plane.
+            let ax : i32 = 0;
+            let az : i32 = 0;
+            let ay : i32 = 0;
+            if (d == 0 || d == 1) {
+                ay = 1;
+            } else if (d == 2 || d == 3) {
+                ax = 1;
+            } else {
+                ax = 1;
+            }
+            let j : i32 = index.get(neighbourKey(man, i, ax, ay, az));
+            if (j >= 0 && man.faces.ftile[j] == man.faces.ftile[i]) {
+                geom = geom + 1;
+                if (sameCorners(man, j, i)) {
+                    strict = strict + 1;
+                }
+            }
+        }
+    }
+    index.close();
+
+    Console::println("  faces: ${total} total"
+        + "  +X=${byDir[0]} -X=${byDir[1]} top=${byDir[2]} bottom=${byDir[3]}"
+        + " +Z=${byDir[4]} -Z=${byDir[5]}");
+    Console::println("  one-axis merges: ${geom} by geometry,"
+        + " ${strict} once the baked corner light and AO must match");
+    free(byDir);
+}
+
+/** A face's identity: its direction and its cell. */
+fn faceKey(man : ChunkManager, i : i32) : i64 {
+    return keyOf(man.faces.ftile[i] / 256, man.faces.fx[i], man.faces.fy[i], man.faces.fz[i]);
+}
+
+/** The same, for the cell one step along (ax, ay, az). */
+fn neighbourKey(man : ChunkManager, i : i32, ax : i32, ay : i32, az : i32) : i64 {
+    return keyOf(man.faces.ftile[i] / 256,
+        man.faces.fx[i] + ax, man.faces.fy[i] + ay, man.faces.fz[i] + az);
+}
+
+/** Pack a direction and a world cell into one key. */
+fn keyOf(d : i32, x : i32, y : i32, z : i32) : i64 {
+    return (d as i64)
+        + (((x + 4000000) as i64) << 3)
+        + (((z + 4000000) as i64) << 27)
+        + ((y as i64) << 51);
+}
+
+/** Whether two faces carry identical baked corner light and AO. */
+fn sameCorners(man : ChunkManager, a : i32, b : i32) : bool {
+    for (k of 0..4) {
+        if (Mem::byteAt(man.faces.flight, (a * 4 + k) as i64)
+            != Mem::byteAt(man.faces.flight, (b * 4 + k) as i64)) {
+            return false;
+        }
+        if (Mem::byteAt(man.faces.fao, (a * 4 + k) as i64)
+            != Mem::byteAt(man.faces.fao, (b * 4 + k) as i64)) {
+            return false;
+        }
+    }
+    return true;
 }

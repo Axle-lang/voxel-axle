@@ -16,6 +16,9 @@ struct FaceMesh {
     pub(crate) fy : i32[],
     pub(crate) fz : i32[],
     pub(crate) ftile : i32[],  // packs (dir << 8) | tile — see ChunkMesher.addFace
+    pub(crate) frun : i32[],   // cells this face spans along its merge axis; 1 = one
+                               // block. The greedy merge writes it, renderFace
+                               // stretches the quad and tiles the texture by it.
     pub(crate) flight : i64,   // per-face SMOOTH light: 4 bytes/face, one per corner,
                                // packing (sky << 4) | block (Minecraft-style smooth light)
     pub(crate) fao : i64,      // per-face ambient occlusion: 4 bytes/face, 0..3 per corner

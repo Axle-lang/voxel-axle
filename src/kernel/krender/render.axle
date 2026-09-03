@@ -840,6 +840,24 @@ class ChunkRenderer {
         // water surface. blockBoxHeight is the single authority (1.0 = full cube).
         let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
         let isPartialFace : bool = boxH < 1.0;
+        // Cells this face spans, from the mesher's greedy merge. The quad is
+        // stretched along one axis and the tile repeats over it — which the
+        // sampler already does for scrolled water, so `wrap` is all it takes.
+        //
+        // Which axis needs no table: for every direction the corner's `u` is
+        // exactly the corner's offset along a HORIZONTAL axis — X for the top,
+        // the bottom and the Z-facing walls, Z for the X-facing ones. So the
+        // run multiplies the offset and the `u` together, and the two cannot
+        // disagree.
+        let run : i32 = man.faces.frun[idx];
+        let runF : f64 = run as f64;
+        let runX : f64 = 1.0;
+        let runZ : f64 = 1.0;
+        if (dir == FaceDir::PosX || dir == FaceDir::NegX) {
+            runZ = runF;
+        } else {
+            runX = runF;
+        }
         let nx : f64 = 0.0;
         let ny : f64 = 0.0;
         let nz : f64 = 0.0;
@@ -864,9 +882,11 @@ class ChunkRenderer {
             }
         }
 
-        let fcx : f64 = (x as f64) + 0.5 + nx * 0.5;
+        // The centre of the MERGED quad, so back-face culling and the distance
+        // cut both measure the thing that is actually drawn.
+        let fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
         let fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
-        let fcz : f64 = (z as f64) + 0.5 + nz * 0.5;
+        let fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
         let vx : f64 = cam.eye.x - fcx;
         let vy : f64 = cam.eye.y - fcy;
         let vz : f64 = cam.eye.z - fcz;
@@ -958,8 +978,12 @@ class ChunkRenderer {
             } else if (isPartialFace && oyv > 0) {
                 cornerY = (y as f64) + boxH;
             }
-            self.toCam(cam, vec3((x + oxv) as f64, cornerY, (z + ozv) as f64), k);
-            Mem::putRealOf(self.ca.u, k, (self.uvu[q + k] as f64) + flowU);
+            self.toCam(
+                cam,
+                vec3((x as f64) + (oxv as f64) * runX, cornerY, (z as f64) + (ozv as f64) * runZ),
+                k
+            );
+            Mem::putRealOf(self.ca.u, k, (self.uvu[q + k] as f64) * runF + flowU);
             Mem::putRealOf(self.ca.v, k, (self.uvv[q + k] as f64) + flowV);
             // Per-corner SOFT CAST SHADOW: average the soft sun-visibility over
             // the 4 air cells meeting at this corner (symmetric → continuous
@@ -1103,8 +1127,10 @@ class ChunkRenderer {
         // triangle (with its Gouraud per-vertex colours) — the parallel band
         // rasteriser fills them later. The heavy per-face lighting above is thus
         // done once, not once per worker.
+        // A merged quad tiles its texture, which is the same wrap the scrolled
+        // water surface asks for.
         let wf : i32 = 0;
-        if (isWaterFace) {
+        if (isWaterFace || run > 1) {
             wf = 1;
         }
         let t : i32 = 1;
