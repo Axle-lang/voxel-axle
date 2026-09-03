@@ -127,10 +127,35 @@ class GodRayFX : PostEffect {
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
     fn apply(mut self, fb : FrameBuf) : void {
-        let half : i32 = fb.h / 2;
-        let tk : Task<i32> = spawn godRaysJob(self, fb, 0, half);
-        self.rows(fb, half, fb.h);
-        let d : i32 = tk.join();
+        // Eight row bands, not two. The rows are disjoint outputs, so unlike
+        // the world raster — where every band re-walks the whole triangle
+        // queue — this splits with no redundant work at all and scales with
+        // the cores it is given. It was costing a fifth of the frame on two
+        // of them.
+        // Eight, as a literal: a fixed-array size must be one — not a
+        // `const` and not a `static` field — so the count and the `Task`
+        // array below are kept in step by hand.
+        let bh : i32 = (fb.h + 7) / 8;
+        let jobs : Task<i32>[7];
+        for (i of 0..7) {
+            let y0 : i32 = bh * (i + 1);
+            let y1 : i32 = bh * (i + 2);
+            if (y1 > fb.h) {
+                y1 = fb.h;
+            }
+            if (y0 > fb.h) {
+                y0 = fb.h;
+            }
+            jobs[i] = spawn godRaysJob(self, fb, y0, y1);
+        }
+        let firstEnd : i32 = bh;
+        if (firstEnd > fb.h) {
+            firstEnd = fb.h;
+        }
+        self.rows(fb, 0, firstEnd);
+        for (i of 0..7) {
+            let d : i32 = jobs[i].join();
+        }
     }
 
     /**
@@ -1116,7 +1141,22 @@ class ChunkRenderer {
         // array in a loop), so 1 / 2 / 4 bands.
         let w : i32 = fb.w;
         let nT : i32 = Render::RASTER_TILES;
-        if (nT >= 4) {
+        if (nT >= 12) {
+            let bw : i32 = (w + 11) / 12;
+            let jobs : Task<i32>[11];
+            for (i of 0..11) {
+                let x0 : i32 = bw * (i + 1);
+                let x1 : i32 = bw * (i + 2);
+                if (i == 10) {
+                    x1 = w;
+                }
+                jobs[i] = spawn rasterTilesJob(self, fb, x0, x1);
+            }
+            self.rasterizeBand(fb, 0, bw);
+            for (i of 0..11) {
+                let d : i32 = jobs[i].join();
+            }
+        } else if (nT >= 4) {
             let bw : i32 = (w + 3) / 4;
             let ta : Task<i32> = spawn rasterTilesJob(self, fb, bw, bw * 2);
             let tb : Task<i32> = spawn rasterTilesJob(self, fb, bw * 2, bw * 3);

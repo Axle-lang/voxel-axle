@@ -69,5 +69,5 @@ class Render {
     // the z-buffer regions are disjoint — race-free). Excess triangles past the cap
     // are dropped (logged once). Bands split the WIDTH, post passes split the HEIGHT.
     static TRI_QUEUE_CAP : i32 = 220000;
-    static RASTER_TILES : i32 = 4;
+    static RASTER_TILES : i32 = 12;
 }

@@ -249,6 +249,11 @@ fn run() : i32 ! PlatformError {
     // the machine at the right moment — and the way this game's overlay
     // is checked without a person looking at it.
     let snapAtMs : i64 = snapDeadline();
+    let tWorld : i64 = 0;
+    let tRays : i64 = 0;
+    let tBloom : i64 = 0;
+    let tBlit : i64 = 0;
+    let frames : i64 = 0;
     let startMs : i64 = clock.ticks();
     while (running) {
         // Sleeps to the frame boundary and measures what the last frame
@@ -542,18 +547,26 @@ fn run() : i32 ! PlatformError {
             // Bundle the render target (rebuilt each frame — a resize reallocs
             // pixels/zbuf and changes w).
             let fb : FrameBuf = FrameBuf { pixels: pixels, zbuf: zbuf, w: w, h: h };
+            let t0 : i64 = clock.micros();
             renderer.render(man, player, fb, underwater, phase, dayTime);
+            let t1 : i64 = clock.micros();
+            tWorld = tWorld + (t1 - t0);
             renderer.renderMobs(man, mobs, player, fb);
             renderer.renderTorches(man, player, fb);
             // Volumetric god-rays from the sun (above water only); then the
             // living-water post-pass (depth fog + moving caustics) under the HUD.
+            let t2 : i64 = clock.micros();
             if (underwater) {
                 renderer.underwaterOverlay(fb, phase);
             } else {
                 renderer.godRays(player, fb);
             }
+            let t3 : i64 = clock.micros();
+            tRays = tRays + (t3 - t2);
             // Soft warm glow on bright pixels (sun, halo, shafts, water, snow).
             renderer.bloomPass(fb);
+            let t4 : i64 = clock.micros();
+            tBloom = tBloom + (t4 - t3);
             // The overlay's drawing view of the same pixels the world was
             // rasterised into. Taken fresh each frame rather than kept: a
             // resize moves the buffer, and a `Frame` held across one is the
@@ -573,7 +586,10 @@ fn run() : i32 ! PlatformError {
 
             // One blit, scaled to the client area — the framebuffer keeps
             // a fixed height and follows the window aspect in width.
+            let t5 : i64 = clock.micros();
             screen.present(win);
+            tBlit = tBlit + (clock.micros() - t5);
+            frames = frames + 1;
         }
 
         // Outside the render branch on purpose: a screenshot should capture
@@ -582,7 +598,15 @@ fn run() : i32 ! PlatformError {
         // frame the loop happened to be redrawing.
         if (snapAtMs > 0 && clock.ticks() - startMs >= snapAtMs) {
             if (Bmp::write("voxel.bmp", screen.frame())) {
-                Console::println("wrote voxel.bmp");
+                // The measured rate over the run, so a capture also says what
+                // it cost to draw. `fps()` is the pacer's own window average,
+                // and it reads 0 until a full second has passed.
+                Console::println("wrote voxel.bmp  (${w}x${h} render, ${pacer.fps().round()} fps)");
+                if (frames > 0) {
+                    Console::println("  per frame (us): world=${tWorld / frames}"
+                        + " rays=${tRays / frames} bloom=${tBloom / frames}"
+                        + " blit=${tBlit / frames}  over ${frames} frames");
+                }
             } else {
                 Console::println("could not write voxel.bmp");
             }
