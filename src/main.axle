@@ -603,6 +603,13 @@ fn run() : i32 ! PlatformError {
                 // and it reads 0 until a full second has passed.
                 Console::println("wrote voxel.bmp  (${w}x${h} render, ${pacer.fps().round()} fps)");
                 if (frames > 0) {
+                    // The world pass split in two, because they are different
+                    // jobs with different costs: the queue build is one
+                    // thread, the fill is twelve.
+                    let fillUs : i64 = renderer.fillMicros() / frames;
+                    Console::println("  world = build ${tWorld / frames - fillUs}us"
+                        + " (1 thread) + fill ${fillUs}us (12 bands)"
+                        + " over ${renderer.triCount()} tris");
                     Console::println("  per frame (us): world=${tWorld / frames}"
                         + " rays=${tRays / frames} bloom=${tBloom / frames}"
                         + " blit=${tBlit / frames}  over ${frames} frames");

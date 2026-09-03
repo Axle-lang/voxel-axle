@@ -15,6 +15,7 @@
 // The Renderer keeps only the frame orchestration + the post-fx entry points.
 
 use smalt::Mem;
+use std::time::monotonicNanos;
 use smalt::Color;
 use crate::kernel::krender::bloom::Bloom;
 use crate::kernel::krender::sky::{ DayState, computeDayState, drawSkyGradient, drawCelestial };
@@ -457,6 +458,21 @@ class ChunkRenderer {
     fog : Rgb,            // distance-fog colour (this frame's sky colour)
     day : DayState,       // sun / daylight snapshot (per-corner light + glint)
     lcurve : i64,         // brightness curve (owned by DayLighting)
+    /**
+     * Triangles queued in the last frame, and the microseconds the banded
+     * FILL took of the world pass.
+     *
+     * Two numbers because the world pass is two very different jobs, and
+     * which of them costs is not guessable: the queue build projects,
+     * near-clips and lights every face on ONE thread, then the fill
+     * spreads over twelve. Measured, the build is roughly two thirds —
+     * which is the opposite of where a "the software rasteriser is slow"
+     * intuition sends you.
+     */
+    pub(crate) queuedTris : i32 = 0,
+
+    /** Microseconds spent in the banded fill, accumulated over the run. */
+    pub(crate) fillUs : i64 = 0,
 
     /**
      * Allocate the triangle queue, the projection / clipping scratch buffers and
@@ -1135,6 +1151,8 @@ class ChunkRenderer {
             }
             slot = slot + 1;
         }
+        self.queuedTris = self.triN;
+        let tFill : i64 = monotonicNanos();
         // Tiled rasterise: worker threads each fill a disjoint column band while
         // the main thread fills band 0 — no two threads touch the same z-buffer
         // pixel. Explicit handles (the one-shot Task checker dislikes joining an
@@ -1173,6 +1191,7 @@ class ChunkRenderer {
         } else {
             self.rasterizeBand(fb, 0, w);
         }
+        self.fillUs = self.fillUs + (monotonicNanos() - tFill) / 1000;
     }
 
     /**
@@ -1271,6 +1290,16 @@ class Renderer {
      * @param phase      animation time phase (scrolls flowing-water textures)
      * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
      */
+    /** Triangles the world pass queued in the last frame. */
+    pub(crate) fn triCount(self) : i32 {
+        return self.world.queuedTris;
+    }
+
+    /** Microseconds the banded fill has taken, accumulated over the run. */
+    pub(crate) fn fillMicros(self) : i64 {
+        return self.world.fillUs;
+    }
+
     pub(crate) fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
