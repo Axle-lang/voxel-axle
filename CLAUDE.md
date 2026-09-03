@@ -50,6 +50,34 @@ Two ways to get 0.12.1+:
 - **macOS / no apt**: Docker image or build from source
   (`../axle/docs/src/getting-started/build.md`).
 
+## What comes from smalt, and what is ours
+
+Reach for the platform layer before writing one. smalt now carries the
+pieces this game used to duplicate, and a change that re-adds one of them
+here is almost certainly in the wrong repository:
+
+| Need | Use | Not |
+|---|---|---|
+| A 2-D drawing surface with a clip | `smalt::Frame`, from `screen.frame()` | a `Canvas` of our own |
+| Rectangles, rounded boxes, rules, blends | `Frame`'s methods | a hand-rolled `fillRect` |
+| Text | `smalt::BitmapFont` (`Face::Ui` for prose, `Face::Headline` for figures) | a glyph table of our own |
+| Text bigger than the face | `drawScaled` + `baselineFor` | a second font |
+| Packing, channels, mixing, clamping | `smalt::Color`'s statics | open-coded shifts |
+| Frame pacing and the fixed timestep | `smalt::FramePacer` — `tick`, then `steps` / `alpha` | a `GameClock` |
+| Pumping the audio device off-thread | `spawn smalt::mixerLoop(mixer)` | a loop and a spinlock |
+| A screenshot | `smalt::Bmp::write(path, frame)` | a BMP writer |
+| Interned text, key → slot | `smalt::BytePool`, `smalt::SlotIndex` | a pool of our own |
+
+**Take a `Frame` fresh each repaint** (`screen.frame()`), never store one:
+it carries the surface's address, and a resize moves it.
+
+What stays ours is what is a *game* decision: the hurt tint, the `Widget`
+seam the overlay composes through, the block table, the mip chain, the
+anisotropic sampler, and the world rasteriser in `krender/`.
+
+smalt's own limits are in `vendor/smalt/LIMITATIONS.md` — read it before
+concluding something is impossible.
+
 ## Runtime prerequisites for THIS project
 
 - The **`vendor/smalt` submodule**, initialised — `axle.toml` names it as the
@@ -67,7 +95,12 @@ Two ways to get 0.12.1+:
 ```powershell
 axle --version        # 0.12.1+ required
 axle run              # from the project root
+axle run -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
+axle run -- --at 294456 109296   # start at a named column, reproducibly
 ```
+
+The start column is random per run and printed on stdout. If you are
+comparing two runs, pass `--at` or you are comparing two worlds.
 
 Useful Axle commands: `axle build <in>`, `axle run <in>`,
 `axle check <in>` (type-check only).

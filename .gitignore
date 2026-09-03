@@ -1,2 +1,4 @@
 **/target
 .idea/
+# Snapshots written by `--snap` / F12.
+*.bmp

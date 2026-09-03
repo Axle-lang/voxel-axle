@@ -92,7 +92,9 @@ Win32 or X11 + ALSA directly and rides along as a submodule.
 
 ## 🧩 Built with Axle
 
-This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern systems language with an LLVM backend, traits, generics, structs and first-class concurrency. The whole game is written in Axle — world gen, physics, lighting, the software rasteriser, the threaded audio mixer — and so is everything under it: **smalt** opens the window, drains the event queue, blits the framebuffer and feeds the sound card, in Axle, by calling the operating system.
+This project is a love letter to [**Axle**](https://axle-lang.dev) — a modern systems language with an LLVM backend, traits, generics, structs and first-class concurrency. The whole game is written in Axle — world gen, physics, lighting, the software rasteriser — and so is everything under it: **smalt** opens the window, drains the event queue, blits the framebuffer and feeds the sound card, in Axle, by calling the operating system.
+
+It also draws the overlay now. The HUD, the heart row, the hotbar and the pause menu go through smalt's clipped `Frame` and its baked `BitmapFont`, and the audio device is pumped by smalt's own `mixerLoop` behind a lock the mixer takes itself. Four things this game used to carry — a `Canvas`, a 5×7 bitmap font, a fixed-timestep clock and a spinlock around the mixer — turned out to be platform-layer problems that every program on smalt was solving again, so they went where they belonged: **628 lines left this repository and 238 came back.**
 
 > **New to Axle?** Start at **[axle-lang.dev](https://axle-lang.dev)** — install guide, language tour and docs.
 
@@ -253,7 +255,9 @@ Adding a new animal is a new `Entity` subclass in `game/entities/` plus a spawn 
 
 ### Value structs over scalar sprawl
 
-Hot geometry and call-sites are bundled in value `struct`s instead of long argument lists: **`IVec3`** for integer cells and **`Vec3`** for float positions/directions (both in `kmath/vec3.axle`), plus `FrameBuf`, `RasterTri`, `MipAtlas`, `Canvas`, the sky's `DayState` / `SunScreen`, the mob pass's `MobScene`, and the light flood's `LightRemoval`.
+Hot geometry and call-sites are bundled in value `struct`s instead of long argument lists: **`IVec3`** for integer cells and **`Vec3`** for float positions/directions (both in `kmath/vec3.axle`), plus `FrameBuf`, `RasterTri`, `MipAtlas`, the sky's `DayState` / `SunScreen`, the mob pass's `MobScene`, and the light flood's `LightRemoval`.
+
+The 2-D one used to be ours too — a `Canvas` bundling `(base, w, h)` so the HUD primitives did not thread three scalars. It is smalt's [`Frame`](vendor/smalt/src/render/frame.axle) now, which is the same bundle plus a clip rectangle: a widget that overruns its box is cut at the edge instead of painting over its neighbour, and the address it carries has no owner, so it cannot be the buffer's second one.
 
 ### Source layout
 
@@ -288,8 +292,12 @@ src/
                                            VoxelEdit / LightSample seams
     kentity/  entity · player              Entity base (physics) · Player
               mob · mobs                   Mob AI base + MobManager; declares MobSpawner
-    kio/      clock · input · sfx          frame clock · keyboard axes · threaded audio
-    krender/  color · font                 colour math · bitmap text
+    kio/      input · sfx                  keyboard axes · game audio cues
+                                           (pacing is smalt's `FramePacer`, the pump
+                                           thread and the mixer lock are smalt's too)
+    krender/  color                        the one tint that is a game decision, and
+                                           the `Widget` seam (packing, blending and
+                                           the clipped surface are smalt's)
               raster                       triangle rasteriser + z-buffer, mip-chain,
                                            anisotropic sampling (RasterTri / MipAtlas)
               sky                          day/night + atmospheric sky (DayState by value)
@@ -297,6 +305,8 @@ src/
               render                       core world pass: project + clip + shade every
                                            face, rasterise in parallel column bands
               health · hotbar · hud · menu heart row · inventory bar · HUD · pause menu
+                                           (all drawn through smalt's `Frame` and
+                                           `BitmapFont` — no font or clip of our own)
 
   game/                    the APP — all content, injected into the engine
     world/    biomes                       climate → biome tables (all ~18 in one module)
@@ -338,7 +348,10 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 
 - Collision is **voxel-accurate**: the body AABB is tested against every overlapping voxel (trunks and placed blocks included; leaf canopies stay passable). Partial blocks use their real box height.
 - Edits are not persisted: a chunk that streams out of the loaded ring and back is regenerated, discarding edits made to it.
-- The loop runs a **fixed timestep** (`World::TICK_HZ`, default 60): the simulation advances by real elapsed time (catching up after a slow frame), so movement is frame-rate independent, and the frame clock caps the CPU instead of relying on v-sync.
+- The loop runs a **fixed timestep** (`World::TICK_HZ`, default 60): the simulation advances by real elapsed time (catching up after a slow frame), so movement is frame-rate independent, and the pacer caps the CPU instead of relying on v-sync. Both halves are smalt's `FramePacer` — `tick(clock)` sleeps to the frame boundary and measures, `steps()` drains that same measurement into whole simulation steps, so the two cannot drift into separate timelines.
+- `--snap [ms]` plays for that long, writes `voxel.bmp` beside the binary and quits — a capture for a report, or for a script, without anyone standing over the machine at the right moment.
+- The start column is random per run and printed; `--at <x> <z>` replays one. The world itself is still one fixed seed — see **Build & run** for why that is a bigger change than it looks.
+- smalt's own limits, and what each would take to lift, are in [`vendor/smalt/LIMITATIONS.md`](vendor/smalt/LIMITATIONS.md).
 - `axle.toml`'s lib path is machine-specific; DLL + `atlas.raw` deployment next to the binary is manual.
 
 ---
