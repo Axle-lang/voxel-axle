@@ -9,7 +9,21 @@
 // soft-knee), separable box blur (`Render::BLOOM_ITERS` passes, ping-ponging bl* ↔ bt*),
 // then composite the upsampled glow back over the full frame. The extract and
 // composite passes each split into two disjoint row bands run on two threads;
-// the blur is single-threaded.
+// the blur is single-threaded, and measured to be right to stay that way.
+//
+// The blur slides a RUNNING SUM rather than re-summing `2*rad+1` taps per
+// pixel, so its cost no longer depends on `Render::BLOOM_RADIUS` at all —
+// widening the glow is free now — and the vertical half walks rows keeping
+// one sum per column, where it used to walk a column and miss cache on
+// nearly every tap. Together they took most of the pass off the frame.
+//
+// Splitting the blur into bands as well was tried and REVERTED: it cost
+// more than it saved. A `spawn` and its `join` are not free, and each
+// sub-pass here is short enough that the split was mostly overhead. The
+// rule the measurement left behind, rather than the number it left: a band
+// must carry appreciably more work than one spawn costs before it is worth
+// being a thread — and that cost belongs to the platform, so it is worth
+// re-measuring on the machine at hand before splitting anything else.
 
 use smalt::Mem;
 use crate::configs::screen::{ Screen };
@@ -24,6 +38,10 @@ class Bloom : PostEffect {
     btG : i64,
     btB : i64,
     cap : i64, // half-resolution pixels each buffer currently holds
+    acR : i64, // per-column running sums, one per channel, for the vertical pass
+    acG : i64,
+    acB : i64,
+    acc : i64, // columns the three accumulators currently hold
 
     /**
      * Start with room for the configured frame; `fit` grows it if the
@@ -44,7 +62,12 @@ class Bloom : PostEffect {
         self.btR = 0;
         self.btG = 0;
         self.btB = 0;
+        self.acR = 0;
+        self.acG = 0;
+        self.acB = 0;
+        self.acc = 0;
         self.fit(halfCount(Screen::RENDER_W, Screen::RENDER_H));
+        self.fitAcc(((Screen::RENDER_W + 1) / 2) as i64);
     }
 
     /**
@@ -103,70 +126,19 @@ class Bloom : PostEffect {
         let te : Task<i32> = spawn bloomExtractJob(self, pixels, w, h, dw, dh, 0, halfD);
         self.extractRows(pixels, w, h, dw, dh, halfD, dh);
         let de : i32 = te.join();
-        // 2) Separable box blur (`Render::BLOOM_ITERS` passes: horizontal then vertical).
+        // 2) Separable box blur, as a RUNNING SUM (`Render::BLOOM_ITERS` passes).
+        //
+        // The box is separable and cumulative, so sliding the window one
+        // step is one add and one subtract per channel - not `2*rad+1`
+        // taps re-summed from scratch. The cost stops depending on the
+        // radius, and `BLOOM_RADIUS` becomes a free knob.
+        self.fitAcc(dw as i64);
         let rad : i32 = Render::BLOOM_RADIUS;
         let invK : f64 = 1.0 / ((2 * rad + 1) as f64);
         let it : i32 = 0;
         while (it < Render::BLOOM_ITERS) {
-            // Horizontal blR -> btR.
-            let y : i32 = 0;
-            while (y < dh) {
-                let rb : i32 = y * dw;
-                let x : i32 = 0;
-                while (x < dw) {
-                    let sr : f64 = 0.0;
-                    let sg : f64 = 0.0;
-                    let sb : f64 = 0.0;
-                    let k : i32 = 0 - rad;
-                    while (k <= rad) {
-                        let xx : i32 = x + k;
-                        if (xx < 0) {
-                            xx = 0;
-                        }
-                        if (xx > dw - 1) {
-                            xx = dw - 1;
-                        }
-                        sr = sr + Mem::realOf(self.blR, rb + xx);
-                        sg = sg + Mem::realOf(self.blG, rb + xx);
-                        sb = sb + Mem::realOf(self.blB, rb + xx);
-                        k = k + 1;
-                    }
-                    Mem::putRealOf(self.btR, rb + x, sr * invK);
-                    Mem::putRealOf(self.btG, rb + x, sg * invK);
-                    Mem::putRealOf(self.btB, rb + x, sb * invK);
-                    x = x + 1;
-                }
-                y = y + 1;
-            }
-            // Vertical btR -> blR.
-            let x2 : i32 = 0;
-            while (x2 < dw) {
-                let y2 : i32 = 0;
-                while (y2 < dh) {
-                    let sr : f64 = 0.0;
-                    let sg : f64 = 0.0;
-                    let sb : f64 = 0.0;
-                    let k : i32 = 0 - rad;
-                    while (k <= rad) {
-                        let yy : i32 = y2 + k;
-                        if (yy < 0) {
-                            yy = 0;
-                        }
-                        if (yy > dh - 1) {
-                            yy = dh - 1;
-                        }
-                        sr = sr + Mem::realOf(self.btR, yy * dw + x2);
-                        sg = sg + Mem::realOf(self.btG, yy * dw + x2);
-                        sb = sb + Mem::realOf(self.btB, yy * dw + x2);
-                        k = k + 1;
-                    }
-                    Mem::putRealOf(self.blR, y2 * dw + x2, sr * invK);
-                    Mem::putRealOf(self.blG, y2 * dw + x2, sg * invK);
-                    Mem::putRealOf(self.blB, y2 * dw + x2, sb * invK);
-                    y2 = y2 + 1;
-                }
-                x2 = x2 + 1;
-            }
+            self.blurRows(dw, rad, invK, 0, dh);
+            self.blurCols(dw, dh, rad, invK, 0, dw);
             it = it + 1;
         }
         // 3) Composite the upsampled glow over the full frame — two threads.
@@ -175,6 +147,168 @@ class Bloom : PostEffect {
         let tc : Task<i32> = spawn bloomCompositeJob(self, pixels, w, h, dw, st, 0, halfH);
         self.compositeRows(pixels, w, h, dw, st, halfH, h);
         let dc : i32 = tc.join();
+    }
+
+    /**
+     * Make sure the three per-column accumulators hold `want` columns.
+     *
+     * Sized by the half-res WIDTH, not the pixel count: the vertical pass
+     * keeps one running sum per column and nothing more. Grows and never
+     * shrinks, for the same reason `fit` does.
+     * @param want  half-resolution columns the pass is about to touch
+     */
+    pub(file) fn fitAcc(mut self, want : i64) : void {
+        if (want <= self.acc) {
+            return;
+        }
+        Mem::release(self.acR);
+        Mem::release(self.acG);
+        Mem::release(self.acB);
+        self.acc = want;
+        self.acR = Mem::take(want * 8);
+        self.acG = Mem::take(want * 8);
+        self.acB = Mem::take(want * 8);
+    }
+
+    /**
+     * Horizontal box blur, bl* -> bt*, over half-res rows [y0, y1).
+     *
+     * The first column of a row pays the full clamped window; every later
+     * column inherits it, because `window(x) - window(x-1)` is exactly one
+     * clamped tap in and one clamped tap out. The edge behaviour is
+     * therefore the tap loop's own, carried rather than recomputed.
+     * @param dw    half-res width
+     * @param rad   blur radius
+     * @param invK  1 / (2*rad+1), the box normaliser
+     * @param y0    first half-res row (inclusive)
+     * @param y1    last half-res row (exclusive)
+     */
+    pub(file) fn blurRows(self, dw : i32, rad : i32, invK : f64, y0 : i32, y1 : i32) : void {
+        let last : i32 = dw - 1;
+        let y : i32 = y0;
+        while (y < y1) {
+            let rb : i32 = y * dw;
+            let sr : f64 = 0.0;
+            let sg : f64 = 0.0;
+            let sb : f64 = 0.0;
+            let k : i32 = 0 - rad;
+            while (k <= rad) {
+                let xx : i32 = k;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx > last) {
+                    xx = last;
+                }
+                sr = sr + Mem::realOf(self.blR, rb + xx);
+                sg = sg + Mem::realOf(self.blG, rb + xx);
+                sb = sb + Mem::realOf(self.blB, rb + xx);
+                k = k + 1;
+            }
+            Mem::putRealOf(self.btR, rb, sr * invK);
+            Mem::putRealOf(self.btG, rb, sg * invK);
+            Mem::putRealOf(self.btB, rb, sb * invK);
+            let x : i32 = 1;
+            while (x <= last) {
+                let ai : i32 = x + rad;
+                if (ai > last) {
+                    ai = last;
+                }
+                let si : i32 = x - 1 - rad;
+                if (si < 0) {
+                    si = 0;
+                }
+                sr = sr + Mem::realOf(self.blR, rb + ai) - Mem::realOf(self.blR, rb + si);
+                sg = sg + Mem::realOf(self.blG, rb + ai) - Mem::realOf(self.blG, rb + si);
+                sb = sb + Mem::realOf(self.blB, rb + ai) - Mem::realOf(self.blB, rb + si);
+                Mem::putRealOf(self.btR, rb + x, sr * invK);
+                Mem::putRealOf(self.btG, rb + x, sg * invK);
+                Mem::putRealOf(self.btB, rb + x, sb * invK);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+
+    /**
+     * Vertical box blur, bt* -> bl*, over half-res columns [x0, x1).
+     *
+     * Walks ROWS and keeps one running sum per column, where the tap loop
+     * walked a column top to bottom: the old order stepped a whole row
+     * between taps, so all three channels missed cache on nearly every
+     * read.
+     * Columns are disjoint, so a band writes only its own slice of the
+     * shared accumulators and two bands never touch the same one.
+     * @param dw    half-res width
+     * @param dh    half-res height
+     * @param rad   blur radius
+     * @param invK  1 / (2*rad+1), the box normaliser
+     * @param x0    first half-res column (inclusive)
+     * @param x1    last half-res column (exclusive)
+     */
+    pub(file) fn blurCols(self, dw : i32, dh : i32, rad : i32, invK : f64, x0 : i32, x1 : i32) : void {
+        let lastY : i32 = dh - 1;
+        let z : i32 = x0;
+        while (z < x1) {
+            Mem::putRealOf(self.acR, z, 0.0);
+            Mem::putRealOf(self.acG, z, 0.0);
+            Mem::putRealOf(self.acB, z, 0.0);
+            z = z + 1;
+        }
+        let k : i32 = 0 - rad;
+        while (k <= rad) {
+            let yy : i32 = k;
+            if (yy < 0) {
+                yy = 0;
+            }
+            if (yy > lastY) {
+                yy = lastY;
+            }
+            let rb : i32 = yy * dw;
+            let xi : i32 = x0;
+            while (xi < x1) {
+                Mem::putRealOf(self.acR, xi, Mem::realOf(self.acR, xi) + Mem::realOf(self.btR, rb + xi));
+                Mem::putRealOf(self.acG, xi, Mem::realOf(self.acG, xi) + Mem::realOf(self.btG, rb + xi));
+                Mem::putRealOf(self.acB, xi, Mem::realOf(self.acB, xi) + Mem::realOf(self.btB, rb + xi));
+                xi = xi + 1;
+            }
+            k = k + 1;
+        }
+        let xw : i32 = x0;
+        while (xw < x1) {
+            Mem::putRealOf(self.blR, xw, Mem::realOf(self.acR, xw) * invK);
+            Mem::putRealOf(self.blG, xw, Mem::realOf(self.acG, xw) * invK);
+            Mem::putRealOf(self.blB, xw, Mem::realOf(self.acB, xw) * invK);
+            xw = xw + 1;
+        }
+        let y : i32 = 1;
+        while (y <= lastY) {
+            let ay : i32 = y + rad;
+            if (ay > lastY) {
+                ay = lastY;
+            }
+            let sy : i32 = y - 1 - rad;
+            if (sy < 0) {
+                sy = 0;
+            }
+            let ab : i32 = ay * dw;
+            let sbb : i32 = sy * dw;
+            let ob : i32 = y * dw;
+            let xx : i32 = x0;
+            while (xx < x1) {
+                let nr : f64 = Mem::realOf(self.acR, xx) + Mem::realOf(self.btR, ab + xx) - Mem::realOf(self.btR, sbb + xx);
+                let ng : f64 = Mem::realOf(self.acG, xx) + Mem::realOf(self.btG, ab + xx) - Mem::realOf(self.btG, sbb + xx);
+                let nb : f64 = Mem::realOf(self.acB, xx) + Mem::realOf(self.btB, ab + xx) - Mem::realOf(self.btB, sbb + xx);
+                Mem::putRealOf(self.acR, xx, nr);
+                Mem::putRealOf(self.acG, xx, ng);
+                Mem::putRealOf(self.acB, xx, nb);
+                Mem::putRealOf(self.blR, ob + xx, nr * invK);
+                Mem::putRealOf(self.blG, ob + xx, ng * invK);
+                Mem::putRealOf(self.blB, ob + xx, nb * invK);
+                xx = xx + 1;
+            }
+            y = y + 1;
+        }
     }
 
     /**
