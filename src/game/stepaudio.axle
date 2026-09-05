@@ -1,0 +1,75 @@
+// stepaudio — the two sounds that are paced by the SIMULATION rather than by
+// the frame: footfalls and the underwater ambience.
+//
+// Both are counters decremented once per fixed step, which is the whole point
+// of them living on the tick: a footstep cadence tied to the displayed frame
+// rate speeds up on a fast machine and limps on a slow one, and the walk it is
+// meant to match does neither.
+//
+// Their state is two integers that have to survive between steps, so they
+// travel together as one value rather than as two locals threaded through the
+// loop by hand.
+
+use crate::kernel::kentity::player::{ GameMode, Player };
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::kernel::kentity::mobs::MobManager;
+use crate::kernel::kio::sfx::{ AudioManager };
+use crate::kernel::kmath::vec3::{ ivec3 };
+use crate::configs::audio::{ Audio };
+use crate::configs::blocks::{ Block };
+
+/** Ticks until the next footfall, and until the next underwater ambience. */
+struct StepTimers {
+    pub(crate) foot : i32,
+    pub(crate) ambient : i32,
+}
+
+/**
+ * Advance both timers by one fixed step and play whatever came due.
+ *
+ * The footstep is keyed to the block UNDERFOOT and paced by whether the player
+ * is sprinting; it is silenced outside survival, in the air, at a standstill
+ * and underwater — where the ambience takes over instead.
+ * @param man      the world, for the block under the feet
+ * @param p        the player, for stance and position
+ * @param mobs     the mob manager, whose generator is the shared randomness
+ * @param sfx      the audio manager that plays them
+ * @param moving   whether this frame's intent is movement
+ * @param sprint   whether that movement is a sprint
+ * @param timers   the timers as they stood before this step
+ * @return the timers after it
+ */
+fn stepAudio(man : ChunkManager, p : Player, mobs : MobManager, sfx : AudioManager,
+    moving : bool, sprint : bool, timers : StepTimers) : StepTimers {
+    let foot : i32 = timers.foot;
+    let ambient : i32 = timers.ambient;
+
+    if (p.mode == GameMode::Survival && p.onGround && moving && !p.isUnderwater()) {
+        foot = foot - 1;
+        if (foot <= 0) {
+            let under : Block = man.worldGet(ivec3(p.pos.x.floorToInt() as i32,
+                (p.pos.y.floorToInt() as i32) - 1, p.pos.z.floorToInt() as i32));
+            if (under != Block::Air && under != Block::Water) {
+                sfx.footstep(under, mobs.rand());
+            }
+            foot = Audio::FOOT_WALK_FRAMES;
+            if (sprint) {
+                foot = Audio::FOOT_SPRINT_FRAMES;
+            }
+        }
+    } else {
+        foot = 0;
+    }
+
+    if (p.isUnderwater()) {
+        ambient = ambient - 1;
+        if (ambient <= 0) {
+            sfx.ambientUnderwater(mobs.rand());
+            ambient = Audio::AMBIENT_MIN + (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
+        }
+    } else {
+        ambient = 0;
+    }
+
+    return StepTimers { foot: foot, ambient: ambient };
+}
