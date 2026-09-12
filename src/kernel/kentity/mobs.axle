@@ -8,6 +8,7 @@
 // ones) and resolves the player's melee against the nearest mob in view. The
 // world has no RNG, so the manager threads its own counter through a hash.
 
+use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::kentity::mob::{ Mob, Actor, Hostile, MobSpawner };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::seams::ActorVisual;
@@ -130,7 +131,7 @@ class MobManager {
         // creepers kept rare) and builds it. Newborns get a randomised first
         // voice delay so a fresh herd doesn't all vocalise on the same frame (a
         // hostile mob keeps it too but never vocalises, so it's harmless there).
-        let m : Mob = self.spawner[0].create(worldX, spawnY, worldZ, self.rand());
+        let m : Mob = self.spawner[0].create(vec3(worldX, spawnY, worldZ), self.rand());
         m.rearmVoice(self.nextVocalDelay());
         self.actors[self.n] = m;
         self.n = self.n + 1;

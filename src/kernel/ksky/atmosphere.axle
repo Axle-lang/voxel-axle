@@ -176,6 +176,19 @@ fn skyDomeFor(ds : DayState) : SkyDome {
 }
 
 /**
+ * Where one screen row falls in the fog grid: the row's first cell, the step to
+ * the row below it, and how far between the two the row sits.
+ *
+ * A scanline crosses one grid row, so this is taken once for the whole line and
+ * the per-pixel read is left with only what actually varies along it.
+ */
+struct FogRow {
+    pub(crate) base : i32,
+    pub(crate) stride : i32,
+    pub(crate) ty : f64,
+}
+
+/**
  * What the fog does, as two tables the rasteriser reads instead of computing:
  * the sky's colour over a coarse grid of the SCREEN, and how much of it has
  * accumulated by a given depth.
@@ -204,33 +217,47 @@ struct FogTable {
     dscale : f64,     // depth → curve index
 
     /**
-     * The sky's colour behind the pixel at (px, py), bilinear over the grid.
-     * @param px  screen x
+     * The half of the sky read that depends only on the row.
+     *
+     * Called once per scanline by the world raster, which asks for the sky
+     * behind almost every pixel it fills: the grid is thirty-odd columns over
+     * the whole frame, so one of its cells is thirty pixels wide, and finding
+     * the row it is in was being redone for every one of them.
      * @param py  screen y
-     * @return the colour distant terrain dissolves into there
+     * @return where that row sits in the grid
      */
-    pub(crate) fn skyAt(self, px : i32, py : i32) : SkyColour {
-        let fx : f64 = (px as f64) * self.xscale;
+    pub(crate) fn rowAt(self, py : i32) : FogRow {
         let fy : f64 = (py as f64) * self.yscale;
-        let ix : i32 = fx.floorToInt() as i32;
         let iy : i32 = fy.floorToInt() as i32;
-        if (ix < 0) {
-            ix = 0;
-        }
         if (iy < 0) {
             iy = 0;
-        }
-        if (ix > self.cols - 1) {
-            ix = self.cols - 1;
         }
         if (iy > self.rows - 1) {
             iy = self.rows - 1;
         }
-        let tx : f64 = fx - (ix as f64);
-        let ty : f64 = fy - (iy as f64);
         let w : i32 = self.cols + 1;
-        let i0 : i32 = iy * w + ix;
-        let i1 : i32 = i0 + w;
+        return FogRow { base: iy * w, stride: w, ty: fy - (iy as f64) };
+    }
+
+    /**
+     * The sky's colour behind a pixel on an already-located row.
+     * @param row  the row from `rowAt`
+     * @param px   screen x
+     * @return the colour distant terrain dissolves into there
+     */
+    pub(crate) fn skyIn(self, row : FogRow, px : i32) : SkyColour {
+        let fx : f64 = (px as f64) * self.xscale;
+        let ix : i32 = fx.floorToInt() as i32;
+        if (ix < 0) {
+            ix = 0;
+        }
+        if (ix > self.cols - 1) {
+            ix = self.cols - 1;
+        }
+        let tx : f64 = fx - (ix as f64);
+        let ty : f64 = row.ty;
+        let i0 : i32 = row.base + ix;
+        let i1 : i32 = i0 + row.stride;
         let a : f64 = (1.0 - tx) * (1.0 - ty);
         let b : f64 = tx * (1.0 - ty);
         let c : f64 = (1.0 - tx) * ty;

@@ -30,11 +30,11 @@ use crate::kernel::ksky::skyengine::{ SkyEngine };
 use crate::kernel::krender::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::kernel::krender::atlas::{ TextureAtlas };
 use crate::kernel::klight::daymodel::{ DayLighting };
-use crate::kernel::krender::chunkview::{ ChunkRenderer, buildSlotsJob, chunkVisible };
+use crate::kernel::krender::chunkview::{ ChunkRenderer, buildSlotsJob, chunkVisible, viewConeFor, ViewCone };
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
-use crate::kernel::krender::raster::{ clearFrame, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected };
+use crate::kernel::krender::raster::{ clearFrame, clearDepth, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected };
 use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::kmath::vec3::{ vec3 };
 use crate::kernel::kentity::player::Player;
@@ -239,12 +239,16 @@ class Renderer {
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
         let ds : DayState = self.day.update(dayTime);
-        // Underwater the cleared "void" becomes deep water instead of sky.
-        let bg : i32 = Color::packBytes(ds.skyColR, ds.skyColG, ds.skyColB);
+        // Under water the cleared "void" is deep water, and nothing paints over
+        // it — `drawSky` returns early down there, so the colour has to be laid
+        // down here. Above water it must not be: the sky paint covers every
+        // pixel the world left empty, so a colour clear is a whole frame
+        // written and then thrown away.
         if (underwater) {
-            bg = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
+            clearFrame(fb, Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B));
+        } else {
+            clearDepth(fb);
         }
-        clearFrame(fb, bg);
         // The sky moves on by a frame whether or not it is drawn: the fog reads
         // its colour field, and the world is fogged even from under water. It
         // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
@@ -370,9 +374,10 @@ class Renderer {
         // source of the pool around it and the bloom catches the flame.
         self.mobs.setLight(LinRgb { r: Light::TORCH_GLOW, g: Light::TORCH_GLOW * 0.86, b: Light::TORCH_GLOW * 0.62 });
         let slots : i32 = World::SPAN * World::SPAN;
+        let cone : ViewCone = viewConeFor(p, self.lens);
         let slot : i32 = 0;
         while (slot < slots) {
-            if (man.cols.loaded[slot] == 1 && chunkVisible(p, man.cols.cxs[slot], man.cols.czs[slot])) {
+            if (man.cols.loaded[slot] == 1 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
                 let base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
                 let n : i32 = man.torches.tcount[slot];
                 let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;

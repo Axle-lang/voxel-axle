@@ -87,14 +87,15 @@ trait Explodes {
 trait Hostile : Explodes {}
 
 /**
- * The mob-spawning seam: build one creature at (x, y, z). The kernel's
+ * The mob-spawning seam: build one creature standing at `at`. The kernel's
  * MobManager holds a `dyn MobSpawner` and calls it to populate the world; the
  * concrete factory (which species exist and their spawn weights — game content)
  * lives in the app and is injected via `MobManager.attachSpawner`.
+ * @param at   where the creature stands, in world space
  * @param rnd  a fresh pseudo-random value in [0,1) for the species roll
  */
 trait MobSpawner {
-    fn create(mut self, x : f64, y : f64, z : f64, rnd : f64) : Mob;
+    fn create(mut self, at : Vec3, rnd : f64) : Mob;
 }
 
 /**

@@ -14,7 +14,7 @@
 // is another, and measured, the build is the expensive two thirds.
 
 use smalt::Mem;
-use crate::kernel::krender::raster::{ rasterTriTex, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Projected, VertAttribs, ScreenScratch };
+use crate::kernel::krender::raster::{ rasterTriTex, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected, VertAttribs, ScreenScratch };
 use crate::kernel::klight::facelight::{ FaceLight };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
@@ -53,32 +53,112 @@ fn faceDirFrom(d : i32) : FaceDir {
 }
 
 /**
- * A chunk is worth drawing only if any part of it is in front of the camera and
- * within render distance. We test the chunk centre against the view forward with
- * a margin of the chunk's half-diagonal, so a whole chunk behind the player is
- * skipped without touching its thousands of faces — the biggest per-frame win.
- * A free function so both the world-face pass (ChunkRenderer) and the torch pass
- * (Renderer) share the one visibility rule.
- * @param p   player providing the eye position and orientation
- * @param cx  chunk x index
- * @param cz  chunk z index
+ * The wedge of world a frame can see, from above: where the eye is, which way
+ * it faces, and the two side planes the lens cuts the world with.
+ *
+ * The sides are the half that was missing. A chunk used to be kept whenever its
+ * centre was anywhere but well behind the eye — half the world, where the
+ * window shows about a hundred and six degrees of it — so half again as many
+ * chunks as could ever be seen had every one of their faces projected, lit and
+ * clipped before the raster threw them away offscreen.
+ */
+struct ViewCone {
+    eyeX : f64,
+    eyeZ : f64,
+    fwdX : f64,   // the way the camera faces, on the ground plane
+    fwdZ : f64,
+    rgtX : f64,   // and its right
+    rgtZ : f64,
+    cosH : f64,   // the side planes' unit normal, in (right, depth)
+    sinH : f64,
+    cosP : f64,   // the pitch, which turns ground distance into view depth
+    far : f64,    // the draw distance, plus a chunk's own extent
+    slack : f64,  // how far past a side plane a chunk's CENTRE may sit and the
+                  // chunk still be in: the circle its footprint fits in, plus
+                  // what its height can add to the depth through the pitch
+    behind : f64, // how far back of the eye a chunk may still start. A whole
+                  // chunk, not the circle, so the cone cannot drop anything the
+                  // half-plane it replaces would have kept
+}
+
+/**
+ * The view cone for this eye and this lens.
+ *
+ * The horizontal half-angle is the lens's own: the projection puts the frame's
+ * edge at `hw` pixels from the centre and the film at `focal` pixels away, so
+ * the tangent of the angle is their ratio, and a wider window opens the cone
+ * rather than magnifying what was in it.
+ * @param p     player providing the eye position and orientation
+ * @param lens  the frame's projection centre and focal length
+ * @return the cone chunks are tested against
+ */
+fn viewConeFor(p : Player, lens : Lens) : ViewCone {
+    let s : f64 = World::CHUNK_SIZE as f64;
+    let hyp : f64 = (lens.hw * lens.hw + lens.focal * lens.focal).sqrt();
+    if (hyp < 0.0001) {
+        hyp = 0.0001;
+    }
+    let sinH : f64 = lens.hw / hyp;
+    // The circle a chunk's sixteen-by-sixteen footprint fits in, so a chunk
+    // with one corner inside the cone is never refused.
+    let footprint : f64 = s * 0.70710678;
+    // Depth is not ground distance once the camera is tilted: a cell's view
+    // depth carries its HEIGHT above the eye through the pitch. A chunk is the
+    // world tall, so the side test is widened by what that height can add to
+    // the depth — otherwise a look down the slope of a hill would cull a chunk
+    // whose top is plainly in frame.
+    let absSinP : f64 = p.sinp;
+    if (absSinP < 0.0) {
+        absSinP = 0.0 - absSinP;
+    }
+    return ViewCone {
+        eyeX: p.eye.x,
+        eyeZ: p.eye.z,
+        fwdX: 0.0 - p.siny,
+        fwdZ: p.cosy,
+        rgtX: p.cosy,
+        rgtZ: p.siny,
+        cosH: lens.focal / hyp,
+        sinH: sinH,
+        cosP: p.cosp,
+        far: Render::DRAW_DIST + s,
+        slack: footprint + (World::HEIGHT as f64) * absSinP * sinH,
+        behind: s,
+    };
+}
+
+/**
+ * A chunk is worth drawing only if some part of it can fall inside the cone.
+ *
+ * Every test is against the circle the chunk's footprint fits in, so a chunk
+ * with one corner in view is always kept and nothing that could draw a pixel is
+ * refused. A free function so the world-face pass (ChunkRenderer) and the torch
+ * pass (Renderer) share the one visibility rule.
+ * @param cone  the frame's view cone
+ * @param cx    chunk x index
+ * @param cz    chunk z index
  * @return true if the chunk should be drawn
  */
-fn chunkVisible(p : Player, cx : i32, cz : i32) : bool {
+fn chunkVisible(cone : ViewCone, cx : i32, cz : i32) : bool {
     let s : f64 = World::CHUNK_SIZE as f64;
-    let wx : f64 = (cx as f64) * s + s * 0.5;
-    let wz : f64 = (cz as f64) * s + s * 0.5;
-    let dx : f64 = wx - p.eye.x;
-    let dz : f64 = wz - p.eye.z;
-    let dist2 : f64 = dx * dx + dz * dz;
-    let far : f64 = Render::DRAW_DIST + s;
-    if (dist2 > far * far) {
+    let dx : f64 = (cx as f64) * s + s * 0.5 - cone.eyeX;
+    let dz : f64 = (cz as f64) * s + s * 0.5 - cone.eyeZ;
+    if (dx * dx + dz * dz > cone.far * cone.far) {
         return false;
     }
-    // forward = (-siny, cosy); keep chunks whose centre is ahead or within a
-    // half-diagonal (~0.71·chunk) behind the eye.
-    let ahead : f64 = dx * (0.0 - p.siny) + dz * p.cosy;
-    return ahead > 0.0 - s;
+    let fwd : f64 = dx * cone.fwdX + dz * cone.fwdZ;
+    if (fwd < 0.0 - cone.behind) {
+        return false;
+    }
+    // How far the centre lies past each side plane, in the plane's own units:
+    // the ground distance becomes view depth through the pitch, and the chunk
+    // is out only when its whole circle, at every height it reaches, is.
+    let rgt : f64 = dx * cone.rgtX + dz * cone.rgtZ;
+    let depth : f64 = fwd * cone.cosP * cone.sinH;
+    if (rgt * cone.cosH - depth > cone.slack) {
+        return false;
+    }
+    return (0.0 - rgt) * cone.cosH - depth <= cone.slack;
 }
 
 /**
@@ -569,11 +649,6 @@ class ChunkRenderer {
         let packed : i32 = man.faces.ftile[idx] as i32;
         let dir : FaceDir = faceDirFrom(packed / 256);
         let isWaterFace : bool = (packed % 256) == Tile::WATER;
-        // Partial, floor-resting blocks (thin snow, slabs later) render at their
-        // real box height (top + side tops lowered to y + boxH), like a short
-        // water surface. blockBoxHeight is the single authority (1.0 = full cube).
-        let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
-        let isPartialFace : bool = boxH < 1.0;
         // Cells this face spans, from the mesher's greedy merge, stretched along
         // one axis. Which axis needs no table: for every direction the corner's
         // `u` is exactly its offset along a HORIZONTAL axis — X for the top, the
@@ -624,17 +699,30 @@ class ChunkRenderer {
         let vx : f64 = cam.eye.x - fcx;
         let vy : f64 = cam.eye.y - fcy;
         let vz : f64 = cam.eye.z - fcz;
+        if (vx * vx + vz * vz > Render::DRAW_DIST * Render::DRAW_DIST) {
+            return;
+        }
         // Water surfaces AND the top of a partial block (thin snow, a slab) draw
         // double-sided so the surface stays visible from below; every other face
         // back-face culls. Without this the raised partial top back-face culls
         // the instant the eye drops below its plane (y + boxH) and the top
         // "disappears as you descend" — worse the deeper the block (higher plane).
+        //
+        // The test is in two halves because the exception is the expensive one:
+        // knowing whether a block is partial is two walks down into the world,
+        // and only a TOP face can be the exception at all. So the ordinary case
+        // goes first and the walk is paid by the few faces that reach it, not by
+        // every face in the ring.
         let facing : f64 = vx * nx + vy * ny + vz * nz;
-        let topPartial : bool = isPartialFace && ny > 0.0;
-        if (!isWaterFace && !topPartial && facing <= 0.0) {
+        if (!isWaterFace && facing <= 0.0 && ny <= 0.0) {
             return;
         }
-        if (vx * vx + vz * vz > Render::DRAW_DIST * Render::DRAW_DIST) {
+        // Partial, floor-resting blocks (thin snow, slabs later) render at their
+        // real box height (top + side tops lowered to y + boxH), like a short
+        // water surface. blockBoxHeight is the single authority (1.0 = full cube).
+        let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
+        let isPartialFace : bool = boxH < 1.0;
+        if (!isWaterFace && facing <= 0.0 && !isPartialFace) {
             return;
         }
 
@@ -966,12 +1054,24 @@ class ChunkRenderer {
         let t : i32 = 1;
         while (t < n - 1) {
             if (self.triN < Render::TRI_QUEUE_CAP) {
+                let i1 : i32 = (o + t) % n;
+                let i2 : i32 = (o + t + 1) % n;
+                // The column span, taken here where the projection just ran,
+                // so the fill's band test costs a comparison instead of a
+                // whole triangle setup it then throws away.
+                let (colLo, colHi) = columnSpan(
+                    Mem::realOf(self.cs.sx, o),
+                    Mem::realOf(self.cs.sx, i1),
+                    Mem::realOf(self.cs.sx, i2)
+                );
                 self.triBuf[self.triN] = RasterTri {
                     a: self.clippedVert(o),
-                    b: self.clippedVert((o + t) % n),
-                    c: self.clippedVert((o + t + 1) % n),
+                    b: self.clippedVert(i1),
+                    c: self.clippedVert(i2),
                     tile: fs.tile as i16,
-                    wrap: wf as i8
+                    wrap: wf as i8,
+                    minx: colLo,
+                    maxx: colHi
                 };
                 self.triN = self.triN + 1;
             }
@@ -1022,9 +1122,10 @@ class ChunkRenderer {
     pub(crate) fn buildSlots(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64,
         first : i32, stride : i32) : void {
         let slots : i32 = World::SPAN * World::SPAN;
+        let cone : ViewCone = viewConeFor(p, cam.lens);
         let slot : i32 = first;
         while (slot < slots) {
-            if (man.cols.loaded[slot] == 1 && chunkVisible(p, man.cols.cxs[slot], man.cols.czs[slot])) {
+            if (man.cols.loaded[slot] == 1 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
                 let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
                 let n : i32 = man.faces.fcount[slot];
                 let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
@@ -1054,7 +1155,11 @@ class ChunkRenderer {
         let band : Band = Band { x0: bx0, x1: bx1 };
         while (i < self.triN) {
             let tri : RasterTri = self.triBuf[i];
-            rasterTriTex(fb, tri, self.atlas, self.gam, self.fogT, band);
+            // The band owns columns [bx0, bx1); a triangle that touches none
+            // of them is done with here, before the setup it would not use.
+            if ((tri.maxx as i32) >= bx0 && (tri.minx as i32) < bx1) {
+                rasterTriTex(fb, tri, self.atlas, self.gam, self.fogT, band);
+            }
             i = i + 1;
         }
     }

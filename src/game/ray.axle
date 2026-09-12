@@ -261,16 +261,14 @@ fn rayCellBoxFace(origin : Vec3, dir : Vec3,
 }
 
 /**
- * True if the unit cube at (cx, cy, cz) overlaps the player's body
+ * True if the unit cube at `cell` overlaps the player's body
  * (a `Motion::PLAYER_RADIUS` disc, ~1.8 blocks tall) — used to refuse placing a
  * block inside yourself.
- * @param p   the player to test against
- * @param cx  cell x
- * @param cy  cell y
- * @param cz  cell z
+ * @param p     the player to test against
+ * @param cell  the world voxel
  * @return true if the cell overlaps the player's body box
  */
-fn cellInPlayer(p : Player, cx : i32, cy : i32, cz : i32) : bool {
+fn cellInPlayer(p : Player, cell : IVec3) : bool {
     let r : f64 = Motion::PLAYER_RADIUS;
     let minX : f64 = p.pos.x - r;
     let maxX : f64 = p.pos.x + r;
@@ -278,9 +276,9 @@ fn cellInPlayer(p : Player, cx : i32, cy : i32, cz : i32) : bool {
     let maxZ : f64 = p.pos.z + r;
     let minY : f64 = p.pos.y;
     let maxY : f64 = p.pos.y + 1.8;
-    let fx : f64 = cx as f64;
-    let fy : f64 = cy as f64;
-    let fz : f64 = cz as f64;
+    let fx : f64 = cell.x as f64;
+    let fy : f64 = cell.y as f64;
+    let fz : f64 = cell.z as f64;
     return fx < maxX && fx + 1.0 > minX
         && fz < maxZ && fz + 1.0 > minZ
         && fy < maxY && fy + 1.0 > minY;

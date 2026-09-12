@@ -70,7 +70,7 @@ trait Damageable {
  * on faces while auto-stepping a ≤ `Motion::STEP_HEIGHT` ledge.
  */
 trait Collides {
-    fn collidesAt(self, world : dyn VoxelQuery, px : f64, py : f64, pz : f64) : bool;
+    fn collidesAt(self, world : dyn VoxelQuery, at : Vec3) : bool;
     fn supportTop(self, world : dyn VoxelQuery, px : f64, pz : f64, yLo : i32, yHi : i32) : f64;
     fn moveX(mut self, world : dyn VoxelQuery, dx : f64) : void;
     fn moveZ(mut self, world : dyn VoxelQuery, dz : f64) : void;
@@ -165,27 +165,25 @@ class Entity : Damageable, Physics {
      * never a wall. You stand on leaves, walk through canopy gaps, and
      * cannot pass into any solid block.
      * @param world  chunk manager queried for collidable voxels
-     * @param px     candidate body-centre X
-     * @param py     candidate foot height
-     * @param pz     candidate body-centre Z
+     * @param at     candidate body position: centre in x/z, feet in y
      * @return true if any voxel under the body footprint blocks the body box
      */
-    pub(derived) fn collidesAt(self, world : dyn VoxelQuery, px : f64, py : f64, pz : f64) : bool {
+    pub(derived) fn collidesAt(self, world : dyn VoxelQuery, at : Vec3) : bool {
         let r : f64 = self.radius;
         let eps : f64 = 0.0001;
-        let x0 : i32 = (px - r).floorToInt() as i32;
-        let x1 : i32 = (px + r - eps).floorToInt() as i32;
-        let z0 : i32 = (pz - r).floorToInt() as i32;
-        let z1 : i32 = (pz + r - eps).floorToInt() as i32;
-        let y0 : i32 = py.floorToInt() as i32;
-        let y1 : i32 = (py + self.height - eps).floorToInt() as i32;
+        let x0 : i32 = (at.x - r).floorToInt() as i32;
+        let x1 : i32 = (at.x + r - eps).floorToInt() as i32;
+        let z0 : i32 = (at.z - r).floorToInt() as i32;
+        let z1 : i32 = (at.z + r - eps).floorToInt() as i32;
+        let y0 : i32 = at.y.floorToInt() as i32;
+        let y1 : i32 = (at.y + self.height - eps).floorToInt() as i32;
         let y : i32 = y0;
         while (y <= y1) {
             let x : i32 = x0;
             while (x <= x1) {
                 let z : i32 = z0;
                 while (z <= z1) {
-                    if (world.collideFloorCell(ivec3(x, y, z), py, self.height)) {
+                    if (world.collideFloorCell(ivec3(x, y, z), at.y, self.height)) {
                         return true;
                     }
                     z = z + 1;
@@ -250,7 +248,7 @@ class Entity : Damageable, Physics {
             return;
         }
         let nx : f64 = self.pos.x + dx;
-        if (!self.collidesAt(world, nx, self.pos.y, self.pos.z)) {
+        if (!self.collidesAt(world, vec3(nx, self.pos.y, self.pos.z))) {
             self.pos.x = nx;
             // Step-down assist: while grounded, glue the feet to a slightly lower
             // support (≤ `Motion::STEP_DOWN_ASSIST`, i.e. a partial-block / snow-level drop)
@@ -286,7 +284,7 @@ class Entity : Damageable, Physics {
             let top : f64 = self.supportTop(world, nx, self.pos.z,
                 self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
             if (top > self.pos.y && top - self.pos.y <= stepAllow
-                && !self.collidesAt(world, nx, top, self.pos.z)) {
+                && !self.collidesAt(world, vec3(nx, top, self.pos.z))) {
                 self.stepUp = self.stepUp + (top - self.pos.y);
                 self.pos.x = nx;
                 self.pos.y = top;
@@ -305,7 +303,7 @@ class Entity : Damageable, Physics {
             return;
         }
         let nz : f64 = self.pos.z + dz;
-        if (!self.collidesAt(world, self.pos.x, self.pos.y, nz)) {
+        if (!self.collidesAt(world, vec3(self.pos.x, self.pos.y, nz))) {
             self.pos.z = nz;
             // Step-down assist (see moveX): glide down a partial-block drop while
             // grounded instead of a saccading micro free-fall off thin snow.
@@ -332,7 +330,7 @@ class Entity : Damageable, Physics {
             let top : f64 = self.supportTop(world, self.pos.x, nz,
                 self.pos.y.floorToInt() as i32, stepY.floorToInt() as i32);
             if (top > self.pos.y && top - self.pos.y <= stepAllow
-                && !self.collidesAt(world, self.pos.x, top, nz)) {
+                && !self.collidesAt(world, vec3(self.pos.x, top, nz))) {
                 self.stepUp = self.stepUp + (top - self.pos.y);
                 self.pos.z = nz;
                 self.pos.y = top;
@@ -373,7 +371,7 @@ class Entity : Damageable, Physics {
         if (self.velY <= 0.0) {
             // Landing uses the REAL per-block box (a thin snow layer is a low
             // floor, not a full cube): you rest on the snow at its true height.
-            if (self.collidesAt(world, self.pos.x, ny, self.pos.z)) {
+            if (self.collidesAt(world, vec3(self.pos.x, ny, self.pos.z))) {
                 let top : f64 = self.supportTop(world, self.pos.x, self.pos.z,
                     ny.floorToInt() as i32, self.pos.y.floorToInt() as i32);
                 // Rising a little onto a higher floor (stepping up onto snow / a
@@ -393,7 +391,7 @@ class Entity : Damageable, Physics {
                 self.onGround = false;
             }
         } else {
-            if (self.collidesAt(world, self.pos.x, ny, self.pos.z)) {
+            if (self.collidesAt(world, vec3(self.pos.x, ny, self.pos.z))) {
                 self.velY = 0.0;
                 self.onGround = false;
             } else {

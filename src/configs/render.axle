@@ -71,5 +71,11 @@ class Render {
     // beside those arrays as `BUILD_WORKERS` / `RASTER_BANDS` in `krender::render`.
     // A constant here that nothing could read was worse than no constant — the two
     // that used to sit here said 4 and 12 while the code ran 8 and 12.
-    static TRI_QUEUE_CAP : i32 = 48000;
+    // Measured rather than guessed. With the view cone cutting the ring down to
+    // what the window shows, a frame queues about thirty-two thousand triangles
+    // over the six workers, so five and a half thousand each; before the cone
+    // the same frame queued forty-one thousand, or seven thousand each. Twenty
+    // thousand a worker is three times the worst of those, and it gives back
+    // seventeen megabytes that was only ever address space.
+    static TRI_QUEUE_CAP : i32 = 20000;
 }

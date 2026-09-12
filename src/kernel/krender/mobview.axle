@@ -17,7 +17,7 @@ use smalt::Mem;
 use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
 use crate::kernel::klight::daymodel::{ DayState };
-use crate::kernel::krender::raster::{ rasterTriTex, rasterTri, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected };
+use crate::kernel::krender::raster::{ rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected };
 use crate::kernel::klight::facelight::{ sunExposure };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
@@ -196,9 +196,14 @@ class MobView {
             let vc : RasterVert = RasterVert { sx: sx2 as f32, sy: sy2 as f32, iz: iz2 as f32, u: 1.0 as f32, v: 0.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
             let vd : RasterVert = RasterVert { sx: sx3 as f32, sy: sy3 as f32, iz: iz3 as f32, u: 0.0 as f32, v: 0.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
             let tile : i16 = mat.tile as i16;
-            rasterTriTex(fb, RasterTri { a: va, b: vb, c: vc, tile: tile, wrap: 0 as i8 },
+            // A mob is drawn straight into the full-width band rather than
+            // queued, so nothing reads the span — filled in anyway, so no
+            // triangle anywhere carries a stale one.
+            let (abcLo, abcHi) = columnSpan(sx0, sx1, sx2);
+            let (acdLo, acdHi) = columnSpan(sx0, sx2, sx3);
+            rasterTriTex(fb, RasterTri { a: va, b: vb, c: vc, tile: tile, wrap: 0 as i8, minx: abcLo, maxx: abcHi },
                 scene.atlas, scene.gam, scene.fogT, band);
-            rasterTriTex(fb, RasterTri { a: va, b: vc, c: vd, tile: tile, wrap: 0 as i8 },
+            rasterTriTex(fb, RasterTri { a: va, b: vc, c: vd, tile: tile, wrap: 0 as i8, minx: acdLo, maxx: acdHi },
                 scene.atlas, scene.gam, scene.fogT, band);
         } else {
             let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);

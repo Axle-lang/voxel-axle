@@ -428,8 +428,8 @@ fn run() : i32 ! PlatformError {
             }
             let rightDown : bool = events.isButtonDown(MouseButton::Right);
             if (rightDown && !wasRight && picker.hit == 1) {
-                if (!cellInPlayer(player, picker.px, picker.py, picker.pz)) {
-                    let pcell : IVec3 = ivec3(picker.px, picker.py, picker.pz);
+                let pcell : IVec3 = ivec3(picker.px, picker.py, picker.pz);
+                if (!cellInPlayer(player, pcell)) {
                     let held : Block = player.heldBlock();
                     man.placeAt(pcell, held);
                     sfx.blockEdit(held, pcell, mobs.rand());
@@ -585,7 +585,7 @@ fn run() : i32 ! PlatformError {
         }
         // Update the listener at the player so positional sounds attenuate live;
         // smalt's `mixerLoop`, on its own thread, does the device feeding.
-        sfx.setListener(player.pos.x, player.pos.y, player.pos.z);
+        sfx.setListener(player.pos);
     }
 
     // Stop the worker threads (audio + lighting) and wait for them before

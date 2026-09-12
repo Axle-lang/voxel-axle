@@ -257,7 +257,7 @@ struct MobVoice {
  * live by distance. Implemented by AudioManager, which owns the mixer.
  */
 trait Listener {
-    fn setListener(self, x : f64, y : f64, z : f64) : void;
+    fn setListener(self, at : Vec3) : void;
 }
 
 class AudioManager : Listener, Closeable {
@@ -352,12 +352,10 @@ class AudioManager : Listener, Closeable {
 
     /**
      * Set the listener (player) position for live distance attenuation.
-     * @param x  listener x
-     * @param y  listener y
-     * @param z  listener z
+     * @param at  where the listener is, in world space
      */
-    fn setListener(self, x : f64, y : f64, z : f64) : void {
-        self.mixer.setListener(x, y, z);
+    fn setListener(self, at : Vec3) : void {
+        self.mixer.setListener(at.x, at.y, at.z);
     }
 
     /**

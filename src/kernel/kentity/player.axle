@@ -271,10 +271,10 @@ class Player : Entity, Looks, Survives, Inventory {
         self.velY = 0.0;
         self.onGround = false;
         // Horizontal move with voxel collision (no auto-step in flight).
-        if (!self.collidesAt(world, self.pos.x + dx, self.pos.y, self.pos.z)) {
+        if (!self.collidesAt(world, vec3(self.pos.x + dx, self.pos.y, self.pos.z))) {
             self.pos.x = self.pos.x + dx;
         }
-        if (!self.collidesAt(world, self.pos.x, self.pos.y, self.pos.z + dz)) {
+        if (!self.collidesAt(world, vec3(self.pos.x, self.pos.y, self.pos.z + dz))) {
             self.pos.z = self.pos.z + dz;
         }
         if (up) {
@@ -285,7 +285,7 @@ class Player : Entity, Looks, Survives, Inventory {
         }
         // Don't sink into the ground: if the body intersects blocks, lift
         // the feet onto the highest support beneath them.
-        if (self.collidesAt(world, self.pos.x, self.pos.y, self.pos.z)) {
+        if (self.collidesAt(world, self.pos)) {
             let top : f64 = self.supportTop(world, self.pos.x, self.pos.z,
                 self.pos.y.floorToInt() as i32, (self.pos.y + self.height).floorToInt() as i32);
             self.pos.y = top;

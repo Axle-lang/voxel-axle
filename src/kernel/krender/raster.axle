@@ -1,7 +1,9 @@
 // raster — software triangle rasteriser into the ARGB framebuffer with a
 // per-pixel inverse-depth z-buffer (32-bit floats: a depth is compared, not accumulated). Half-plane (edge-function) inside
 // test; depth is the barycentric blend of vertex inverse depths, nearest
-// wins. Winding-agnostic (the area's sign flows through the weights).
+// wins. Winding-agnostic: the area's sign is folded into the edge functions
+// once per triangle, so the inside test is a sign test and nothing per pixel
+// has to know which way the triangle was wound.
 //
 // It fills pixels. It does not decide how bright they are: the radiometry that
 // used to live here — the sun/sky split, the hemisphere term, the exposure — is
@@ -15,7 +17,7 @@ use crate::kernel::kmath::mathx::clampI32;
 use crate::kernel::kmath::vec3::{ Vec3 };
 use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb, linearToSrgb };
-use crate::kernel::ksky::atmosphere::{ FogTable, SkyColour };
+use crate::kernel::ksky::atmosphere::{ FogTable, FogRow, SkyColour };
 use crate::configs::atlas::{ Atlas };
 use crate::configs::screen::{ Screen };
 
@@ -137,7 +139,7 @@ struct Camera : Projector {
     siny : f64,
     cosp : f64,
     sinp : f64,
-    lens : Lens,
+    pub(crate) lens : Lens,
 
     /**
      * Rotate a world point into camera space (post yaw + pitch): x = right,
@@ -237,6 +239,25 @@ fn maxf(a : f64, b : f64) : f64 {
 }
 
 /**
+ * The screen COLUMN SPAN of a triangle, packed for `RasterTri.minx` / `.maxx`.
+ *
+ * The same floor the fill's bounding box takes, so the band test on the
+ * triangle and the loop bounds inside it can never disagree about which
+ * columns a triangle touches. Clamped into `i16` at values no screen can
+ * reach, which leaves every rejection decision the unclamped span would
+ * have made.
+ * @param sa  first vertex screen x.
+ * @param sb  second vertex screen x.
+ * @param sc  third vertex screen x.
+ * @return the low and high column, in that order.
+ */
+pub(crate) fn columnSpan(sa : f64, sb : f64, sc : f64) : (i16, i16) {
+    let lo : i32 = (minf(sa, minf(sb, sc))).floorToInt() as i32;
+    let hi : i32 = (maxf(sa, maxf(sb, sc))).floorToInt() as i32;
+    return (clampI32(lo, 0 - 1, 32000) as i16, clampI32(hi, 0 - 1, 32000) as i16);
+}
+
+/**
  * Edge function: signed area of the triangle (a, b, p).
  * @param ax  first vertex x.
  * @param ay  first vertex y.
@@ -251,20 +272,42 @@ fn edge(ax : f64, ay : f64, bx : f64, by : f64, px : f64, py : f64) : f64 {
 }
 
 /**
+ * Reset the z-buffer, leaving the colour alone.
+ *
+ * Its own loop, writing one buffer: interleaved with the colour fill the
+ * two strides defeat the compiler's fill idiom, and a depth clear is a
+ * run of zero bytes — the one shape a machine already has an instruction
+ * for.
+ * @param fb  the render target (framebuffer + z-buffer + size).
+ */
+fn clearDepth(fb : FrameBuf) : void {
+    let zbuf : i64 = fb.zbuf;
+    let n : i32 = fb.w * fb.h;
+    let i : i32 = 0;
+    while (i < n) {
+        putFloatOf(zbuf, i, 0.0);
+        i = i + 1;
+    }
+}
+
+/**
  * Fill the frame with `bg` and reset the z-buffer.
+ *
+ * For a frame nothing paints a background into afterwards. Where the sky pass
+ * runs, it covers every pixel the opaque passes left, so `clearDepth` is the
+ * one that is wanted and this would be a whole frame written and thrown away.
  * @param fb  the render target (framebuffer + z-buffer + size).
  * @param bg  background colour.
  */
 fn clearFrame(fb : FrameBuf, bg : i32) : void {
     let pixels : i64 = fb.pixels;
-    let zbuf : i64 = fb.zbuf;
     let n : i32 = fb.w * fb.h;
     let i : i32 = 0;
     while (i < n) {
         Mem::putWordOf(pixels, i, bg);
-        putFloatOf(zbuf, i, 0.0);
         i = i + 1;
     }
+    clearDepth(fb);
 }
 
 /**
@@ -416,6 +459,11 @@ struct RasterTri {
     c : RasterVert,
     tile : i16,   // atlas tile, under 256
     wrap : i8,    // 0 or 1
+    // The screen COLUMNS this triangle touches, so the banded fill can pass
+    // over it without paying its setup. Every band walks every worker's whole
+    // queue, and eleven times in twelve the triangle is not in the band.
+    pub(crate) minx : i16,
+    pub(crate) maxx : i16,
 }
 
 /** The texture atlas mip chain: base buffer + per-level offset / size tables. */
@@ -640,26 +688,37 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     // them by constant deltas instead of recomputing per pixel.
     let cx0 : f64 = (minx as f64) + 0.5;
     let cy0 : f64 = (miny as f64) + 0.5;
-    let ax0 : f64 = csy - bsy;
-    let ay0 : f64 = bsx - csx;
-    let ax1 : f64 = asy - csy;
-    let ay1 : f64 = csx - asx;
-    let ax2 : f64 = bsy - asy;
-    let ay2 : f64 = asx - bsx;
-    let e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0);
-    let e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0);
-    let e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0);
+    // The winding, folded into the edges once instead of into three
+    // multiplies at every candidate pixel. A triangle wound the other way
+    // gives negative edge values, and the inside test used to ask about the
+    // sign of `e * inv` to cope; carrying the sign on the edges themselves
+    // makes the test `e >= 0` and leaves the barycentrics to the magnitude.
+    // Multiplying by ±1 is exact, so nothing about the result moves.
+    let sgn : f64 = 1.0;
+    if (inv < 0.0) {
+        sgn = 0.0 - 1.0;
+    }
+    let absInv : f64 = inv * sgn;
+    let ax0 : f64 = (csy - bsy) * sgn;
+    let ay0 : f64 = (bsx - csx) * sgn;
+    let ax1 : f64 = (asy - csy) * sgn;
+    let ay1 : f64 = (csx - asx) * sgn;
+    let ax2 : f64 = (bsy - asy) * sgn;
+    let ay2 : f64 = (asx - bsx) * sgn;
+    let e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0) * sgn;
+    let e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0) * sgn;
+    let e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0) * sgn;
 
     // Triangle-constant screen-space gradients of the perspective attributes
     // (u/z, v/z, 1/z): linear in screen x/y, so they're constant per triangle.
     // Each pixel derives its UV footprint (du/dx … dv/dy) from these to choose
     // the mip level and the anisotropic tap count.
-    let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * inv;
-    let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * inv;
-    let gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * inv;
-    let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * inv;
-    let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * inv;
-    let gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * inv;
+    let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * absInv;
+    let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * absInv;
+    let gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * absInv;
+    let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * absInv;
+    let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * absInv;
+    let gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * absInv;
     let tp : f64 = Atlas::TILE_PX as f64;
     let maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
@@ -672,12 +731,16 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
         let e1 : f64 = e1row;
         let e2 : f64 = e2row;
         let rowbase : i32 = py * w;
+        // Where this scanline sits in the fog grid. Every fogged pixel reads
+        // the sky behind it, and the row half of that read is the same all the
+        // way across.
+        let fogRow : FogRow = fogT.rowAt(py);
         let px : i32 = minx;
         while (px <= maxx) {
-            if (e0 * inv >= 0.0 && e1 * inv >= 0.0 && e2 * inv >= 0.0) {
-                let b0 : f64 = e0 * inv;
-                let b1 : f64 = e1 * inv;
-                let b2 : f64 = e2 * inv;
+            if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) {
+                let b0 : f64 = e0 * absInv;
+                let b1 : f64 = e1 * absInv;
+                let b2 : f64 = e2 * absInv;
                 let izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
                 let idx : i64 = (rowbase + px) as i64;
                 unsafe {
@@ -817,7 +880,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                         // too pale against the deep blue away from it.
                         let fog : f64 = fogT.amount(invz);
                         if (fog > 0.002) {
-                            let sky : SkyColour = fogT.skyAt(px, py);
+                            let sky : SkyColour = fogT.skyIn(fogRow, px);
                             let keep : f64 = 1.0 - fog;
                             r = ((r as f64) * keep + sky.r * fog).floorToInt() as i32;
                             g = ((g as f64) * keep + sky.g * fog).floorToInt() as i32;
