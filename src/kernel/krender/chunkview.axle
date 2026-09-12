@@ -52,88 +52,129 @@ fn faceDirFrom(d : i32) : FaceDir {
     };
 }
 
+/** Inward normal of one frustum plane, in world axes, through the eye. */
+struct ViewPlane {
+    nx : f64,
+    ny : f64,
+    nz : f64,
+}
+
 /**
- * The wedge of world a frame can see, from above: where the eye is, which way
- * it faces, and the two side planes the lens cuts the world with.
+ * The wedge of world a frame can see: where the eye is, and the five planes the
+ * lens and the near clip cut the world with.
  *
  * The sides are the half that was missing. A chunk used to be kept whenever its
  * centre was anywhere but well behind the eye — half the world, where the
  * window shows about a hundred and six degrees of it — so half again as many
  * chunks as could ever be seen had every one of their faces projected, lit and
  * clipped before the raster threw them away offscreen.
+ *
+ * The planes are the REAL ones, in three dimensions, and that is not a
+ * refinement — it is what makes the test correct. The first version of this
+ * worked on the ground plane and carried the pitch as a fudge: a slack term
+ * widened the sides by what a chunk's height could add to the depth, and a
+ * chunk was allowed one chunk's length behind the eye. Both are wrong the
+ * moment the camera looks steeply down from above the terrain, which is what
+ * flying is. Looking down, the visible ground reaches BEHIND the eye — a point
+ * below the eye has positive view depth however far back it sits — so chunks
+ * that fill a third of the frame were being dropped for being behind.
+ *
+ * A plane through the eye with an inward normal has none of that: the test is
+ * the same arithmetic at any pitch, any height, any lens.
  */
 struct ViewCone {
     eyeX : f64,
+    eyeY : f64,
     eyeZ : f64,
-    fwdX : f64,   // the way the camera faces, on the ground plane
-    fwdZ : f64,
-    rgtX : f64,   // and its right
-    rgtZ : f64,
-    cosH : f64,   // the side planes' unit normal, in (right, depth)
-    sinH : f64,
-    cosP : f64,   // the pitch, which turns ground distance into view depth
-    far : f64,    // the draw distance, plus a chunk's own extent
-    slack : f64,  // how far past a side plane a chunk's CENTRE may sit and the
-                  // chunk still be in: the circle its footprint fits in, plus
-                  // what its height can add to the depth through the pitch
-    behind : f64, // how far back of the eye a chunk may still start. A whole
-                  // chunk, not the circle, so the cone cannot drop anything the
-                  // half-plane it replaces would have kept
+    near : ViewPlane,   // the four sides and the near clip, inward normals
+    left : ViewPlane,
+    right : ViewPlane,
+    top : ViewPlane,
+    bottom : ViewPlane,
+    far : f64,          // the draw distance, plus a chunk's own extent
 }
 
 /**
  * The view cone for this eye and this lens.
  *
- * The horizontal half-angle is the lens's own: the projection puts the frame's
- * edge at `hw` pixels from the centre and the film at `focal` pixels away, so
- * the tangent of the angle is their ratio, and a wider window opens the cone
- * rather than magnifying what was in it.
+ * The half-angles are the lens's own: the projection puts the frame's edge at
+ * `hw` (or `hh`) pixels from the centre and the film at `focal` pixels away, so
+ * a point is inside a side plane exactly when its offset along that axis, times
+ * the focal length, does not exceed its depth times the half-size. Written as a
+ * dot product against a normal, that is the plane — and it needs no
+ * normalising, because only the SIGN of the result is ever read.
  * @param p     player providing the eye position and orientation
  * @param lens  the frame's projection centre and focal length
  * @return the cone chunks are tested against
  */
 fn viewConeFor(p : Player, lens : Lens) : ViewCone {
-    let s : f64 = World::CHUNK_SIZE as f64;
-    let hyp : f64 = (lens.hw * lens.hw + lens.focal * lens.focal).sqrt();
-    if (hyp < 0.0001) {
-        hyp = 0.0001;
-    }
-    let sinH : f64 = lens.hw / hyp;
-    // The circle a chunk's sixteen-by-sixteen footprint fits in, so a chunk
-    // with one corner inside the cone is never refused.
-    let footprint : f64 = s * 0.70710678;
-    // Depth is not ground distance once the camera is tilted: a cell's view
-    // depth carries its HEIGHT above the eye through the pitch. A chunk is the
-    // world tall, so the side test is widened by what that height can add to
-    // the depth — otherwise a look down the slope of a hill would cull a chunk
-    // whose top is plainly in frame.
-    let absSinP : f64 = p.sinp;
-    if (absSinP < 0.0) {
-        absSinP = 0.0 - absSinP;
-    }
+    // The camera basis. Forward carries the pitch; right lies in the ground
+    // plane, there being no roll; up is the third of the frame.
+    let fx : f64 = (0.0 - p.siny) * p.cosp;
+    let fy : f64 = p.sinp;
+    let fz : f64 = p.cosy * p.cosp;
+    let rx : f64 = p.cosy;
+    let rz : f64 = p.siny;
+    let ux : f64 = p.siny * p.sinp;
+    let uy : f64 = p.cosp;
+    let uz : f64 = (0.0 - p.cosy) * p.sinp;
     return ViewCone {
         eyeX: p.eye.x,
+        eyeY: p.eye.y,
         eyeZ: p.eye.z,
-        fwdX: 0.0 - p.siny,
-        fwdZ: p.cosy,
-        rgtX: p.cosy,
-        rgtZ: p.siny,
-        cosH: lens.focal / hyp,
-        sinH: sinH,
-        cosP: p.cosp,
-        far: Render::DRAW_DIST + s,
-        slack: footprint + (World::HEIGHT as f64) * absSinP * sinH,
-        behind: s,
+        near: ViewPlane { nx: fx, ny: fy, nz: fz },
+        left: ViewPlane { nx: fx * lens.hw + rx * lens.focal,
+                          ny: fy * lens.hw,
+                          nz: fz * lens.hw + rz * lens.focal },
+        right: ViewPlane { nx: fx * lens.hw - rx * lens.focal,
+                           ny: fy * lens.hw,
+                           nz: fz * lens.hw - rz * lens.focal },
+        top: ViewPlane { nx: fx * lens.hh - ux * lens.focal,
+                         ny: fy * lens.hh - uy * lens.focal,
+                         nz: fz * lens.hh - uz * lens.focal },
+        bottom: ViewPlane { nx: fx * lens.hh + ux * lens.focal,
+                            ny: fy * lens.hh + uy * lens.focal,
+                            nz: fz * lens.hh + uz * lens.focal },
+        far: Render::DRAW_DIST + (World::CHUNK_SIZE as f64),
     };
+}
+
+/**
+ * Whether a box lies entirely on the outside of one plane through the eye.
+ *
+ * Only the box corner FURTHEST along the normal is tested. If even that one is
+ * behind the plane, all eight are; if it is in front, the box straddles the
+ * plane or clears it, and either way the box is kept.
+ * @param pl   the plane's inward normal
+ * @param lox  box low corner, relative to the eye
+ * @param hix  box high corner, relative to the eye
+ * @return true when nothing in the box is on the inward side
+ */
+fn boxOutside(pl : ViewPlane, lox : f64, loy : f64, loz : f64,
+              hix : f64, hiy : f64, hiz : f64) : bool {
+    let x : f64 = lox;
+    if (pl.nx > 0.0) {
+        x = hix;
+    }
+    let y : f64 = loy;
+    if (pl.ny > 0.0) {
+        y = hiy;
+    }
+    let z : f64 = loz;
+    if (pl.nz > 0.0) {
+        z = hiz;
+    }
+    return pl.nx * x + pl.ny * y + pl.nz * z < 0.0;
 }
 
 /**
  * A chunk is worth drawing only if some part of it can fall inside the cone.
  *
- * Every test is against the circle the chunk's footprint fits in, so a chunk
- * with one corner in view is always kept and nothing that could draw a pixel is
- * refused. A free function so the world-face pass (ChunkRenderer) and the torch
- * pass (Renderer) share the one visibility rule.
+ * The chunk is its whole column — sixteen by the world's height by sixteen —
+ * and the test is that box against the five planes. Nothing that could draw a
+ * pixel is refused, because a box is only dropped when one plane has all eight
+ * of its corners on the far side. A free function so the world-face pass
+ * (ChunkRenderer) and the torch pass (Renderer) share the one visibility rule.
  * @param cone  the frame's view cone
  * @param cx    chunk x index
  * @param cz    chunk z index
@@ -141,24 +182,30 @@ fn viewConeFor(p : Player, lens : Lens) : ViewCone {
  */
 fn chunkVisible(cone : ViewCone, cx : i32, cz : i32) : bool {
     let s : f64 = World::CHUNK_SIZE as f64;
-    let dx : f64 = (cx as f64) * s + s * 0.5 - cone.eyeX;
-    let dz : f64 = (cz as f64) * s + s * 0.5 - cone.eyeZ;
-    if (dx * dx + dz * dz > cone.far * cone.far) {
+    let lox : f64 = (cx as f64) * s - cone.eyeX;
+    let loz : f64 = (cz as f64) * s - cone.eyeZ;
+    let hix : f64 = lox + s;
+    let hiz : f64 = loz + s;
+    let mx : f64 = lox + s * 0.5;
+    let mz : f64 = loz + s * 0.5;
+    if (mx * mx + mz * mz > cone.far * cone.far) {
         return false;
     }
-    let fwd : f64 = dx * cone.fwdX + dz * cone.fwdZ;
-    if (fwd < 0.0 - cone.behind) {
+    let loy : f64 = 0.0 - cone.eyeY;
+    let hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
+    if (boxOutside(cone.near, lox, loy, loz, hix, hiy, hiz)) {
         return false;
     }
-    // How far the centre lies past each side plane, in the plane's own units:
-    // the ground distance becomes view depth through the pitch, and the chunk
-    // is out only when its whole circle, at every height it reaches, is.
-    let rgt : f64 = dx * cone.rgtX + dz * cone.rgtZ;
-    let depth : f64 = fwd * cone.cosP * cone.sinH;
-    if (rgt * cone.cosH - depth > cone.slack) {
+    if (boxOutside(cone.left, lox, loy, loz, hix, hiy, hiz)) {
         return false;
     }
-    return (0.0 - rgt) * cone.cosH - depth <= cone.slack;
+    if (boxOutside(cone.right, lox, loy, loz, hix, hiy, hiz)) {
+        return false;
+    }
+    if (boxOutside(cone.top, lox, loy, loz, hix, hiy, hiz)) {
+        return false;
+    }
+    return !boxOutside(cone.bottom, lox, loy, loz, hix, hiy, hiz);
 }
 
 /**
