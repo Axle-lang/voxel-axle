@@ -38,7 +38,15 @@ class Daylight {
                                           // (round-robin → the whole ring refreshes in ~span²/this
                                           // passes, and a cell only moves once per sweep, so the
                                           // sweep's LENGTH is how coarsely the shadow tracks the sun)
-    static SUN_SHADOW_SAMPLES : i32 = 6;  // rays per cell over the sun disc (1 = hard, more = softer penumbra)
+    // Rays per cell over the sun's disc. What they buy is the penumbra's
+    // GRADIENT, so what they are worth follows the disc: six of them were
+    // resolving an edge two and a half blocks wide, and the disc is now a
+    // twentieth of that. Three is more than the shadow can show — it is stored
+    // one value per air cell and read through a four-cell corner average, so it
+    // cannot resolve under about two blocks whatever the rays say. Measured, the
+    // frame is a tenth cheaper for a picture that sits inside the noise between
+    // two runs of the same binary.
+    static SUN_SHADOW_SAMPLES : i32 = 3;
     // Angular radius of the sun disc the rays spread over, in radians, and the
     // one number that decides whether a shadow has a SHAPE.
     //
@@ -67,6 +75,21 @@ class Daylight {
     // one the player just edited, is written outright — there is nothing to glide
     // from, and a shadow that faded in over two seconds would be its own bug.
     static SUN_GLIDE : f64 = 0.34;
+
+    // How far the light must have turned since a slot was last baked before that
+    // slot is worth baking again, as the cosine of the angle.
+    //
+    // The lever on what the shadows cost, and the biggest one the frame has that
+    // has nothing to do with the view: standing still in a forest, the tracking
+    // sweep was measured at 1.15 of the six cores the game uses. It runs because
+    // the sun moves, and it does not care whether anything else did.
+    //
+    // Just under a degree. At `SUN_SHADOW_REACH` blocks that moves the far end of
+    // a shadow by six tenths of a block, which is less than the two blocks the
+    // storage can resolve — so the value a skipped measurement would have written
+    // is a value the picture could not have shown. `SUN_GLIDE` fades what does
+    // change, so the step is not a step.
+    static SUN_STILL_COS : f64 = 0.99988;
 
     // Sky colours interpolated across the day.
     static DAY_SKY_R : i32 = 150;

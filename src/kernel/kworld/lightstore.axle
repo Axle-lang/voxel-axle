@@ -38,25 +38,6 @@ use crate::configs::world::{ World };
 const SUN_BAKE_WORKERS : i32 = 8;
 
 /**
- * How far the light must have turned since a slot was last baked before that
- * slot is worth baking again, as the cosine of the angle.
- *
- * Half a degree, because of how far a ray reaches: at
- * `Daylight::SUN_SHADOW_REACH` blocks that moves the far end of a shadow by a
- * third of a block, so nothing the bake writes can cross a cell between two
- * measurements it was allowed to skip.
- *
- * MEASURED, so the next reader does not expect more of it than it gives: today
- * this gate almost never fires. A pass costs far more than the eight
- * milliseconds it sleeps, so the cursor already comes round only about once a
- * second and the light has always moved further than this by the time a slot
- * is reached again. What the gate is for is the day the bake gets cheaper —
- * without it, a faster pass would simply re-measure the same answer more often
- * and hand back nothing.
- */
-const SUN_STILL_COS : f64 = 0.999962;
-
-/**
  * A chunk found once for the four cells of a face corner: which slot holds it,
  * and where its origin sits in the world, so the four reads can subtract it
  * rather than divide their way down to it again.
@@ -1169,7 +1150,7 @@ class LightEngine : LightSample, LightBaker {
         let dot : f64 = floatOf(self.lights.sunBaked, o) * sun.x
             + floatOf(self.lights.sunBaked, o + 1) * sun.y
             + floatOf(self.lights.sunBaked, o + 2) * sun.z;
-        return dot < SUN_STILL_COS;
+        return dot < Daylight::SUN_STILL_COS;
     }
 
     /**
