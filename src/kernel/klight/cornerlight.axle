@@ -70,6 +70,57 @@ fn skyTint(direct : f64, sun : LinRgb, bounce : Vec3) : LinRgb {
 }
 
 /**
+ * The sun's own light coming back off a rough surface toward the eye.
+ *
+ * Nothing outdoors is a perfect diffuser, and a renderer that treats the ground
+ * as one can only ever draw it as its texture times a number. That is what makes
+ * a sunlit field read as vivid and flat at the same time: the greenest thing on
+ * screen, with nothing of the sky anywhere on it.
+ *
+ * Two terms, and both are how a real surface behaves. The lobe is the reflection
+ * itself — broadest where the eye is near the sun's mirror direction — and it is
+ * a wide, weak one because grass and sand and stone are rough. The grazing term
+ * is that every material reflects more the flatter you look across it, which is
+ * why a field goes silver toward the horizon and is plain green at your feet.
+ *
+ * The caller ADDS the result times the sun's colour, and that is the point: a
+ * multiplier scales a colour and keeps its saturation, while adding the light's
+ * own near-white moves the surface toward the colour of what is lighting it.
+ * @param n    the (unit) surface normal
+ * @param v    the (unit) direction from the surface to the eye
+ * @param sun  the (unit) direction to the sun
+ * @param vis  how much of the sun reaches here, 0..1 — none of this in shadow
+ * @return the fraction of the sun's light reflected toward the eye
+ */
+fn sunSheen(n : Vec3, v : Vec3, sun : Vec3, vis : f64) : f64 {
+    if (!Light::SHEEN_ON || vis <= 0.0) {
+        return 0.0;
+    }
+    let hx : f64 = v.x + sun.x;
+    let hy : f64 = v.y + sun.y;
+    let hz : f64 = v.z + sun.z;
+    let hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
+    if (hl < 0.0001) {
+        return 0.0;
+    }
+    let ndh : f64 = (n.x * hx + n.y * hy + n.z * hz) / hl;
+    if (ndh <= 0.0) {
+        return 0.0;
+    }
+    let lobe : f64 = ndh;
+    for (i of 1..Light::SHEEN_EXP) {
+        lobe = lobe * ndh;
+    }
+    let ndv : f64 = n.dot(v);
+    if (ndv < 0.0) {
+        ndv = 0.0;
+    }
+    let om : f64 = 1.0 - ndv;
+    let om2 : f64 = om * om;
+    return Light::SHEEN_STRENGTH * lobe * vis * (1.0 + Light::SHEEN_GRAZE * om2 * om2 * om);
+}
+
+/**
  * One face corner's light, before it is given a colour: the two baked levels
  * already through the brightness curve, the directional term already shadowed
  * for this corner, and the ambient-occlusion factor.

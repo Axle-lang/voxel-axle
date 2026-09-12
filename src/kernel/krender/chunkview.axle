@@ -18,7 +18,7 @@ use crate::kernel::krender::raster::{ rasterTriTex, columnSpan, RasterVert, Rast
 use crate::kernel::klight::facelight::{ FaceLight };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
-use crate::kernel::klight::cornerlight::{ CornerLight, skyTint };
+use crate::kernel::klight::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::seams::{ CornerProbe, CornerSample };
 use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
@@ -1019,18 +1019,20 @@ class ChunkRenderer {
                 LinRgb { r: self.day.dirTintR, g: self.day.dirTintG, b: self.day.dirTintB },
                 self.bounceTint(smp)));
 
+            // View vector from this corner to the eye. Both reflections want it:
+            // water's sharp glint, and the broad sheen every other surface has.
+            let vx : f64 = cam.eye.x - (cwx as f64);
+            let vy : f64 = cam.eye.y - cornerY;
+            let vz : f64 = cam.eye.z - (cwz as f64);
+            let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
+            if (vl < 0.0001) {
+                vl = 0.0001;
+            }
+            vx = vx / vl;
+            vy = vy / vl;
+            vz = vz / vl;
+
             if (fs.isWater) {
-                // View vector from this corner to the eye.
-                let vx : f64 = cam.eye.x - (cwx as f64);
-                let vy : f64 = cam.eye.y - cornerY;
-                let vz : f64 = cam.eye.z - (cwz as f64);
-                let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
-                if (vl < 0.0001) {
-                    vl = 0.0001;
-                }
-                vx = vx / vl;
-                vy = vy / vl;
-                vz = vz / vl;
                 // Sun glint: half-vector specular, cos^32, gated by sun visibility
                 // and daylight. A strong warm multiplier that bloom turns to gold.
                 let hx : f64 = vx + self.day.sunX;
@@ -1061,6 +1063,17 @@ class ChunkRenderer {
                 cc.r = cc.r * fboost * (1.0 + spec * 1.10);
                 cc.g = cc.g * fboost * (1.0 + spec * 1.00);
                 cc.b = cc.b * fboost * (1.0 + spec * 0.72);
+            } else {
+                // What the ground sends back of the sun. Added in the sun's own
+                // colour rather than multiplied into the texel's, so a surface in
+                // full sun moves toward the light instead of simply becoming more
+                // of itself — which is what stops grass at noon reading as paint.
+                let sh : f64 = sunSheen(fs.normal, vec3(vx, vy, vz),
+                    vec3(self.day.dirX, self.day.dirY, self.day.dirZ), visK)
+                    * self.day.dirStrength;
+                cc.r = cc.r + sh * self.day.dirTintR;
+                cc.g = cc.g + sh * self.day.dirTintG;
+                cc.b = cc.b + sh * self.day.dirTintB;
             }
             Mem::putRealOf(self.ca.r, k, cc.r);
             Mem::putRealOf(self.ca.g, k, cc.g);

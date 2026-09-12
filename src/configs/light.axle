@@ -158,4 +158,34 @@ class Light {
     // canopy, warm by sand/wood). Hue-only (brightness stays the sky-AO's job).
     static BOUNCE_ON : bool = true;
     static BOUNCE_STRENGTH : f64 = 0.5;   // how strongly surrounding colour tints ambient (0 = off)
+
+    // ── The sun's reflection on the ground ─────────────────────
+    // Nothing outdoors is a perfect diffuser. Grass, sand, stone and snow all
+    // send a little of the sun back in the mirror direction, over a lobe far too
+    // broad to be called a highlight — and that wide, weak reflection is most of
+    // what tells the eye a field is UNDER a sun rather than painted the colour of
+    // one. Without it a lit surface can only ever be its own texture times a
+    // number, which is why the ground here read as vivid and flat at the same
+    // time: the greenest thing on screen, with nothing of the sky on it.
+    //
+    // It is ADDED, not multiplied, and that is the point. A multiplier scales a
+    // colour and keeps its saturation; adding the sun's near-white light moves
+    // the surface toward the light's own colour, which is what a real reflection
+    // does and what takes the shrillness out of grass in full sun.
+    static SHEEN_ON : bool = true;
+    // The lobe, as the power the half-vector cosine is raised to. Low on purpose
+    // — this is a rough surface, so the reflection is a broad sheen across the
+    // whole sunward half of the ground and not a spot. A whole number because it
+    // is reached by multiplying, which a lobe this shallow is far cheaper at than
+    // a call to pow, and there are four of these per face.
+    static SHEEN_EXP : i32 = 6;
+    // How much of the sun comes back at the centre of that lobe, as a fraction of
+    // full sunlight. Small: a rough surface reflects a few percent, and above
+    // that the ground starts to look wet.
+    static SHEEN_STRENGTH : f64 = 0.085;
+    // And how much more of it comes back at a grazing view. Every material
+    // reflects more the flatter you look across it — it is why a field goes
+    // silver toward the horizon and why the same field is plain green at your
+    // feet. The exponent is Schlick's fifth power.
+    static SHEEN_GRAZE : f64 = 2.6;
 }
