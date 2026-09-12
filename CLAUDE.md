@@ -90,15 +90,25 @@ concluding something is impossible.
   packages.
 - `atlas.raw` must sit next to the binary or in `target/` (loaded at runtime).
 
-## Build & run
+## Build & run — ALWAYS with `-O 3`
+
+`axle`'s default is `-O 1`: every HIR transform, and **no LLVM pipeline behind
+it**. This game is a software rasteriser, so that default costs it a fifth of
+its frame rate — 51 fps against 60 on the reference capture, for a compiler
+flag. `-O 3` is numerically identical here: `--physics-check` and
+`--light-check` agree to the last digit at both levels.
 
 ```powershell
 axle --version        # 0.12.1+ required
-axle run              # from the project root
-axle run -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
-axle run -- --at 294456 109296   # start at a named column, reproducibly
-axle run -- --snap --at 294456 109296 --look 225 -8   # the same framed image, twice
+axle run -O 3         # from the project root
+axle run -O 3 -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
+axle run -O 3 -- --at 294456 109296   # start at a named column, reproducibly
+axle run -O 3 -- --snap --at 294456 109296 --look 225 -8   # the same framed image, twice
 ```
+
+`--target-cpu native` is **not** accepted (LLVM wants a real name); `znver5`
+measured no better than plain `-O 3`, so the portable build is also the fast
+one.
 
 Two captures are only comparable if `--look` pins the view: without it the
 spawn picks the yaw and the mouse grab moves it.

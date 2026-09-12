@@ -82,7 +82,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 git clone --recurse-submodules <repo-url>   # the platform layer is a submodule
 cd voxel-axle
 axle --version                              # must print 0.12.1 or newer
-axle run                                    # compile and play
+axle run -O 3                               # compile and play
 ```
 
 That is the whole list: a compiler, and this repo. There is no library to
@@ -160,10 +160,16 @@ From this directory, with the submodule initialised and
 `axle --version` reporting 0.12.1+:
 
 ```bash
-axle run                         # compile and play, in one step
-axle build && ./target/voxel     # or in two — on Linux / macOS
-axle build; .\target\voxel.exe   # …and on Windows
+axle run -O 3                         # compile and play, in one step
+axle build -O 3 && ./target/voxel     # or in two — on Linux / macOS
+axle build -O 3; .\target\voxel.exe   # …and on Windows
 ```
+
+**Do not leave off `-O 3`.** The compiler's default is `-O 1`, which runs
+Axle's own transforms and then hands LLVM nothing to do. For a software
+rasteriser that is a fifth of the frame rate — 51 fps against 60 on the
+reference capture. The two levels are numerically identical here: the
+physics and light checks agree to the last digit at both.
 
 The extension follows the machine you are *building on*, not the target
 you are building for: the same `axle build` writes `target/voxel.exe` on
