@@ -76,7 +76,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         let s : i32 = World::CHUNK_SIZE;
         let torchCap : i32 = slots * World::MAX_TORCHES_PER_CHUNK;
         self.faces = FaceMesh {
-            fcount: malloc<i32>(slots),
+            fcount: malloc<i16>(slots),
             fx: malloc<i8>(faceCap), fy: malloc<i8>(faceCap), fz: malloc<i8>(faceCap),
             ftile: malloc<i16>(faceCap),
             frun: malloc<i8>(faceCap),
@@ -85,11 +85,11 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         };
         self.torches = TorchField {
             tx: malloc<i8>(torchCap), ty: malloc<i8>(torchCap), tz: malloc<i8>(torchCap),
-            tcount: malloc<i32>(slots),
+            tcount: malloc<i16>(slots),
         };
         self.cols = ColumnRing {
             cxs: malloc<i32>(slots), czs: malloc<i32>(slots),
-            loaded: malloc<i32>(slots), ctop: malloc<i16>(slots * s * s),
+            loaded: malloc<i8>(slots), ctop: malloc<i16>(slots * s * s),
         };
         self.store = new VoxStore(slots);
         self.gen = malloc<dyn Generator>(1);

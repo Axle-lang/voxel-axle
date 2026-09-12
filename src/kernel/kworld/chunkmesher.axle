@@ -39,7 +39,7 @@ trait Mesher {
 class ChunkMesher : Mesher {
     store : VoxStore,
     leng : LightEngine,
-    fcount : i32[],
+    fcount : i16[],
     fx : i8[],
     fy : i8[],
     fz : i8[],
@@ -62,7 +62,7 @@ class ChunkMesher : Mesher {
     tx : i8[],
     ty : i8[],
     tz : i8[],
-    tcount : i32[],
+    tcount : i16[],
     ctop : i16[],
     lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz);
                      // MUST mirror Renderer.fillTable so baked corner k aligns.
@@ -190,7 +190,7 @@ class ChunkMesher : Mesher {
         self.frun[i] = 1 as i8;
         self.bakeFaceCorners(i, cell, di);
         if (!mergeable) {
-            self.fcount[slot] = fc + 1;
+            self.fcount[slot] = (fc + 1) as i16;
             return;
         }
 
@@ -217,7 +217,7 @@ class ChunkMesher : Mesher {
             self.runU[k] = i;
             self.runUAt[k] = local.x;
         }
-        self.fcount[slot] = fc + 1;
+        self.fcount[slot] = (fc + 1) as i16;
     }
 
     /**
@@ -410,7 +410,7 @@ class ChunkMesher : Mesher {
         self.tx[i] = local.x as i8;
         self.ty[i] = local.y as i8;
         self.tz[i] = local.z as i8;
-        self.tcount[slot] = tc + 1;
+        self.tcount[slot] = (tc + 1) as i16;
     }
 
     /**

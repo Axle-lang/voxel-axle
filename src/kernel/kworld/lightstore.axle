@@ -15,6 +15,7 @@
 
 use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
+use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightTransmit, emissionOf, albedoFor, Emission };
 use crate::kernel::seams::{ LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels };
@@ -36,12 +37,91 @@ use crate::configs::world::{ World };
  */
 const SUN_BAKE_WORKERS : i32 = 8;
 
-/** One entry of the block-light removal stack: a voxel + its old light level. */
+/**
+ * How far the light must have turned since a slot was last baked before that
+ * slot is worth baking again, as the cosine of the angle.
+ *
+ * Half a degree, because of how far a ray reaches: at
+ * `Daylight::SUN_SHADOW_REACH` blocks that moves the far end of a shadow by a
+ * third of a block, so nothing the bake writes can cross a cell between two
+ * measurements it was allowed to skip.
+ *
+ * MEASURED, so the next reader does not expect more of it than it gives: today
+ * this gate almost never fires. A pass costs far more than the eight
+ * milliseconds it sleeps, so the cursor already comes round only about once a
+ * second and the light has always moved further than this by the time a slot
+ * is reached again. What the gate is for is the day the bake gets cheaper —
+ * without it, a faster pass would simply re-measure the same answer more often
+ * and hand back nothing.
+ */
+const SUN_STILL_COS : f64 = 0.999962;
+
+/**
+ * A chunk found once for the four cells of a face corner: which slot holds it,
+ * and where its origin sits in the world, so the four reads can subtract it
+ * rather than divide their way down to it again.
+ *
+ * `slot` is -1 when the corner straddles a chunk border or the chunk is not
+ * loaded, and the origin means nothing then.
+ */
+struct CornerChunk {
+    slot : i32,
+    ox : i32,
+    oz : i32,
+}
+
+/**
+ * The mean of one channel of four packed bounce tints.
+ * @param b0     the corner's own tint
+ * @param b1     one step along the first in-plane axis
+ * @param b2     one step along the second
+ * @param b3     one step along both
+ * @param shift  where the channel sits in the packed word
+ * @return the channel's mean, 0..255
+ */
+fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
+    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
+        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
+}
+
+/**
+ * The mean of the four cells meeting at a face corner.
+ *
+ * The bounce tint averages per channel: packed, its channels would carry each
+ * other's overflow and a corner between a green cell and a red one would come
+ * out neither.
+ * @param s0  the corner's own cell
+ * @param s1  one step along the first in-plane axis
+ * @param s2  one step along the second
+ * @param s3  one step along both
+ * @return the averaged terms
+ */
+fn blend4(s0 : CornerSample, s1 : CornerSample, s2 : CornerSample, s3 : CornerSample) : CornerSample {
+    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+    return CornerSample {
+        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
+        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
+        bounce: r * 65536 + g * 256 + b,
+    };
+}
+
+/**
+ * One entry of the block-light removal stack: a voxel + its old light level.
+ *
+ * At the width the values need. `x` and `z` are world columns and stay whole
+ * words; `y` is a level of the world and a step either side of one, which is
+ * a short; a light level is 0..15, which is a byte. The stack holds
+ * `Light::QUEUE_CAP` of these, so the four bytes that leaves are a quarter of
+ * a megabyte. The x/z pair leads so the short and the byte share the tail
+ * word rather than each taking one.
+ */
 struct LightRemoval {
     x : i32,
-    y : i32,
     z : i32,
-    lvl : i32,
+    y : i16,
+    lvl : i8,
 }
 
 /**
@@ -135,13 +215,18 @@ class LightStore {
     pub(file) vols : LightVolumes, // the 9 per-voxel light volumes
     pub(file) rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
     pub(file) sunCursor : i32,     // round-robin slot index for the throttled shadow refresh
-    pub(file) sunDirty : i32[],    // per-slot "sun shadows never baked here" flag — a slot
+    pub(file) sunDirty : i8[],     // per-slot "sun shadows never baked here" flag — a slot
                                    // carrying it jumps the round-robin queue, so a chunk
                                    // arrives WITH its shadows instead of gaining them a
                                    // second later as the cursor wanders past
+    pub(file) sunBaked : i64,      // per-slot direction of the light at that slot's last
+                                   // sun bake, three f32 a slot. A slot the light has
+                                   // barely moved over since would measure what it already
+                                   // holds, so it is skipped; the all-zero a slot starts
+                                   // with matches nothing, so a fresh slot always bakes
     pub(file) skyAOcursor : i32,   // round-robin slot index for the throttled sky-AO bake
-    pub(file) skyAOdirty : i32[],  // per-slot "sky-access needs (re)baking" flag
-    pub(file) ldirty : i32[],      // per-slot "light changed → re-mesh" flag
+    pub(file) skyAOdirty : i8[],   // per-slot "sky-access needs (re)baking" flag
+    pub(file) ldirty : i8[],       // per-slot "light changed → re-mesh" flag
     pub(file) lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
     pub(file) lqn : i32,           // its depth
     pub(file) rq : LightRemoval[], // block-light removal stack — voxel + its old level
@@ -186,9 +271,10 @@ class LightStore {
             Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
             hi = hi + 1;
         }
-        self.sunDirty = malloc<i32>(slots);
-        self.skyAOdirty = malloc<i32>(slots);
-        self.ldirty = malloc<i32>(slots);
+        self.sunDirty = malloc<i8>(slots);
+        self.sunBaked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
+        self.skyAOdirty = malloc<i8>(slots);
+        self.ldirty = malloc<i8>(slots);
         let lcap : i32 = Light::QUEUE_CAP;
         self.lq = malloc<IVec3>(lcap);
         self.lqn = 0;
@@ -222,7 +308,7 @@ trait LightBaker {
 class LightEngine : LightSample, LightBaker {
     store : VoxStore,             // shared voxel field (aliased from the manager)
     lights : LightStore,          // per-voxel light volumes + flood stacks (owned here)
-    loaded : i32[],               // per-slot loaded flag (aliased)
+    loaded : i8[],                // per-slot loaded flag (aliased)
     cxs : i32[],                  // per-slot chunk x   (aliased)
     czs : i32[],                  // per-slot chunk z   (aliased)
     moment : LightMoment,         // the hour, the clock and the camera column, published
@@ -238,7 +324,7 @@ class LightEngine : LightSample, LightBaker {
      * @param czs     per-slot chunk-z (aliased)
      * @param slots   the number of ring slots (span * span)
      */
-    constructor(own store : VoxStore, loaded : i32[], cxs : i32[], czs : i32[], slots : i32) {
+    constructor(own store : VoxStore, loaded : i8[], cxs : i32[], czs : i32[], slots : i32) {
         self.store = store;
         self.loaded = loaded;
         self.cxs = cxs;
@@ -628,12 +714,14 @@ class LightEngine : LightSample, LightBaker {
         while (self.lights.rqn > 0) {
             self.lights.rqn = self.lights.rqn - 1;
             let entry : LightRemoval = self.lights.rq[self.lights.rqn];
-            self.tryRemoveCh(p, ivec3(entry.x + 1, entry.y, entry.z), entry.lvl);
-            self.tryRemoveCh(p, ivec3(entry.x - 1, entry.y, entry.z), entry.lvl);
-            self.tryRemoveCh(p, ivec3(entry.x, entry.y + 1, entry.z), entry.lvl);
-            self.tryRemoveCh(p, ivec3(entry.x, entry.y - 1, entry.z), entry.lvl);
-            self.tryRemoveCh(p, ivec3(entry.x, entry.y, entry.z + 1), entry.lvl);
-            self.tryRemoveCh(p, ivec3(entry.x, entry.y, entry.z - 1), entry.lvl);
+            let ey : i32 = entry.y as i32;
+            let lvl : i32 = entry.lvl as i32;
+            self.tryRemoveCh(p, ivec3(entry.x + 1, ey, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x - 1, ey, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey + 1, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey - 1, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey, entry.z + 1), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey, entry.z - 1), lvl);
         }
     }
 
@@ -651,7 +739,9 @@ class LightEngine : LightSample, LightBaker {
         if (self.lights.rqn >= Light::QUEUE_CAP) {
             return;
         }
-        self.lights.rq[self.lights.rqn] = LightRemoval { x: cell.x, y: cell.y, z: cell.z, lvl: lvl };
+        self.lights.rq[self.lights.rqn] = LightRemoval {
+            x: cell.x, z: cell.z, y: cell.y as i16, lvl: lvl as i8
+        };
         self.lights.rqn = self.lights.rqn + 1;
     }
 
@@ -830,11 +920,22 @@ class LightEngine : LightSample, LightBaker {
      * @return the surviving fraction of sunlight, 0..1
      */
     fn sunRayTransmit(self, cell : IVec3, dir : Vec3, ceil : i32) : f64 {
+        let s : i32 = World::CHUNK_SIZE;
         let ox : f64 = (cell.x as f64) + 0.5;
         let oy : f64 = (cell.y as f64) + 0.5;
         let oz : f64 = (cell.z as f64) + 0.5;
         let through : f64 = 1.0;
         let t : f64 = 0.5;
+        // The chunk the last step landed in, and what it took to find it. A step
+        // is six tenths of a block and a chunk is sixteen across, so twenty-odd
+        // consecutive steps share a chunk: asking the ring which slot holds it
+        // once per chunk instead of once per step is the same answer, found far
+        // less often. An impossible column to start, so the first step resolves.
+        let ccx : i32 = 0 - 1000000;
+        let ccz : i32 = 0 - 1000000;
+        let cslot : i32 = 0;
+        let cowns : bool = false;
+        let ctop : i32 = 0;
         while (t < Daylight::SUN_SHADOW_REACH) {
             let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
@@ -843,11 +944,26 @@ class LightEngine : LightSample, LightBaker {
             if (cy >= 0 && cy < World::HEIGHT) {
                 let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
                 let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
-                let tr : f64 = lightTransmit(self.worldGet(ivec3(cx, cy, cz)));
-                if (tr < 1.0) {
-                    through = through * tr;
-                    if (through < 0.02) {
-                        return 0.0;
+                let bx : i32 = self.floorDiv(cx, s);
+                let bz : i32 = self.floorDiv(cz, s);
+                if (bx != ccx || bz != ccz) {
+                    ccx = bx;
+                    ccz = bz;
+                    cslot = self.slotFor(bx, bz);
+                    cowns = self.owns(cslot, bx, bz);
+                    ctop = self.store.maxFY[cslot];
+                }
+                // A chunk the ring does not hold reads as air, and so does
+                // everything above a chunk's own watermark — nothing solid was
+                // ever written up there. Air passes the whole ray, so neither
+                // case is worth a fetch.
+                if (cowns && cy <= ctop) {
+                    let tr : f64 = lightTransmit(self.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s)));
+                    if (tr < 1.0) {
+                        through = through * tr;
+                        if (through < 0.02) {
+                            return 0.0;
+                        }
                     }
                 }
             }
@@ -991,6 +1107,7 @@ class LightEngine : LightSample, LightBaker {
      * @param snap  write the measurement outright rather than gliding toward it
      */
     fn computeChunkSun(mut self, slot : i32, cx : i32, cz : i32, sun : Vec3, ceil : i32, snap : bool) : void {
+        self.markSunBaked(slot, sun);
         let s : i32 = World::CHUNK_SIZE;
         let top : i32 = self.store.maxFY[slot] + 1;
         if (top > World::HEIGHT - 1) {
@@ -1022,6 +1139,37 @@ class LightEngine : LightSample, LightBaker {
             }
             lz = lz + 1;
         }
+    }
+
+    /**
+     * Record the direction this slot was just baked under.
+     * @param slot  the slot index
+     * @param sun   the light direction the bake used (unit)
+     */
+    fn markSunBaked(mut self, slot : i32, sun : Vec3) : void {
+        let o : i64 = (slot as i64) * 3;
+        putFloatOf(self.lights.sunBaked, o, sun.x);
+        putFloatOf(self.lights.sunBaked, o + 1, sun.y);
+        putFloatOf(self.lights.sunBaked, o + 2, sun.z);
+    }
+
+    /**
+     * Whether the light has turned far enough since this slot's last bake for a
+     * fresh one to be able to land anywhere else.
+     *
+     * Both directions are unit, so their dot product is the cosine of the angle
+     * between them, and a slot that has never been baked holds the zero vector —
+     * a dot of zero, which no threshold passes.
+     * @param slot  the slot index
+     * @param sun   the light direction now (unit)
+     * @return true when the slot is worth baking again
+     */
+    fn sunMovedFor(self, slot : i32, sun : Vec3) : bool {
+        let o : i64 = (slot as i64) * 3;
+        let dot : f64 = floatOf(self.lights.sunBaked, o) * sun.x
+            + floatOf(self.lights.sunBaked, o + 1) * sun.y
+            + floatOf(self.lights.sunBaked, o + 2) * sun.z;
+        return dot < SUN_STILL_COS;
     }
 
     /**
@@ -1072,7 +1220,7 @@ class LightEngine : LightSample, LightBaker {
      * @param flags  the per-slot flag array
      * @return the number of loaded slots flagged
      */
-    fn dirtyCount(self, flags : i32[]) : i32 {
+    fn dirtyCount(self, flags : i8[]) : i32 {
         let n : i32 = 0;
         let j : i32 = 0;
         while (j < World::SPAN * World::SPAN) {
@@ -1178,7 +1326,7 @@ class LightEngine : LightSample, LightBaker {
                 self.lights.sunCursor = 0;
             }
             guard = guard + 1;
-            if (self.loaded[slot] == 1) {
+            if (self.loaded[slot] == 1 && self.sunMovedFor(slot, sun)) {
                 self.computeChunkSun(slot, self.cxs[slot], self.czs[slot], sun, ceil, false);
                 done = done + 1;
             }
@@ -1227,7 +1375,22 @@ class LightEngine : LightSample, LightBaker {
         if (!self.owns(slot, cx, cz)) {
             return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
         }
-        let off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return self.cellIn(slot, cell.x - cx * s, cell.y, cell.z - cz * s);
+    }
+
+    /**
+     * The same three volumes at a cell whose chunk is already known.
+     * @param slot  the slot that owns the cell
+     * @param lx    local x inside that chunk
+     * @param y     the world y
+     * @param lz    local z inside that chunk
+     * @return the three terms at that cell
+     */
+    fn cellIn(self, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
+        if (y < 0 || y >= World::HEIGHT) {
+            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+        }
+        let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
         return CornerSample {
             sun: Mem::byteAt(self.lights.vols.sunlit, off),
             sky: Mem::byteAt(self.lights.vols.skyaccess, off),
@@ -1235,6 +1398,33 @@ class LightEngine : LightSample, LightBaker {
                 | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
                 | Mem::byteAt(self.lights.vols.bnB, off),
         };
+    }
+
+    /**
+     * The chunk all four cells of a corner sit in, and where its origin is.
+     *
+     * The two in-plane steps are along different axes, so no axis has two
+     * contributors and the four cells' spread on each axis is exactly the gap
+     * between the near corner and the far one. If those two land in the same
+     * chunk, so does everything between them.
+     * @param b   the corner's own cell
+     * @param c3  the diagonal cell, one step along each axis
+     * @return the shared chunk, its slot -1 if the corner straddles a border or
+     *         the chunk is not loaded
+     */
+    fn cornerSlot(self, b : IVec3, c3 : IVec3) : CornerChunk {
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(b.x, s);
+        let cz : i32 = self.floorDiv(b.z, s);
+        let miss : CornerChunk = CornerChunk { slot: 0 - 1, ox: 0, oz: 0 };
+        if (cx != self.floorDiv(c3.x, s) || cz != self.floorDiv(c3.z, s)) {
+            return miss;
+        }
+        let slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return miss;
+        }
+        return CornerChunk { slot: slot, ox: cx * s, oz: cz * s };
     }
 
     /**
@@ -1251,18 +1441,23 @@ class LightEngine : LightSample, LightBaker {
         let b : IVec3 = probe.base;
         let t1 : IVec3 = probe.t1;
         let t2 : IVec3 = probe.t2;
-        let s0 : CornerSample = self.cellSample(b);
-        let s1 : CornerSample = self.cellSample(ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z));
-        let s2 : CornerSample = self.cellSample(ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z));
-        let s3 : CornerSample = self.cellSample(ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z));
-        let r : i32 = (((s0.bounce >> 16) & 0xFF) + ((s1.bounce >> 16) & 0xFF) + ((s2.bounce >> 16) & 0xFF) + ((s3.bounce >> 16) & 0xFF)) / 4;
-        let g : i32 = (((s0.bounce >> 8) & 0xFF) + ((s1.bounce >> 8) & 0xFF) + ((s2.bounce >> 8) & 0xFF) + ((s3.bounce >> 8) & 0xFF)) / 4;
-        let bl : i32 = ((s0.bounce & 0xFF) + (s1.bounce & 0xFF) + (s2.bounce & 0xFF) + (s3.bounce & 0xFF)) / 4;
-        return CornerSample {
-            sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
-            sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
-            bounce: r * 65536 + g * 256 + bl,
-        };
+        let c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
+        let c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
+        let c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+        // Four cells one step apart are in one chunk unless the corner sits on
+        // a border, and this is read at every corner of every quad in the
+        // frame. Finding the chunk once, where they share it, is the same four
+        // reads without four walks down the ring to reach them.
+        let cc : CornerChunk = self.cornerSlot(b, c3);
+        if (cc.slot < 0) {
+            return blend4(self.cellSample(b), self.cellSample(c1),
+                self.cellSample(c2), self.cellSample(c3));
+        }
+        return blend4(
+            self.cellIn(cc.slot, b.x - cc.ox, b.y, b.z - cc.oz),
+            self.cellIn(cc.slot, c1.x - cc.ox, c1.y, c1.z - cc.oz),
+            self.cellIn(cc.slot, c2.x - cc.ox, c2.y, c2.z - cc.oz),
+            self.cellIn(cc.slot, c3.x - cc.ox, c3.y, c3.z - cc.oz));
     }
 
     /**

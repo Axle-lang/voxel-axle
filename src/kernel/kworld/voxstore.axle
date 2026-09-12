@@ -25,7 +25,8 @@ use crate::configs::world::{ World };
 class VoxStore {
     vox : Block[],            // block field: slots × chunkSize² × worldHeight
     lvl : i8[],               // per-voxel LEVEL, same layout; 0 = the id's default box
-    pub(crate) maxFY : i32[], // per-slot highest-face Y watermark (bounds the mesh/light scan)
+    pub(crate) maxFY : i16[], // per-slot highest-face Y watermark (bounds the mesh/light
+                              // scan) — a level of the world, so under World::HEIGHT
 
     /**
      * Allocate the voxel field, its level field and the per-slot face-Y
@@ -43,7 +44,7 @@ class VoxStore {
         let s : i32 = World::CHUNK_SIZE;
         self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
         self.lvl = malloc<i8>(slots * s * s * World::HEIGHT);
-        self.maxFY = malloc<i32>(slots);
+        self.maxFY = malloc<i16>(slots);
     }
 
     /**
@@ -148,8 +149,8 @@ class VoxStore {
      * @param y     the candidate Y
      */
     pub(crate) fn bumpFY(mut self, slot : i32, y : i32) : void {
-        if (y > self.maxFY[slot]) {
-            self.maxFY[slot] = y;
+        if (y > (self.maxFY[slot] as i32)) {
+            self.maxFY[slot] = y as i16;
         }
     }
 }

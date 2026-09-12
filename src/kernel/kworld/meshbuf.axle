@@ -11,7 +11,7 @@
  * field, not seven.
  */
 struct FaceMesh {
-    pub(crate) fcount : i32[], // face count per slot
+    pub(crate) fcount : i16[], // face count per slot — under MAX_FACES_PER_CHUNK
     pub(crate) fx : i8[],      // the face's cell, CHUNK-LOCAL x/z (0..15) and world y:
     pub(crate) fy : i8[],      // a byte each. The slot's origin is what makes it a
     pub(crate) fz : i8[],      // world cell, and every reader has the slot to hand
@@ -32,13 +32,13 @@ struct TorchField {
     pub(crate) tx : i8[],      // torch cell, CHUNK-LOCAL x/z and world y — the
     pub(crate) ty : i8[],      // slot's origin is the renderer's to add, as for
     pub(crate) tz : i8[],      // the faces
-    pub(crate) tcount : i32[], // torch count per slot
+    pub(crate) tcount : i16[], // torch count per slot — under MAX_TORCHES_PER_CHUNK
 }
 
 /** The chunk ring's per-slot ownership: chunk coords, loaded flag, collision top. */
 struct ColumnRing {
     pub(crate) cxs : i32[],
     pub(crate) czs : i32[],
-    pub(crate) loaded : i32[],
+    pub(crate) loaded : i8[],
     pub(crate) ctop : i16[],    // per-column highest collidable voxel + 1 (entity physics)
 }
