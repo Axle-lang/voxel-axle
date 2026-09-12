@@ -17,6 +17,7 @@
 //   --torch                stand a torch on the ground ahead of the spawn
 //   --physics-check        run the headless physics assertions and exit
 //   --light-check          run the headless coloured-light assertions and exit
+//   --biome-scan           count the biome of a wide grid of columns and exit
 //
 // A reader per flag, each answering with a value rather than setting
 // state, so `main` reads the command line once at the top and never

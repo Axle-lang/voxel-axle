@@ -34,6 +34,7 @@ use crate::kernel::kworld::blocksim::BlockSim;
 use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
+use crate::game::biomecheck::runBiomeScan;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::controls::{ readIntent, applyLook, readHotbar, readGameMode, Intent };
 use crate::game::stepaudio::{ StepTimers, stepAudio };
@@ -88,6 +89,13 @@ fn main() : i32 {
     // nothing about the shape of the flood underneath it.
     if (hasFlag("--light-check")) {
         return runLightCheck();
+    }
+    // `--biome-scan` counts the biome of every column on a wide grid and
+    // prints the tally. Headless, and the only honest way to tune a biome
+    // RATE: an impression formed from wherever the last screenshot landed is
+    // how a world ends up mostly one thing.
+    if (hasFlag("--biome-scan")) {
+        return runBiomeScan();
     }
     try {
         return run();

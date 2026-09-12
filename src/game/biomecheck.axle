@@ -1,0 +1,114 @@
+// biomecheck — what the world is actually made of, as a count.
+//
+// A biome rate is a number, and until this existed it was an impression formed
+// from wherever the last screenshot happened to land. Tuning a threshold by
+// impression is how a world ends up mostly one thing: the change looks right in
+// the two valleys you looked at and is wrong everywhere else.
+//
+// Headless, like the physics and light checks, and for the same reason — it
+// samples a grid of columns through the REAL generator, so the number it prints
+// is the world the game builds and not a model of it.
+
+use crate::game::world::biomes::{biomeAt};
+use crate::kernel::kworld::noise::{terrainHeight, temperature, humidity};
+use crate::configs::biomes::{BiomeId};
+
+/** Columns sampled along each axis; the scan is this squared. */
+const SCAN_SIDE : i32 = 240;
+
+/** Blocks between samples — wide enough that neighbours are different regions. */
+const SCAN_STEP : i32 = 97;
+
+/** Biome variants, so the tally array covers every one. */
+const BIOME_COUNT : i32 = 17;
+
+/**
+ * The name of the biome with this discriminant.
+ *
+ * Indexed by the number rather than the enum because Axle casts an enum TO an
+ * integer and not back, and the tally has to be an array.
+ * @param i  the discriminant, 0..BIOME_COUNT
+ * @return its name
+ */
+fn biomeName(i : i32) : string {
+    return match i {
+        0 => "Ocean",
+        1 => "Beach",
+        2 => "Plains",
+        3 => "Forest",
+        4 => "Desert",
+        5 => "Savanna",
+        6 => "Snowy",
+        7 => "Mountain",
+        8 => "Taiga",
+        9 => "Jungle",
+        10 => "Swamp",
+        11 => "Badlands",
+        12 => "BirchForest",
+        13 => "FrozenOcean",
+        14 => "BambooJungle",
+        15 => "CherryGrove",
+        _ => "MushroomFields",
+    };
+}
+
+/**
+ * Count the biome of every column on a wide grid and print the tally.
+ *
+ * The grid is deliberately coarse and wide rather than dense and local: what a
+ * rate means is how much of the WORLD is a thing, and a dense patch answers
+ * only for the patch.
+ * @return 0, so it can be run as a check
+ */
+fn runBiomeScan() : i32 {
+    let tally : i32[] = malloc<i32>(BIOME_COUNT);
+    // One column per biome, so a rate that reads wrong can be gone and looked at.
+    let atX : i32[] = malloc<i32>(BIOME_COUNT);
+    let atZ : i32[] = malloc<i32>(BIOME_COUNT);
+    for (i of 0..BIOME_COUNT) {
+        tally[i] = 0;
+        atX[i] = 0;
+        atZ[i] = 0;
+    }
+    let land : i32 = 0;
+    let total : i32 = 0;
+    let half : i32 = SCAN_SIDE / 2;
+    let iz : i32 = 0 - half;
+    while (iz < half) {
+        let ix : i32 = 0 - half;
+        while (ix < half) {
+            let wx : f64 = (ix * SCAN_STEP) as f64;
+            let wz : f64 = (iz * SCAN_STEP) as f64;
+            let h : i32 = terrainHeight(wx, wz).floorToInt() as i32;
+            let b : BiomeId = biomeAt(temperature(wx, wz), humidity(wx, wz), h);
+            if (tally[b as i32] == 0) {
+                atX[b as i32] = ix * SCAN_STEP;
+                atZ[b as i32] = iz * SCAN_STEP;
+            }
+            tally[b as i32] = tally[b as i32] + 1;
+            total = total + 1;
+            if (b != BiomeId::Ocean && b != BiomeId::FrozenOcean) {
+                land = land + 1;
+            }
+            ix = ix + 1;
+        }
+        iz = iz + 1;
+    }
+    Console::println("biome scan: ${total} columns, ${SCAN_STEP} blocks apart");
+    let i : i32 = 0;
+    while (i < BIOME_COUNT) {
+        if (tally[i] > 0) {
+            let pct : f64 = (tally[i] as f64) * 100.0 / (total as f64);
+            let ofLand : f64 = 0.0;
+            if (land > 0) {
+                ofLand = (tally[i] as f64) * 100.0 / (land as f64);
+            }
+            Console::println("  ${biomeName(i)}: ${tally[i]}"
+                + "  (${(pct * 10.0).round() / 10.0}% of all,"
+                + " ${(ofLand * 10.0).round() / 10.0}% of land)"
+                + "  --at ${atX[i]} ${atZ[i]}");
+        }
+        i = i + 1;
+    }
+    return 0;
+}
