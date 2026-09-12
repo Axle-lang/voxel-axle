@@ -155,16 +155,20 @@ fn biomeAt(temp : f64, humid : f64, height : i32) : BiomeId {
     if (height >= World::SEA_LEVEL + 34) {
         return BiomeId::Mountain;
     }
-    // Cool the climate with altitude: higher ground trends toward taiga / snow
-    // even in a warm region, so foothills and uplands read coherently.
+    // Cool the climate with altitude, so foothills and uplands read a little
+    // colder than the plain below them.
     let t : f64 = temp - ((height - World::SEA_LEVEL) as f64) * Noise::ALTITUDE_COOLING;
     if (t < 0.0) {
         t = 0.0;
     }
-    if (t < 0.25) {
+    // The cold band is narrow on purpose. Temperature clusters near the middle of
+    // its range, so a threshold reads far wider than its number suggests: the old
+    // 0.25 / 0.40 pair claimed 47 % of the land for snow and taiga. Snow is meant
+    // to be somewhere you travel to.
+    if (t < 0.12) {
         return BiomeId::Snowy;
     }
-    if (t < 0.40) {
+    if (t < 0.30) {
         return BiomeId::Taiga;
     }
     if (t > 0.75 && humid < 0.30) {

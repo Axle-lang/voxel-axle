@@ -16,9 +16,13 @@ class Noise {
     static TEMP_SCALE : f64 = 0.0013;
     static HUMID_SCALE : f64 = 0.0018;
     // Land vs ocean split on continentalness, and how fast terrain cools with
-    // altitude (so high ground turns to taiga / snow / bare peaks).
+    // altitude. A nudge, not a verdict: at 0.0065 a 34-block hill removed 0.22 of
+    // temperature, which was enough to turn any upland cold whatever its latitude
+    // — snow and taiga together held half the land while desert and jungle never
+    // cleared 1 %. At this rate the same hill loses 0.05, so relief tilts a column
+    // toward its colder neighbour without overruling the climate it sits in.
     static OCEAN_LEVEL : f64 = 0.34;
-    static ALTITUDE_COOLING : f64 = 0.0065;
+    static ALTITUDE_COOLING : f64 = 0.0015;
 
     // ── Erosion + peaks/valleys (Minecraft 1.21-style terrain shaping) ──
     // erosion: low = rugged/mountainous (tall, jagged), high = flat/eroded
