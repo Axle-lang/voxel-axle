@@ -15,11 +15,11 @@ use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialS
 /**
  * Cells a greedy run may span.
  *
- * Not unbounded: the per-corner soft sun shadow is sampled at render time
- * at the quad's corners, because the sun moves and the mesh does not, so
- * a merged quad interpolates that shadow rather than sampling it per
- * block. Eight cells is where the error stays inside what a soft shadow
- * already blurs.
+ * Not unbounded, because the sun moves and the mesh does not: the soft cast
+ * shadow is sampled at RENDER time, at whatever quad is actually drawn. The
+ * renderer cuts a run wherever the shadow varies along it, so the bound here is
+ * about the mesh alone — how long a face may be before the merge stops paying,
+ * and how much surface one entry in the baked light arrays may stand for.
  */
 const MESH_MAX_RUN : i32 = 8;
 use crate::kernel::kworld::voxstore::VoxStore;
@@ -227,10 +227,10 @@ class ChunkMesher : Mesher {
      * 103k merge candidates into 74k — a quarter of the opportunity, for
      * all of the lighting.
      *
-     * The run is also capped. The per-corner soft sun shadow is sampled at
-     * RENDER time, at the quad's corners, because the sun moves; across a
-     * merged quad it is interpolated rather than sampled per block. Eight
-     * cells keeps that error to something a soft shadow can absorb.
+     * The run is also capped at `MESH_MAX_RUN`, which is the most surface one
+     * entry in the baked light arrays is allowed to stand for. The cast shadow
+     * is not what caps it — that is sampled at render time, against the sun of
+     * the moment, and the renderer cuts the run again wherever it varies.
      *
      * @param a  the run head
      * @param b  the candidate
@@ -416,8 +416,6 @@ class ChunkMesher : Mesher {
      * @param nlx   neighbour local x
      * @param nly   neighbour local/world y
      * @param nlz   neighbour local z
-     * @param nwx   neighbour world x (for its box height)
-     * @param nwz   neighbour world z (for its box height)
      * @param myH   this block's box height
      * @return whether to emit the side wall toward the neighbour
      */

@@ -6,6 +6,11 @@
 
 use smalt::Color;
 use smalt::{Frame, Rect};
+use crate::kernel::krender::uiscale::{ UiScale };
+
+/** The heart sprite's grid: 9 by 9 mask cells, each 2 overlay pixels square. */
+const HEART_CELLS : i32 = 9;
+const HEART_PX : i32 = 2;
 
 /**
  * 9×9 heart, one digit per pixel: 0 empty, 1 outline, 3 body, 4 highlight
@@ -14,14 +19,6 @@ use smalt::{Frame, Rect};
  */
 fn heartMask() : string {
     return "011000110144101331144313331133333331133333331013333310001333100000131000000010000";
-}
-
-/**
- * Pixel scale of a heart sprite.
- * @return the pixel scale.
- */
-fn heartScale() : i32 {
-    return 2;
 }
 
 /**
@@ -54,25 +51,33 @@ fn heartColor(code : i32, filled : bool) : i32 {
  * Draw one heart at (x, y). `fill`: 0 empty, 1 half (left side red), 2
  * full. The grey container is always drawn first, then the red overlay for
  * the filled portion.
- * @param f      the frame to draw into.
+ *
+ * Each mask cell is placed by its two EDGES rather than by an origin and a
+ * size, so a fractional overlay scale still tiles: a cell starts exactly where
+ * its neighbour ended, and the rounding that would otherwise open a seam or
+ * double a row lands on the shared edge instead.
+ * @param f     the frame to draw into.
  * @param x     heart left.
  * @param y     heart top.
  * @param fill  fill level: 0 empty, 1 half, 2 full.
+ * @param ui    the overlay scale.
  */
-fn drawHeart(f : Frame, x : i32, y : i32, fill : i32) : void {
-    let scale : i32 = heartScale();
+fn drawHeart(f : Frame, x : i32, y : i32, fill : i32, ui : UiScale) : void {
     let mask : string = heartMask();
     let r : i32 = 0;
-    while (r < 9) {
+    while (r < HEART_CELLS) {
+        let y0 : i32 = y + ui.px(r * HEART_PX);
+        let y1 : i32 = y + ui.px((r + 1) * HEART_PX);
         let c : i32 = 0;
-        while (c < 9) {
-            let code : i32 = mask.byteAt(r * 9 + c) - 48;
+        while (c < HEART_CELLS) {
+            let code : i32 = mask.byteAt(r * HEART_CELLS + c) - 48;
             if (code != 0) {
-                let px : i32 = x + c * scale;
-                let py : i32 = y + r * scale;
-                f.fillRect(Rect::make(px, py, scale, scale), heartColor(code, false));
+                let x0 : i32 = x + ui.px(c * HEART_PX);
+                let x1 : i32 = x + ui.px((c + 1) * HEART_PX);
+                let box : Rect = Rect::make(x0, y0, x1 - x0, y1 - y0);
+                f.fillRect(box, heartColor(code, false));
                 if (fill == 2 || (fill == 1 && c <= 4)) {
-                    f.fillRect(Rect::make(px, py, scale, scale), heartColor(code, true));
+                    f.fillRect(box, heartColor(code, true));
                 }
             }
             c = c + 1;
@@ -88,11 +93,11 @@ fn drawHeart(f : Frame, x : i32, y : i32, fill : i32) : void {
  * @param y0     row top.
  * @param hp     current health.
  * @param maxHp  maximum health.
+ * @param ui     the overlay scale.
  */
-fn drawHealth(f : Frame, x0 : i32, y0 : i32, hp : i32, maxHp : i32) : void {
-    let scale : i32 = heartScale();
+fn drawHealth(f : Frame, x0 : i32, y0 : i32, hp : i32, maxHp : i32, ui : UiScale) : void {
     let hearts : i32 = maxHp / 2;
-    let step : i32 = 9 * scale + 1;
+    let step : i32 = ui.px(HEART_CELLS * HEART_PX + 1);
     let i : i32 = 0;
     while (i < hearts) {
         let fill : i32 = 0;
@@ -101,15 +106,16 @@ fn drawHealth(f : Frame, x0 : i32, y0 : i32, hp : i32, maxHp : i32) : void {
         } else if (hp >= i * 2 + 1) {
             fill = 1;
         }
-        drawHeart(f, x0 + i * step, y0, fill);
+        drawHeart(f, x0 + i * step, y0, fill, ui);
         i = i + 1;
     }
 }
 
 /**
- * Pixel height of the heart row (for HUD layout).
- * @return the heart row height in pixels.
+ * Framebuffer height of the heart row at this overlay scale (for HUD layout).
+ * @param ui  the overlay scale
+ * @return the heart row height in framebuffer pixels.
  */
-fn healthHeight() : i32 {
-    return 9 * heartScale();
+fn healthHeight(ui : UiScale) : i32 {
+    return ui.px(HEART_CELLS * HEART_PX);
 }

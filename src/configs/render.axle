@@ -1,50 +1,22 @@
-// configs::render — draw distance, sky / distance fog and the directional light.
+// configs::render — draw distance, the sky backdrop, the fog and the post passes.
+//
+// What the frame DRAWS. How bright anything is belongs to `configs::light`, which
+// is the light engine's one set of numbers — this file used to carry half of them,
+// and "which file is the ambient in" is not a question a tuning pass should have
+// to answer.
 //
 // Far faces fade to the sky colour so the distance dissolves softly
 // (Minecraft-style) instead of shimmering as a mush of aliased texels at the
 // render edge. Fog runs from `Render::FOG_START` to `Render::FOG_END` blocks of depth.
 
-/** Draw distance, sky and fog, the directional light, and the post passes. */
+/** Draw distance, the sky backdrop, the fog and the post passes. */
 class Render {
-    static DRAW_DIST : f64 = 92.0;
-    static SKY_R : i32 = 150;
-    static SKY_G : i32 = 198;
-    static SKY_B : i32 = 240;
-    static FOG_START : f64 = 66.0;
-    static FOG_END : f64 = 90.0;
-
-    // ── Colour pipeline ─────────────────────────────────────────
-    // The world pass decodes texels to linear light, lights them there, and
-    // encodes the result through a tone curve (`krender::gamma`). The curve is
-    // the IDENTITY below `Render::TONE_KNEE` — so a fully lit surface still
-    // renders as the byte its texture was painted with — and rolls the excess
-    // off toward white above it, which is what lets a torch add onto sunlight
-    // without flattening into a white blob. `Render::TONE_MAX` is the brightest
-    // light the encode table resolves, over `Render::TONE_STEPS` entries.
-    static TONE_KNEE : f64 = 0.75;
-    static TONE_MAX : f64 = 4.0;
-    static TONE_STEPS : i32 = 32768;
-
-    // ── Directional light ───────────────────────────────────────
-    static LIGHT_X : f64 = 0.35;
-    static LIGHT_Y : f64 = 0.86;
-    static LIGHT_Z : f64 = 0.37;
-    // Both of these are LINEAR light factors, and that is why they read low. A
-    // factor applied to linear light and then encoded to sRGB lands far higher
-    // than the same number applied to the display bytes: 0.20 of the light is
-    // about 0.48 of the pixel. Set them by the darkness you want to SEE, not by
-    // the number that used to produce it.
-    static AMBIENT : f64 = 0.11;  // lower = darker shadow side / cast shadows (more contrast)
-    // Fraction of the direct-sun term a cast-shadowed face keeps (0 = flat ambient /
-    // fully aggressive, 1 = no shadow). Higher = softer / less aggressive shadows.
-    static SHADOW_KEEP : f64 = 0.05;
-    // How much light the sun itself carries, over the ambient floor. Above 1 on
-    // purpose: a sunlit surface then lands past `Render::TONE_KNEE` and rolls off
-    // through the tone map's shoulder instead of stopping at the texture's own
-    // brightness, which is what makes the lit half read as SUNLIT rather than
-    // merely visible — and what makes a shadow read as dark, since the two are
-    // judged against each other and only their ratio is seen.
-    static SUN_STRENGTH : f64 = 1.70;
+    static DRAW_DIST : f64 = 118.0;
+    // How far the air stays clear, as the distance at which extinction has taken
+    // about a third of the view. There is no START any more: a fog that begins
+    // at a distance draws a ring on the ground, and real extinction has no
+    // beginning — it is already happening at one block, just not enough to see.
+    static FOG_SCALE : f64 = 78.0;
 
     // ── Atmospheric sky ─────────────────────────────────────────
     // The flat sky clear is replaced by a per-pixel gradient: a deeper zenith, a
@@ -61,6 +33,7 @@ class Render {
     static SKY_HALO_STRENGTH : f64 = 0.40; // broad halo intensity (applied to cos⁶ around the sun)
     static SKY_CORE_THRESH : f64 = 0.9992; // cos(view,sun) above this = the tight bright core (higher = smaller)
     static SKY_CORE_STRENGTH : f64 = 0.28; // brightness of that tight core (lower = less white-out when facing the sun)
+    static SKY_SHOULDER : f64 = 205.0;     // where the sky's highlight roll-off starts, of 255 (below it, untouched)
 
     // ── Volumetric god-rays (crepuscular light shafts) ──────────
     // A screen-space radial scatter from the sun's projected position: each pixel
@@ -88,18 +61,15 @@ class Render {
     static BLOOM_RADIUS : i32 = 5;        // half-res blur radius (larger = wider glow)
     static BLOOM_ITERS : i32 = 2;         // separable blur passes (smoother glow)
 
-    // Worker threads for the full-screen post passes (sky gradient, god-rays,
-    // bloom): each is split into this many horizontal row bands (disjoint output →
-    // race-free), spawned per frame and joined. 1 = single-threaded.
-    static POST_THREADS : i32 = 4;
-
-    // Tiled world rasteriser: the world pass queues up to `Render::TRI_QUEUE_CAP` triangles,
-    // then `Render::RASTER_TILES` worker threads each fill a vertical screen-column band (so
-    // the z-buffer regions are disjoint — race-free). Excess triangles past the cap
-    // are dropped (logged once). Bands split the WIDTH, post passes split the HEIGHT.
-    // PER WORKER: the world raster runs `BUILD_WORKERS` independent queues,
-    // so the whole-frame budget is this times that. 88k triangles over six
-    // workers averages 15k each, and the stride keeps the shares even.
+    // Triangles the world pass may queue PER WORKER before it starts dropping
+    // them (logged once). The raster runs `BUILD_WORKERS` independent queues, so
+    // the whole-frame budget is this times that: 88k triangles over six workers
+    // averages 15k each, and the stride keeps the shares even.
+    //
+    // The band and worker COUNTS are not here, and cannot be: each is the size of
+    // a `Task` array, and an array size has to be an integer literal. They live
+    // beside those arrays as `BUILD_WORKERS` / `RASTER_BANDS` in `krender::render`.
+    // A constant here that nothing could read was worse than no constant — the two
+    // that used to sit here said 4 and 12 while the code ran 8 and 12.
     static TRI_QUEUE_CAP : i32 = 48000;
-    static RASTER_TILES : i32 = 12;
 }

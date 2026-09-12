@@ -16,9 +16,11 @@
 use smalt::Mem;
 use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
-use crate::kernel::krender::sky::{ DayState };
-use crate::kernel::krender::raster::{rasterTriTex, rasterTri, shadeLambert, sunExposure, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected};
-use crate::kernel::krender::gamma::{ Gamma, LinRgb };
+use crate::kernel::klight::daymodel::{ DayState };
+use crate::kernel::krender::raster::{ rasterTriTex, rasterTri, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected };
+use crate::kernel::klight::facelight::{ sunExposure };
+use crate::kernel::klight::gamma::{ Gamma, LinRgb };
+use crate::kernel::ksky::atmosphere::{ FogTable };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kentity::mobs::MobManager;
@@ -39,9 +41,9 @@ use crate::configs::screen::{ Screen };
 struct MobScene {
     atlas : MipAtlas,
     gam : Gamma,
-    fog : Rgb,
+    fogT : FogTable,
     ds : DayState,
-    hw : f64,
+    lens : Lens,
 }
 
 /** One box face's surface: flat fill colour, atlas tile (<0 = flat), hurt tint. */
@@ -126,7 +128,7 @@ class MobView {
      * @return the mob face's light factor
      */
     fn shadeMob(self, nx : f64, ny : f64, nz : f64, ds : DayState) : f64 {
-        return sunExposure(shadeLambert(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ)), 1.0);
+        return sunExposure(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
     }
 
     /**
@@ -141,7 +143,7 @@ class MobView {
      * @param d      world-space corner d
      * @param n      face normal (for backface cull + Lambert shading)
      * @param mat    the face surface (colour / tile / hurt)
-     * @param scene  the per-frame mob context (atlas, fog, day-state, hw)
+     * @param scene  the per-frame mob context (atlas, fog, day-state, lens)
      */
     pub(crate) fn drawQuad(mut self, p : Player, fb : FrameBuf, a : Vec3, b : Vec3, c : Vec3, d : Vec3, n : Vec3, mat : Material, scene : MobScene) : void {
         let mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
@@ -150,7 +152,7 @@ class MobView {
         if ((p.eye.x - mx) * n.x + (p.eye.y - my) * n.y + (p.eye.z - mz) * n.z <= 0.0) {
             return;
         }
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: scene.hw };
+        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: scene.lens };
         self.project(cam, a, 0);
         self.project(cam, b, 1);
         self.project(cam, c, 2);
@@ -191,12 +193,12 @@ class MobView {
                 a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 b: RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 c: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fog, band);
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fogT, band);
             rasterTriTex(fb, RasterTri {
                 a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 b: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 c: RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fog, band);
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fogT, band);
         } else {
             let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
             rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
@@ -481,7 +483,7 @@ class MobView {
      * @param lcurve  the renderer's brightness lookup table
      */
     pub(crate) fn drawAll(mut self, man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf, scene : MobScene, lcurve : i64) : void {
-        let day : f64 = scene.ds.daylight;
+        let day : f64 = scene.ds.skyAmbient;
         // Iterate the actors uniformly through the ActorVisual seam (RTTI
         // dispatch), instead of the old five per-species while-loops.
         let n : i32 = mm.actorCount();

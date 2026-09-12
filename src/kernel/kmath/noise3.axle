@@ -1,0 +1,114 @@
+// noise3 — coherent value noise in three dimensions.
+//
+// The sibling of `kworld::noise`, which is two-dimensional because terrain is a
+// heightfield and never needed a third. A cloud does: it is a volume, and what
+// makes one look like water rather than like a painted shape is that its density
+// varies THROUGH it, not just across the map.
+//
+// Value noise on a lattice with a smoothstep fade, same as the 2-D one, so the
+// two agree in character — a world generated from one and clouded by the other
+// look like they belong to each other. The lattice hash is the same integer mix
+// widened to three coordinates, and the octave loop keeps the house lacunarity
+// of 2 and gain of 1/2.
+//
+// It lives in `kmath` rather than beside the clouds because it is arithmetic and
+// nothing about it is cloudy: caves, ore bodies and any later volumetric field
+// want the same function, and the alternative — the trick of packing Y into both
+// arguments of the 2-D hash, as `oreAt` does — gives white noise, not a coherent
+// field, and cannot be interpolated.
+
+/**
+ * Hash three lattice coordinates and a seed into [0, 1).
+ *
+ * The 2-D mixer with a third odd multiplier: large, coprime, and different from
+ * the other two so a swap of coordinates does not collide.
+ * @param ix  lattice x
+ * @param iy  lattice y
+ * @param iz  lattice z
+ * @param s   the seed
+ * @return a deterministic value in [0, 1)
+ */
+fn hashI3(ix : i32, iy : i32, iz : i32, s : i32) : f64 {
+    let n : i32 = ix * 374761393 + iy * 668265263 + iz * 1274126177 + s * 1442695041;
+    n = (n ^ (n >> 13)) * 1274126177;
+    n = n ^ (n >> 16);
+    return ((n & 0x7FFFFFFF) as f64) / 2147483647.0;
+}
+
+/**
+ * Smoothstep fade — the same curve the 2-D noise uses, so the two have the same
+ * feel where they meet.
+ * @param t  the fraction in [0, 1]
+ * @return the eased fraction
+ */
+fn fade3(t : f64) : f64 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/**
+ * Coherent value noise at a point: trilinear interpolation of the eight lattice
+ * corners around it, each eased.
+ * @param x  sample x
+ * @param y  sample y
+ * @param z  sample z
+ * @param s  the seed
+ * @return a smooth field value in [0, 1)
+ */
+fn valueNoise3(x : f64, y : f64, z : f64, s : i32) : f64 {
+    let xi : i32 = x.floorToInt() as i32;
+    let yi : i32 = y.floorToInt() as i32;
+    let zi : i32 = z.floorToInt() as i32;
+    let fx : f64 = fade3(x - (xi as f64));
+    let fy : f64 = fade3(y - (yi as f64));
+    let fz : f64 = fade3(z - (zi as f64));
+
+    let c000 : f64 = hashI3(xi, yi, zi, s);
+    let c100 : f64 = hashI3(xi + 1, yi, zi, s);
+    let c010 : f64 = hashI3(xi, yi + 1, zi, s);
+    let c110 : f64 = hashI3(xi + 1, yi + 1, zi, s);
+    let c001 : f64 = hashI3(xi, yi, zi + 1, s);
+    let c101 : f64 = hashI3(xi + 1, yi, zi + 1, s);
+    let c011 : f64 = hashI3(xi, yi + 1, zi + 1, s);
+    let c111 : f64 = hashI3(xi + 1, yi + 1, zi + 1, s);
+
+    let x00 : f64 = c000 + (c100 - c000) * fx;
+    let x10 : f64 = c010 + (c110 - c010) * fx;
+    let x01 : f64 = c001 + (c101 - c001) * fx;
+    let x11 : f64 = c011 + (c111 - c011) * fx;
+    let y0 : f64 = x00 + (x10 - x00) * fy;
+    let y1 : f64 = x01 + (x11 - x01) * fy;
+    return y0 + (y1 - y0) * fz;
+}
+
+/**
+ * Fractal Brownian motion over `oct` octaves of `valueNoise3`, normalised back
+ * into [0, 1). Lacunarity 2 and gain 1/2, matching the 2-D `fbm`.
+ * @param x    sample x
+ * @param y    sample y
+ * @param z    sample z
+ * @param s    the seed
+ * @param oct  how many octaves to sum
+ * @return the summed field in [0, 1)
+ */
+fn fbm3(x : f64, y : f64, z : f64, s : i32, oct : i32) : f64 {
+    let sum : f64 = 0.0;
+    let amp : f64 = 1.0;
+    let norm : f64 = 0.0;
+    let fx : f64 = x;
+    let fy : f64 = y;
+    let fz : f64 = z;
+    let o : i32 = 0;
+    while (o < oct) {
+        sum = sum + valueNoise3(fx, fy, fz, s + o * 17) * amp;
+        norm = norm + amp;
+        amp = amp * 0.5;
+        fx = fx * 2.0;
+        fy = fy * 2.0;
+        fz = fz * 2.0;
+        o = o + 1;
+    }
+    if (norm < 0.000001) {
+        return 0.0;
+    }
+    return sum / norm;
+}

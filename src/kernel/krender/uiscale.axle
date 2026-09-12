@@ -1,0 +1,71 @@
+// uiscale — how large the overlay is drawn, given the framebuffer it is drawn
+// into.
+//
+// The HUD is laid out in pixels and the framebuffer is no longer a fixed size:
+// it takes the window's shape up to a pixel budget, so the same twenty-two-pixel
+// hotbar cell is a different fraction of the SCREEN in a window and in
+// fullscreen. Left alone the overlay shrinks exactly as the resolution grows,
+// which is the one thing a HUD must not do — it is measured against the screen,
+// not against the world behind it.
+//
+// So every overlay length goes through a scale taken from the framebuffer's
+// height against the height the HUD's numbers were chosen for. Fractional,
+// because the sizes it has to hit are: seven hundred and twenty rows against six
+// hundred is a fifth larger, and a whole-step multiplier would either change
+// nothing or double it.
+//
+// It never goes BELOW one. A small window already gives the overlay a larger
+// share of the screen, and a heart is a nine-pixel sprite — shrinking it is how
+// pixel art turns to mush, and there is nothing to gain by it.
+
+use crate::configs::hud::{ Ui };
+
+/**
+ * The overlay's size multiplier, and the whole-step scale its text is drawn at.
+ *
+ * Text carries its own: a bitmap face scales by integers or its coverage levels
+ * smear, so the two cannot be the same number. At the sizes this actually runs
+ * at the text stays at one and the panels around it grow, which reads as a
+ * roomier overlay rather than a blurrier one.
+ */
+struct UiScale {
+    pub(crate) k : f64,
+    pub(crate) text : i32,
+
+    /**
+     * `n` overlay pixels as framebuffer pixels. Never rounds a positive length
+     * away to nothing, so a two-pixel rule stays a rule.
+     * @param n  the length in overlay pixels
+     * @return the length in framebuffer pixels
+     */
+    pub(crate) fn px(self, n : i32) : i32 {
+        if (n <= 0) {
+            return 0;
+        }
+        let v : i32 = ((n as f64) * self.k + 0.5).floorToInt() as i32;
+        if (v < 1) {
+            v = 1;
+        }
+        return v;
+    }
+}
+
+/**
+ * The overlay scale for a framebuffer this tall.
+ * @param frameH  the framebuffer height in pixels
+ * @return the scale to lay the overlay out at
+ */
+fn uiScaleFor(frameH : i32) : UiScale {
+    let k : f64 = (frameH as f64) / (Ui::REF_HEIGHT as f64);
+    if (k < 1.0) {
+        k = 1.0;
+    }
+    if (k > Ui::MAX_SCALE) {
+        k = Ui::MAX_SCALE;
+    }
+    let t : i32 = (k + 0.5).floorToInt() as i32;
+    if (t < 1) {
+        t = 1;
+    }
+    return UiScale { k: k, text: t };
+}

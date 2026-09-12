@@ -1,8 +1,22 @@
-// configs::hud — inventory hotbar layout (keys 1–9).
+// configs::hud — the overlay's layout: the inventory hotbar (keys 1–9), and the
+// scale every overlay length is drawn at.
+//
+// Both sets of numbers are in OVERLAY pixels, which are framebuffer pixels only
+// at `Ui::REF_HEIGHT`. Everything else multiplies through `krender::uiscale`.
 
 /** Inventory hotbar layout (keys 1-9). */
 class Hotbar {
     static SIZE : i32 = 9;  // number of slots (keys 1–9)
-    static CELL : i32 = 22; // slot size in framebuffer pixels
+    static CELL : i32 = 22; // slot size in overlay pixels
     static PAD : i32 = 3;   // padding inside the panel / between cells
+}
+
+/** How the overlay is sized against the framebuffer it is drawn into. */
+class Ui {
+    // The framebuffer height every overlay number above was chosen against. The
+    // overlay is drawn at its own size there and grows in proportion past it, so
+    // going fullscreen no longer shrinks the HUD by the amount the resolution
+    // grew.
+    static REF_HEIGHT : i32 = 600;
+    static MAX_SCALE : f64 = 2.5;
 }

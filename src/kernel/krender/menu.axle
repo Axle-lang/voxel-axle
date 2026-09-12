@@ -1,78 +1,96 @@
 // menu — the pause overlay: a dimmed world behind a centred panel with a
 // title and two buttons (Resume / Quit). Geometry lives in one place so
-// the renderer and the mouse hit-test agree. All coordinates are in the
-// 640×400 framebuffer; `main` maps the window-space cursor into it.
+// the renderer and the mouse hit-test agree — and both take it through the
+// same overlay scale, so a resized framebuffer cannot move the buttons out
+// from under the cursor. `main` maps the window-space cursor into the frame.
 
 use smalt::{BitmapFont, Color, Frame, Rect};
 use crate::kernel::krender::color::{Widget};
+use crate::kernel::krender::uiscale::{ UiScale, uiScaleFor };
+
+// The panel, in overlay pixels — framebuffer pixels only at `Ui::REF_HEIGHT`.
+const PANEL_W : i32 = 300;
+const PANEL_H : i32 = 300;
+const BTN_W : i32 = 220;
+const BTN_H : i32 = 36;
+const BTN_TOP : i32 = 96;    // first button, below the panel's top
+const BTN_GAP : i32 = 16;
 
 /**
- * Pixel width of the pause panel.
- * @return the panel width in pixels.
+ * Framebuffer width of the pause panel.
+ * @param ui  the overlay scale
+ * @return the panel width in framebuffer pixels.
  */
-fn panelW() : i32 {
-    return 300;
+fn panelW(ui : UiScale) : i32 {
+    return ui.px(PANEL_W);
 }
 
 /**
- * Pixel height of the pause panel.
- * @return the panel height in pixels.
+ * Framebuffer height of the pause panel.
+ * @param ui  the overlay scale
+ * @return the panel height in framebuffer pixels.
  */
-fn panelH() : i32 {
-    return 300;
+fn panelH(ui : UiScale) : i32 {
+    return ui.px(PANEL_H);
 }
 
 /**
  * Left edge of the centred pause panel.
  * @param fbW  framebuffer width.
+ * @param ui   the overlay scale
  * @return the panel left in pixels.
  */
-fn panelX(fbW : i32) : i32 {
-    return (fbW - panelW()) / 2;
+fn panelX(fbW : i32, ui : UiScale) : i32 {
+    return (fbW - panelW(ui)) / 2;
 }
 
 /**
  * Top edge of the centred pause panel.
  * @param fbH  framebuffer height.
+ * @param ui   the overlay scale
  * @return the panel top in pixels.
  */
-fn panelY(fbH : i32) : i32 {
-    return (fbH - panelH()) / 2;
+fn panelY(fbH : i32, ui : UiScale) : i32 {
+    return (fbH - panelH(ui)) / 2;
 }
 
 /**
- * Pixel width of a menu button.
- * @return the button width in pixels.
+ * Framebuffer width of a menu button.
+ * @param ui  the overlay scale
+ * @return the button width in framebuffer pixels.
  */
-fn btnW() : i32 {
-    return 220;
+fn btnW(ui : UiScale) : i32 {
+    return ui.px(BTN_W);
 }
 
 /**
- * Pixel height of a menu button.
- * @return the button height in pixels.
+ * Framebuffer height of a menu button.
+ * @param ui  the overlay scale
+ * @return the button height in framebuffer pixels.
  */
-fn btnH() : i32 {
-    return 36;
+fn btnH(ui : UiScale) : i32 {
+    return ui.px(BTN_H);
 }
 
 /**
  * Left edge of the centred menu buttons.
  * @param fbW  framebuffer width.
+ * @param ui   the overlay scale
  * @return the button left in pixels.
  */
-fn btnX(fbW : i32) : i32 {
-    return (fbW - btnW()) / 2;
+fn btnX(fbW : i32, ui : UiScale) : i32 {
+    return (fbW - btnW(ui)) / 2;
 }
 
 /**
  * Top edge of button `i`.
  * @param fbH  framebuffer height.
  * @param i    the button index.
+ * @param ui   the overlay scale
  * @return the button top in pixels.
  */
-fn btnY(fbH : i32, i : i32) : i32 {
-    return panelY(fbH) + 96 + i * (btnH() + 16);
+fn btnY(fbH : i32, i : i32, ui : UiScale) : i32 {
+    return panelY(fbH, ui) + ui.px(BTN_TOP) + i * (btnH(ui) + ui.px(BTN_GAP));
 }
 
 /**
@@ -85,11 +103,12 @@ fn btnY(fbH : i32, i : i32) : i32 {
  * @return the button index, or -1 if none.
  */
 fn menuHit(fbW : i32, fbH : i32, mx : i32, my : i32) : i32 {
+    let ui : UiScale = uiScaleFor(fbH);
     let i : i32 = 0;
     while (i < 2) {
-        let bx : i32 = btnX(fbW);
-        let by : i32 = btnY(fbH, i);
-        if (mx >= bx && mx < bx + btnW() && my >= by && my < by + btnH()) {
+        let bx : i32 = btnX(fbW, ui);
+        let by : i32 = btnY(fbH, i, ui);
+        if (mx >= bx && mx < bx + btnW(ui) && my >= by && my < by + btnH(ui)) {
             return i;
         }
         i = i + 1;
@@ -120,10 +139,11 @@ fn border(f : Frame, x : i32, y : i32, ww : i32, hh : i32, t : i32, color : i32)
  * @param i      the button index.
  * @param label  the button label.
  * @param hover  index of the hovered button.
+ * @param ui     the overlay scale.
  */
-fn drawButton(f : Frame, font : BitmapFont, i : i32, label : string, hover : i32) : void {
-    let bx : i32 = btnX(f.w);
-    let by : i32 = btnY(f.h, i);
+fn drawButton(f : Frame, font : BitmapFont, i : i32, label : string, hover : i32, ui : UiScale) : void {
+    let bx : i32 = btnX(f.w, ui);
+    let by : i32 = btnY(f.h, i, ui);
     let on : bool = hover == i;
     let bg : i32 = Color::packBytes(44, 48, 58);
     let edge : i32 = Color::packBytes(70, 76, 90);
@@ -133,12 +153,12 @@ fn drawButton(f : Frame, font : BitmapFont, i : i32, label : string, hover : i32
         edge = Color::packBytes(150, 230, 150);
         txt = Color::packBytes(16, 22, 16);
     }
-    f.fillRect(Rect::make(bx, by, btnW(), btnH()), bg);
-    border(f, bx, by, btnW(), btnH(), 2, edge);
+    f.fillRect(Rect::make(bx, by, btnW(ui), btnH(ui)), bg);
+    border(f, bx, by, btnW(ui), btnH(ui), ui.px(2), edge);
     // Centred in the button by the face's own metrics, at both axes —
     // `drawCentred` is the call that gets the baseline right, and a label
     // sitting a pixel high is the most-repeated mistake in a hand-rolled UI.
-    font.drawCentred(f, Rect::make(bx, by, btnW(), btnH()), label, txt);
+    font.drawCentred(f, Rect::make(bx, by, btnW(ui), btnH(ui)), label, txt);
 }
 
 /**
@@ -154,32 +174,35 @@ struct PauseWidget : Widget {
     fn draw(self, f : Frame) : void {
         f.shade(f.clipRect(), 0x000000, 65, 100);
 
-        let px : i32 = panelX(f.w);
-        let py : i32 = panelY(f.h);
-        let pw : i32 = panelW();
-        let ph : i32 = panelH();
+        let ui : UiScale = uiScaleFor(f.h);
+        let px : i32 = panelX(f.w, ui);
+        let py : i32 = panelY(f.h, ui);
+        let pw : i32 = panelW(ui);
+        let ph : i32 = panelH(ui);
 
-        f.fillRect(Rect::make(px + 6, py + 8, pw, ph), Color::packBytes(0, 0, 0)); // drop shadow
+        f.fillRect(Rect::make(px + ui.px(6), py + ui.px(8), pw, ph), Color::packBytes(0, 0, 0)); // drop shadow
         f.fillRect(Rect::make(px, py, pw, ph), Color::packBytes(24, 26, 32));      // panel
-        f.fillRect(Rect::make(px, py, pw, 6), Color::packBytes(86, 180, 90));      // accent top bar
-        border(f, px, py, pw, ph, 2, Color::packBytes(86, 180, 90));    // accent border
+        f.fillRect(Rect::make(px, py, pw, ui.px(6)), Color::packBytes(86, 180, 90)); // accent top bar
+        border(f, px, py, pw, ph, ui.px(2), Color::packBytes(86, 180, 90));    // accent border
 
-        // The title at twice the face's size — an integer multiple, so the
-        // coverage levels survive and the letters keep their edges.
+        // The title above the face's own size — a whole multiple, so the
+        // coverage levels survive and the letters keep their edges. It rides the
+        // overlay scale, which is why that scale carries a separate whole-step
+        // number for text.
         let title : string = "PAUSED";
-        let ts : i32 = 2;
+        let ts : i32 = ui.text + 1;
         let tw : i32 = self.font.widthScaled(title, ts);
         self.font.drawScaled(
             f,
             px + (pw - tw) / 2,
-            self.font.baselineFor(py + 22, ts),
+            self.font.baselineFor(py + ui.px(22), ts),
             title,
             ts,
             Color::packBytes(238, 240, 245)
         );
 
-        drawButton(f, self.font, 0, "Resume", self.hover);
-        drawButton(f, self.font, 1, "Quit", self.hover);
+        drawButton(f, self.font, 0, "Resume", self.hover, ui);
+        drawButton(f, self.font, 1, "Quit", self.hover, ui);
 
         // The controls live here, where a player who has forgotten them
         // actually looks. They used to be one line printed to stdout at
@@ -190,15 +213,16 @@ struct PauseWidget : Widget {
         // Anchored under the LAST button rather than measured back from the
         // panel's bottom: the buttons are laid out from the top, so a
         // bottom-relative row moves under them the moment the panel grows.
-        let line : i32 = btnY(f.h, 1) + btnH() + 20;
-        controlLine(f, self.font, px, pw, line, "Move", "W A S D  ·  Ctrl sprint", keys, ink);
-        controlLine(f, self.font, px, pw, line + 16, "Jump / swim", "Space", keys, ink);
-        controlLine(f, self.font, px, pw, line + 32, "Dig / place", "Left · Right click", keys, ink);
-        controlLine(f, self.font, px, pw, line + 48, "Hotbar", "1-9  ·  wheel", keys, ink);
+        let line : i32 = btnY(f.h, 1, ui) + btnH(ui) + ui.px(20);
+        let step : i32 = ui.px(16);
+        controlLine(f, self.font, px, pw, line, "Move", "W A S D  ·  Ctrl sprint", keys, ink, ui);
+        controlLine(f, self.font, px, pw, line + step, "Jump / swim", "Space", keys, ink, ui);
+        controlLine(f, self.font, px, pw, line + 2 * step, "Dig / place", "Left · Right click", keys, ink, ui);
+        controlLine(f, self.font, px, pw, line + 3 * step, "Hotbar", "1-9  ·  wheel", keys, ink, ui);
 
         self.font.drawCentred(
             f,
-            Rect::make(px, py + ph - 26, pw, 20),
+            Rect::make(px, py + ph - ui.px(26), pw, ui.px(20)),
             "Esc to resume",
             ink
         );
@@ -228,6 +252,7 @@ fn drawPauseMenu(f : Frame, font : BitmapFont, hover : i32) : void {
  * @param keys   the keys themselves
  * @param keyInk the ink the keys are drawn in
  * @param ink    the ink the label is drawn in
+ * @param ui     the overlay scale
  */
 fn controlLine(
     f : Frame,
@@ -238,9 +263,11 @@ fn controlLine(
     what : string,
     keys : string,
     keyInk : i32,
-    ink : i32
+    ink : i32,
+    ui : UiScale
 ) : void {
     let base : i32 = font.baselineFor(top, 1);
-    font.draw(f, px + 22, base, what, ink);
-    font.drawRight(f, px + pw - 22, base, keys, keyInk);
+    let inset : i32 = ui.px(22);
+    font.draw(f, px + inset, base, what, ink);
+    font.drawRight(f, px + pw - inset, base, keys, keyInk);
 }

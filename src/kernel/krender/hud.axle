@@ -9,6 +9,7 @@ use crate::configs::blocks::{ Block };
 use crate::kernel::krender::color::{Widget};
 use smalt::{Frame};
 use crate::kernel::krender::health::{drawHealth, healthHeight};
+use crate::kernel::krender::uiscale::{ UiScale, uiScaleFor };
 
 /**
  * The inventory bar as a Widget: its panel origin, the atlas supplying tile
@@ -21,10 +22,11 @@ struct HotbarBar : Widget {
     atlas : i64,
     hotbar : Block[],
     selected : i32,
+    ui : UiScale,
 
     /** Paint the hotbar panel + slots. */
     fn draw(self, f : Frame) : void {
-        drawHotbar(f, self.x0, self.y0, self.atlas, self.hotbar, self.selected);
+        drawHotbar(f, self.x0, self.y0, self.atlas, self.hotbar, self.selected, self.ui);
     }
 }
 
@@ -37,10 +39,11 @@ struct HeartRow : Widget {
     y0 : i32,
     hp : i32,
     maxHp : i32,
+    ui : UiScale,
 
     /** Paint the heart row. */
     fn draw(self, f : Frame) : void {
-        drawHealth(f, self.x0, self.y0, self.hp, self.maxHp);
+        drawHealth(f, self.x0, self.y0, self.hp, self.maxHp, self.ui);
     }
 }
 
@@ -48,11 +51,13 @@ struct HeartRow : Widget {
  * Draw the full HUD overlay by composing its widgets. `atlas` supplies the
  * hotbar item textures. The body lays out a set of `Widget`s and draws each.
  * @param f         the frame to draw into.
+ * @param font      the face the creative badge is lettered in.
  * @param atlas     atlas supplying the hotbar item textures.
  * @param hp        current health.
  * @param maxHp     maximum health.
  * @param hotbar    hotbar slot block ids.
  * @param selected  index of the active hotbar slot.
+ * @param creative  whether to show the creative-mode badge.
  */
 fn drawHud(
     f : Frame,
@@ -64,13 +69,17 @@ fn drawHud(
     selected : i32,
     creative : bool
 ) : void {
-    let pw : i32 = hotbarPanelW();
-    let ph : i32 = hotbarPanelH();
+    // The overlay is sized against the frame it lands in, not against fixed
+    // pixels: the framebuffer follows the window now, so fixed pixels would mean
+    // a HUD that shrinks by exactly as much as going fullscreen gains.
+    let ui : UiScale = uiScaleFor(f.h);
+    let pw : i32 = hotbarPanelW(ui);
+    let ph : i32 = hotbarPanelH(ui);
     let hx : i32 = (f.w - pw) / 2;
-    let hy : i32 = f.h - 8 - ph;
+    let hy : i32 = f.h - ui.px(8) - ph;
 
-    let bar : HotbarBar = HotbarBar { x0: hx, y0: hy, atlas: atlas, hotbar: hotbar, selected: selected };
-    let hearts : HeartRow = HeartRow { x0: hx, y0: hy - healthHeight() - 6, hp: hp, maxHp: maxHp };
+    let bar : HotbarBar = HotbarBar { x0: hx, y0: hy, atlas: atlas, hotbar: hotbar, selected: selected, ui: ui };
+    let hearts : HeartRow = HeartRow { x0: hx, y0: hy - healthHeight(ui) - ui.px(6), hp: hp, maxHp: maxHp, ui: ui };
 
     bar.draw(f);
     hearts.draw(f);
@@ -81,10 +90,10 @@ fn drawHud(
     // toggled it ten minutes ago and forgot.
     if (creative) {
         let label : string = "CREATIVE";
-        let w : i32 = font.width(label) + 16;
-        let box : Rect = Rect::make(f.w - w - 8, 8, w, 20);
-        f.fillRound(box, 5, Color::mix(0x101418, 0x4CC2FF, 1, 4));
-        f.roundBorder(box, 5, 0x4CC2FF);
+        let w : i32 = font.width(label) + ui.px(16);
+        let box : Rect = Rect::make(f.w - w - ui.px(8), ui.px(8), w, ui.px(20));
+        f.fillRound(box, ui.px(5), Color::mix(0x101418, 0x4CC2FF, 1, 4));
+        f.roundBorder(box, ui.px(5), 0x4CC2FF);
         font.drawCentred(f, box, label, 0xDCEEFF);
     }
 }

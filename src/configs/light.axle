@@ -1,12 +1,61 @@
 // configs::light — the block-light engine (torches) tunables.
 //
-// Torches flood a 0..15 light level outward (blocked by opaque blocks); the
-// mesher bakes the per-face level and the renderer adds a warm boost to the
-// face brightness for each unit of light. Sky-light and day/night come later.
+// Torches flood a 0..15 level per CHANNEL outward (blocked by opaque blocks)
+// and the mesher bakes the per-corner levels. Alongside them: the sky-light
+// flood, the ray-traced sky access and its coloured bounce, and the ambient
+// occlusion — everything that reaches a surface other than the sun itself,
+// which is `configs::time`'s (the shadows move with it).
 
-/** The block-light engine, ambient occlusion, sky access and the colour bounce. */
+/** Every number the light engine reads: how bright, how coloured, how far. */
 class Light {
     static QUEUE_CAP : i32 = 65536;   // flood-fill stack capacity (cells)
+
+    // ── The sun's share, and the sky's ──────────────────────────
+    // The one rule the whole engine is built around: THE LIGHT COMES FROM THE
+    // SUN. `AMBIENT` is the sky's share on a surface that faces it squarely, and
+    // it is small on purpose; everything else a surface receives is directional,
+    // and is zero on a face turned away. Lowering `AMBIENT` is what makes the
+    // world lit BY something rather than lit from nowhere.
+    //
+    // Both are LINEAR light factors, which is why they read low. A factor applied
+    // to linear light and then encoded to sRGB lands far higher than the same
+    // number applied to display bytes: 0.20 of the light is about 0.48 of the
+    // pixel. Set them by the darkness you want to SEE.
+    static AMBIENT : f64 = 0.11;
+    // How much of that sky share a face keeps when it faces away from the sky.
+    // The sky is a hemisphere: a floor sees all of it, a wall half, a ceiling's
+    // underside only what the ground bounces back.
+    static SKY_VIEW_MIN : f64 = 0.18;
+    // How much light the sun itself carries, over that share. Above 1 on purpose:
+    // a sunlit surface then lands past `Light::TONE_KNEE` and rolls off through
+    // the tone map's shoulder instead of stopping at the texture's own brightness,
+    // which is what makes the lit half read as SUNLIT rather than merely visible —
+    // and what makes a shadow read as dark, since the two are judged against each
+    // other and only their ratio is seen.
+    static SUN_STRENGTH : f64 = 1.42;
+    // Fraction of the direct term a cast-shadowed face keeps (0 = flat ambient /
+    // fully aggressive, 1 = no shadow). Higher = softer, less aggressive shadows.
+    static SHADOW_KEEP : f64 = 0.05;
+    // How far the sun visibility (0..255) may vary along ONE merged quad before
+    // the mesher's run is cut and each cell gets its own quad. A merged quad reads
+    // the shadow at its four corners and interpolates between them, so a run a
+    // shadow edge crosses is drawn as a ramp the width of the run, and the ramp
+    // jumps a whole run at a time as the sun creeps — the staircase. Low enough
+    // that an edge always splits, high enough that the penumbra's own gradient
+    // does not split every quad in the world.
+    static SHADOW_SPLIT : i32 = 10;
+
+    // ── The colour space light is done in ───────────────────────
+    // The world pass decodes texels to linear light, lights them there, and
+    // encodes the result through a tone curve (`klight::gamma`). The curve is the
+    // IDENTITY below `Light::TONE_KNEE` — so a fully lit surface still renders as
+    // the byte its texture was painted with — and rolls the excess off toward
+    // white above it, which is what lets a torch add onto sunlight without
+    // flattening into a white blob. `Light::TONE_MAX` is the brightest light the
+    // encode table resolves, over `Light::TONE_STEPS` entries.
+    static TONE_KNEE : f64 = 0.75;
+    static TONE_MAX : f64 = 4.0;
+    static TONE_STEPS : i32 = 32768;
 
     // Face brightness vs. baked light level (0..15) follows an EXPONENTIAL falloff
     // (Minecraft-style): each level down multiplies brightness by `Light::FALLOFF`, so
@@ -39,15 +88,59 @@ class Light {
 
     // Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
     // surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
-    // skylight. The renderer blends between these by how directly a corner faces the
-    // sun (and by daylight, so night stays neutral-blue moonlight). Multipliers
-    // around 1.0 per channel.
-    static SUN_TINT_R : f64 = 1.16;   // warm gold for full sun …
-    static SUN_TINT_G : f64 = 1.04;
-    static SUN_TINT_B : f64 = 0.78;
-    static SHADE_TINT_R : f64 = 0.74; // … cool blue for shade / ambient
-    static SHADE_TINT_G : f64 = 0.86;
-    static SHADE_TINT_B : f64 = 1.32;
+    // skylight. `krender::cornerlight` blends between them by how directly a
+    // corner faces the sun (and by daylight, so night stays neutral moonlight).
+    //
+    // These are HUE, not brightness: the blend is divided by its own luminance
+    // before it is used, so only the RATIOS between the three channels here
+    // matter and a common factor across a row does nothing. That is deliberate —
+    // brightness is the shadow's job, and a tint that also carried it was
+    // deciding the same thing twice.
+    //
+    // They are also gentler than they were. Real sunlight is about 5500 K
+    // against a sky nearer 12000 K, which is a warm/cool split of maybe fifteen
+    // percent per channel; the old pair was more than twice that, and on grass —
+    // already the most saturated thing on screen — it took the blue out
+    // altogether and left neon.
+    static SUN_TINT_R : f64 = 1.09;   // warm gold for a high sun …
+    static SUN_TINT_G : f64 = 1.01;
+    static SUN_TINT_B : f64 = 0.88;
+    static SHADE_TINT_R : f64 = 0.88; // … cool blue for shade / ambient
+    static SHADE_TINT_G : f64 = 0.96;
+    static SHADE_TINT_B : f64 = 1.18;
+
+    // And the colour the sun ITSELF turns as it reaches the horizon, which is
+    // the other half of the warm/cool question and the half that was missing.
+    // `SUN_TINT_*` above is the sun at height; the day state slides between the
+    // two by the sun's elevation, so a low sun lays real gold on the faces it
+    // reaches rather than leaving them the colour of noon.
+    //
+    // Deep, because it is what a sunset IS: three thousand Kelvin against six,
+    // and the whole reason a low sun is worth standing still for.
+    static DUSK_TINT_R : f64 = 1.42;
+    static DUSK_TINT_G : f64 = 0.82;
+    static DUSK_TINT_B : f64 = 0.42;
+
+    // And the moon's, for the hours it is the light. Cold and slightly blue —
+    // moonlight is reflected sunlight and physically almost the same colour, but
+    // the eye reads a dim scene as blue (the Purkinje shift), and a moonlit night
+    // painted neutral looks like an underexposed day.
+    static MOON_TINT_R : f64 = 0.82;
+    static MOON_TINT_G : f64 = 0.94;
+    static MOON_TINT_B : f64 = 1.24;
+
+    // How much of a light ray survives ONE block of canopy. Leaves are not
+    // opaque — a face against them is culled, but light has to get through, or a
+    // forest floor would be a black stamp with a hard edge. They are not clear
+    // either, and treating them as clear is what left a tree casting no shadow
+    // at all: the sun ray walked straight through the canopy and every cell
+    // under it read as full sun.
+    //
+    // So the ray passes with a FRACTION per block. One leaf still lets a third
+    // of the sun through, two a tenth, a full canopy nothing — which is a
+    // dappled shadow that deepens toward the trunk, the way a real one does,
+    // and it costs the ray nothing but not stopping early.
+    static LEAF_TRANSMIT : f64 = 0.34;
 
     // Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
     // cell casts `Light::SKY_AO_SAMPLES` rays over the upper hemisphere (up to `Light::SKY_AO_REACH`

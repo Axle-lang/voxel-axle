@@ -22,6 +22,7 @@ use crate::configs::atlas::{ Tile };
 use crate::configs::audio::{ AudioMaterial };
 use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };
+use crate::configs::light::{ Light };
 
 // ── Block capabilities ────────────────────────────────────────────────────
 // Each block attribute the engine asks about is grouped into a SMALL, single-
@@ -39,6 +40,9 @@ trait Voidable {
 trait Occluding {
     fn isTransparent(self) : bool;
     fn isOpaque(self) : bool;
+
+    /** The fraction of a light ray that survives one block of this (0 = shade, 1 = clear). */
+    fn lightTransmit(self) : f64;
 }
 
 /** Physical presence: what the look-ray targets and the player stands against. */
@@ -128,18 +132,30 @@ fn emptyOf(id : Block) : Emptiness {
 struct Occlusion : Occluding {
     transparent : bool,
     opaque : bool,
+    transmit : f64,
 
     /** Whether a face against this block is drawn (light/air passes). @return transparency */
     fn isTransparent(self) : bool { return self.transparent; }
 
     /** Whether the block stops light and casts shade. @return opacity */
     fn isOpaque(self) : bool { return self.opaque; }
+
+    /** The fraction of a light ray that survives one block of this. @return the transmittance */
+    fn lightTransmit(self) : f64 { return self.transmit; }
 }
 
 /**
- * Occlusion for a block: air / water / torch / snow layer let light and sight
- * through; leaves cull faces but still leak light (transparent:false,
- * opaque:false); every other full block is opaque.
+ * Occlusion for a block, on three axes that are NOT the same question.
+ *
+ * `transparent` is about sight: whether the face behind it is drawn. `opaque`
+ * is about the flood-filled light volumes, which are a level per cell and so
+ * can only answer yes or no. `transmit` is about the RAYS — the cast shadow and
+ * the sky-access bake — and those can carry a fraction, which is the only one of
+ * the three that can describe a canopy honestly.
+ *
+ * Air / water / torch / snow layer let sight and light through. Leaves cull
+ * faces like a solid and stay out of the flood's way, but they dim a ray that
+ * crosses them. Everything else is a wall to all three.
  * @param id  the block
  * @return its occlusion capability
  */
@@ -149,11 +165,11 @@ fn occlusionOf(id : Block) : Occlusion {
         | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
         | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
         | Block::Torch | Block::SnowLayer
-            => Occlusion { transparent: true, opaque: false },
+            => Occlusion { transparent: true, opaque: false, transmit: 1.0 },
         Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
         | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
-            => Occlusion { transparent: false, opaque: false },
-        _ => Occlusion { transparent: false, opaque: true },
+            => Occlusion { transparent: false, opaque: false, transmit: Light::LEAF_TRANSMIT },
+        _ => Occlusion { transparent: false, opaque: true, transmit: 0.0 },
     };
 }
 
@@ -825,8 +841,9 @@ fn lightEmission(id : Block) : i32 {
 
 /**
  * True for the leaf blocks. They cull faces like solids (you can't see through
- * a canopy) but let LIGHT through, so a tree doesn't stamp a hard black shadow
- * on the ground.
+ * a canopy) and stay out of the flood-filled light volumes, but they DIM a ray
+ * that crosses them — see `lightTransmit` — so a tree's shadow is a dapple that
+ * deepens toward the trunk rather than a hard black stamp or nothing at all.
  * @param id  the block
  * @return whether the block is leaves
  */
@@ -842,6 +859,18 @@ fn isLeaves(id : Block) : bool {
  */
 fn isOpaque(id : Block) : bool {
     return occlusionOf(id).isOpaque();
+}
+
+/**
+ * The fraction of a light ray that survives one block of `id`: 0 through a
+ * wall, 1 through air, and `Light::LEAF_TRANSMIT` through a block of canopy.
+ * What the shadow and sky-access rays march with, where `isOpaque` — a yes/no
+ * about the flood volumes — has nothing to say about a leaf.
+ * @param id  the block
+ * @return the transmittance in [0, 1]
+ */
+fn lightTransmit(id : Block) : f64 {
+    return occlusionOf(id).lightTransmit();
 }
 
 /**

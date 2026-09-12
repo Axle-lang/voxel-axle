@@ -1,0 +1,117 @@
+// facelight — how much light reaches a surface, and from where.
+//
+// The first question the light engine answers, and the one every other answer is
+// built on: given a surface pointing THIS way, under a sun pointing THAT way,
+// how much light does it get?
+//
+// The answer is two numbers, not one, and keeping them apart is the whole idea.
+// `direct` is the sun's — a Lambert dot-product, so it is everything on a face
+// turned toward the sun and NOTHING on one turned away. `ambient` is the sky's,
+// arriving from the entire dome at once, so it does not care where the sun is,
+// only how much of the dome the face can see.
+//
+// They have to stay apart because three separate things want to treat them
+// differently: a cast shadow takes away the first and leaves the second, a cloud
+// takes from the first and GIVES to the second, and the colour of the result
+// depends on which of the two won. Summed into one brightness, none of that can
+// be expressed — and a scene lit by one summed number is a scene lit from
+// nowhere, which is exactly what a flat ambient floor looks like.
+
+use crate::kernel::kmath::vec3::{ Vec3 };
+use crate::configs::light::{ Light };
+
+/**
+ * The two halves of the light landing on a face: what the sun sends it directly,
+ * and what the sky sends it from every direction at once.
+ */
+struct FaceLight {
+    pub(crate) direct : f64,
+    pub(crate) ambient : f64,
+
+    /**
+     * The light the face ends up with, given how much of the sun reaches it.
+     * @param vis  the fraction of the direct term this face keeps, 0..1
+     * @return the light factor for the surface
+     */
+    pub(crate) fn exposure(self, vis : f64) : f64 {
+        return self.ambient + Light::SUN_STRENGTH * vis * self.direct;
+    }
+
+    /**
+     * How much of that light came STRAIGHT from the sun, 0..1 — which is what
+     * decides its colour, since the two halves arrive in different ones.
+     *
+     * A ratio of the two terms rather than a rescaled brightness: a face in the
+     * open at noon is nearly all sun and takes the sun's gold, the same face
+     * turned away is nearly all sky and takes the sky's blue, and one in a cast
+     * shadow is all sky whichever way it faces.
+     * @param vis  the fraction of the direct term this face keeps, 0..1
+     * @return the direct share of the light, 0..1
+     */
+    pub(crate) fn directShare(self, vis : f64) : f64 {
+        let d : f64 = Light::SUN_STRENGTH * vis * self.direct;
+        let t : f64 = d + self.ambient;
+        if (t < 0.000001) {
+            return 0.0;
+        }
+        return d / t;
+    }
+}
+
+/**
+ * Sun-direction shading capability: the light on a surface normal under the
+ * current sun, split into the sun's share and the sky's. Owned by the per-frame
+ * day/night state (`DayState`) so a caller asks the lighting "what reaches this
+ * normal now?" rather than re-deriving the dot-product against loose scalars.
+ */
+trait SkyLighting {
+    fn shade(self, n : Vec3) : FaceLight;
+}
+
+/**
+ * How much of the sky dome a face with this normal can see, against what one
+ * pointing straight up sees.
+ *
+ * The sky is a hemisphere, not a lamp: a floor sees all of it, a wall sees half,
+ * a ceiling's underside sees almost none but the ground's own bounce. A flat
+ * ambient floor gave every one of them the same, which is what makes a scene
+ * look lit from nowhere — and why the shaded side of a block used to read as
+ * merely dimmer rather than as being in shade.
+ * @param n  the (unit) surface normal
+ * @return the sky-dome fraction, `Light::SKY_VIEW_MIN`..1
+ */
+fn skyView(n : Vec3) : f64 {
+    return Light::SKY_VIEW_MIN + (1.0 - Light::SKY_VIEW_MIN) * (0.5 + 0.5 * n.y);
+}
+
+/**
+ * Split the light on a surface normal into the sun's share and the sky's. The
+ * single shared shade term — the world faces and the mob boxes both call it
+ * instead of each open-coding the same dot-product.
+ * @param n    the (unit) surface normal
+ * @param sun  the (unit) sun direction
+ * @return the face's direct and ambient terms
+ */
+fn shadeLambert(n : Vec3, sun : Vec3) : FaceLight {
+    let ndl : f64 = n.dot(sun);
+    if (ndl < 0.0) {
+        ndl = 0.0;
+    }
+    return FaceLight {
+        direct: (1.0 - Light::AMBIENT) * ndl,
+        ambient: Light::AMBIENT * skyView(n),
+    };
+}
+
+/**
+ * The light on a normal under a sun, in one call: split, then exposed. What a
+ * caller with no shadow map of its own — a mob — wants, since it always passes
+ * full visibility.
+ * @param n    the (unit) surface normal
+ * @param sun  the (unit) sun direction
+ * @param vis  the fraction of the direct term this point keeps (0..1)
+ * @return the light factor for the surface
+ */
+fn sunExposure(n : Vec3, sun : Vec3, vis : f64) : f64 {
+    return shadeLambert(n, sun).exposure(vis);
+}

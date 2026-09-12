@@ -9,8 +9,13 @@
 /** The streamed chunk world, the tick rate and the block-update sim. */
 class World {
     static CHUNK_SIZE : i32 = 16;
-    static VIEW_RADIUS : i32 = 6; // chunks loaded each side → 13×13
-    static SPAN : i32 = 13;       // 2*viewRadius + 1
+    // Chunks loaded each side of the camera. Eight rather than six buys about a
+    // third more view — and costs it: the ring goes 169 to 289 slots, so the light
+    // volumes go from roughly 63 MB to 108 MB and the world pass has that much
+    // more surface to project. The fog is what makes the extra distance worth
+    // having rather than just further.
+    static VIEW_RADIUS : i32 = 8; // chunks loaded each side → 17×17
+    static SPAN : i32 = 17;       // 2*viewRadius + 1
     static MAX_FACES_PER_CHUNK : i32 = 14000;
     // Streamed chunk (re)builds per frame: spreads the cost of entering new chunks
     // over several frames (nearest-first) instead of a single stutter when crossing

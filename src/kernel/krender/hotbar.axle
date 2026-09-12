@@ -11,21 +11,24 @@ use crate::configs::atlas::{ Atlas };
 use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };
 use crate::configs::hud::{ Hotbar };
+use crate::kernel::krender::uiscale::{ UiScale };
 
 /**
- * Pixel width of the hotbar panel.
- * @return the panel width in pixels.
+ * Framebuffer width of the hotbar panel at this overlay scale.
+ * @param ui  the overlay scale
+ * @return the panel width in framebuffer pixels.
  */
-fn hotbarPanelW() : i32 {
-    return Hotbar::SIZE * Hotbar::CELL + (Hotbar::SIZE + 1) * Hotbar::PAD;
+fn hotbarPanelW(ui : UiScale) : i32 {
+    return Hotbar::SIZE * ui.px(Hotbar::CELL) + (Hotbar::SIZE + 1) * ui.px(Hotbar::PAD);
 }
 
 /**
- * Pixel height of the hotbar panel.
- * @return the panel height in pixels.
+ * Framebuffer height of the hotbar panel at this overlay scale.
+ * @param ui  the overlay scale
+ * @return the panel height in framebuffer pixels.
  */
-fn hotbarPanelH() : i32 {
-    return Hotbar::CELL + 2 * Hotbar::PAD;
+fn hotbarPanelH(ui : UiScale) : i32 {
+    return ui.px(Hotbar::CELL) + 2 * ui.px(Hotbar::PAD);
 }
 
 /**
@@ -62,15 +65,17 @@ fn drawTileIcon(f : Frame, atlas : i64, tile : i32, x : i32, y : i32, size : i32
  * @param atlas     the texture atlas.
  * @param hotbar    hotbar slot block ids.
  * @param selected  index of the active hotbar slot.
+ * @param ui        the overlay scale.
  */
-fn drawHotbar(f : Frame, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], selected : i32) : void {
-    let cell : i32 = Hotbar::CELL;
-    let pad : i32 = Hotbar::PAD;
+fn drawHotbar(f : Frame, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], selected : i32, ui : UiScale) : void {
+    let cell : i32 = ui.px(Hotbar::CELL);
+    let pad : i32 = ui.px(Hotbar::PAD);
     let n : i32 = Hotbar::SIZE;
-    let panelW : i32 = hotbarPanelW();
-    let panelH : i32 = hotbarPanelH();
+    let panelW : i32 = hotbarPanelW(ui);
+    let panelH : i32 = hotbarPanelH(ui);
+    let edge : i32 = ui.px(2);   // the outer keyline, the ring, and the icon's inset
 
-    f.fillRect(Rect::make(x0 - 2, y0 - 2, panelW + 4, panelH + 4), Color::packBytes(12, 12, 16));
+    f.fillRect(Rect::make(x0 - edge, y0 - edge, panelW + 2 * edge, panelH + 2 * edge), Color::packBytes(12, 12, 16));
     f.fillRect(Rect::make(x0, y0, panelW, panelH), Color::packBytes(28, 28, 34));
 
     let i : i32 = 0;
@@ -78,7 +83,7 @@ fn drawHotbar(f : Frame, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], sele
         let cx : i32 = x0 + pad + i * (cell + pad);
         let cy : i32 = y0 + pad;
         f.fillRect(Rect::make(cx, cy, cell, cell), Color::packBytes(48, 48, 56));
-        drawTileIcon(f, atlas, tileFor(hotbar[i], FaceDir::Top), cx + 2, cy + 2, cell - 4);
+        drawTileIcon(f, atlas, tileFor(hotbar[i], FaceDir::Top), cx + edge, cy + edge, cell - 2 * edge);
         i = i + 1;
     }
 
@@ -86,9 +91,8 @@ fn drawHotbar(f : Frame, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], sele
     let sx : i32 = x0 + pad + selected * (cell + pad);
     let sy : i32 = y0 + pad;
     let white : i32 = Color::packBytes(255, 255, 255);
-    let t : i32 = 2;
-    f.fillRect(Rect::make(sx - 2, sy - 2, cell + 4, t), white);
-    f.fillRect(Rect::make(sx - 2, sy + cell, cell + 4, t), white);
-    f.fillRect(Rect::make(sx - 2, sy - 2, t, cell + 4), white);
-    f.fillRect(Rect::make(sx + cell, sy - 2, t, cell + 4), white);
+    f.fillRect(Rect::make(sx - edge, sy - edge, cell + 2 * edge, edge), white);
+    f.fillRect(Rect::make(sx - edge, sy + cell, cell + 2 * edge, edge), white);
+    f.fillRect(Rect::make(sx - edge, sy - edge, edge, cell + 2 * edge), white);
+    f.fillRect(Rect::make(sx + cell, sy - edge, edge, cell + 2 * edge), white);
 }

@@ -18,8 +18,56 @@
 // flood the world separately from the source's own per-channel level, so the
 // colour and the reach are the same number and a flame warms as it fades.
 
-use crate::kernel::krender::gamma::{ LinRgb };
+use crate::kernel::klight::gamma::{ LinRgb };
+use crate::kernel::kmath::vec3::{ Vec3 };
 use crate::configs::light::{ Light };
+
+/** Rec. 601 luminance of a linear triple — what "the same brightness" means here. */
+fn luma(r : f64, g : f64, b : f64) : f64 {
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/**
+ * The colour the sky light arrives in at a corner: warm where the sun reaches
+ * it, cool where only the sky does, and carrying the surrounding albedo where
+ * the light got there by bouncing.
+ *
+ * Two rules keep it from turning the world garish, and both used to be missing.
+ *
+ * The tint is HUE ONLY: it is divided by its own luminance, so it can move a
+ * colour but not brighten it. Left un-normalised, the sun tint quietly added a
+ * few percent of light everywhere it applied and the shade tint took ten percent
+ * back — brightness being decided twice, once by the shadow and again by the
+ * colour, which is how the lit half ends up looking lit AND overexposed.
+ *
+ * And the bounce rides on `1 - direct`. One-bounce light is the light that did
+ * NOT come straight from the sun, so tinting a surface in full sunlight with the
+ * colour of its neighbours is tinting the wrong half: green grass under an open
+ * sky was being pushed greener by its own reflection, which is most of what
+ * reads as flashy.
+ * @param direct  how much of the sun's own share this corner gets, 0..1
+ * @param sun     the colour direct sunlight arrives in this hour
+ * @param bounce  the one-bounce colour tint (1, 1, 1 = neutral)
+ * @return the sky term's colour, at unit luminance
+ */
+fn skyTint(direct : f64, sun : LinRgb, bounce : Vec3) : LinRgb {
+    let k : f64 = direct;
+    if (k < 0.0) {
+        k = 0.0;
+    }
+    if (k > 1.0) {
+        k = 1.0;
+    }
+    let ind : f64 = 1.0 - k;
+    let r : f64 = (Light::SHADE_TINT_R + (sun.r - Light::SHADE_TINT_R) * k) * (1.0 + (bounce.x - 1.0) * ind);
+    let g : f64 = (Light::SHADE_TINT_G + (sun.g - Light::SHADE_TINT_G) * k) * (1.0 + (bounce.y - 1.0) * ind);
+    let b : f64 = (Light::SHADE_TINT_B + (sun.b - Light::SHADE_TINT_B) * k) * (1.0 + (bounce.z - 1.0) * ind);
+    let l : f64 = luma(r, g, b);
+    if (l < 0.0001) {
+        l = 0.0001;
+    }
+    return LinRgb { r: r / l, g: g / l, b: b / l };
+}
 
 /**
  * One face corner's light, before it is given a colour: the two baked levels

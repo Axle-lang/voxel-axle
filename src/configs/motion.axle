@@ -45,5 +45,10 @@ class Motion {
     static PLAYER_HEIGHT : f64 = 1.80;   // body AABB height for voxel collision
     static MOB_RADIUS : f64 = 0.28;
     static MOUSE_SENS : f64 = 0.0024;
-    static PITCH_MAX : f64 = 1.45;
+    // Just short of straight up (89°), not the 83° it was: at 83° the block
+    // directly overhead cannot be centred in the crosshair, which is exactly the
+    // one you want when you are pillaring up or breaking a ceiling. Not π/2
+    // itself — there the forward vector loses its horizontal part entirely, yaw
+    // stops meaning anything and the projection divides by a vanishing depth.
+    static PITCH_MAX : f64 = 1.5533;
 }

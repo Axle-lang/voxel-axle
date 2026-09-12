@@ -2,14 +2,20 @@
 // per-pixel inverse-depth z-buffer. Half-plane (edge-function) inside
 // test; depth is the barycentric blend of vertex inverse depths, nearest
 // wins. Winding-agnostic (the area's sign flows through the weights).
+//
+// It fills pixels. It does not decide how bright they are: the radiometry that
+// used to live here — the sun/sky split, the hemisphere term, the exposure — is
+// `klight::facelight`'s, and this file reads the answer rather than forming it.
+// A rasteriser that also owned the ambient was a rasteriser nothing else could
+// ask about light without importing the triangle filler.
 
 use smalt::Mem;
 use smalt::Color;
 use crate::kernel::kmath::mathx::clampI32;
 use crate::kernel::kmath::vec3::{ Vec3 };
-use crate::kernel::krender::gamma::{ Gamma, LinRgb, linearToSrgb };
+use crate::kernel::klight::gamma::{ Gamma, LinRgb, linearToSrgb };
+use crate::kernel::ksky::atmosphere::{ FogTable, SkyColour };
 use crate::configs::atlas::{ Atlas };
-use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
 
 /**
@@ -51,11 +57,78 @@ trait Projector {
 }
 
 /**
+ * The lens the frame is drawn through: where the projection centre sits on the
+ * framebuffer, and how many pixels away the film is.
+ *
+ * All three follow the framebuffer, which is why they travel together and are
+ * not constants. `focal` is derived once per resize from a fixed VERTICAL field
+ * of view (`Screen::FOV_V_DEG`), so the world keeps its scale at any resolution
+ * and the horizontal angle widens with the window instead of the image being
+ * magnified — which is what a fixed focal length in pixels does.
+ */
+struct Lens {
+    pub(crate) hw : f64,     // horizontal projection centre = renderW / 2
+    pub(crate) hh : f64,     // vertical projection centre   = renderH / 2
+    pub(crate) focal : f64,  // pixels per world unit at unit depth
+}
+
+/**
+ * The lens for a framebuffer of this size, at the configured vertical FOV.
+ * @param renderW  framebuffer width in pixels
+ * @param renderH  framebuffer height in pixels
+ * @return the projection centre and focal length to draw it with
+ */
+fn lensFor(renderW : i32, renderH : i32) : Lens {
+    let hh : f64 = (renderH as f64) * 0.5;
+    let half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
+    let t : f64 = half.tan();
+    if (t < 0.0001) {
+        t = 0.0001;
+    }
+    return Lens { hw: (renderW as f64) * 0.5, hh: hh, focal: hh / t };
+}
+
+/** The framebuffer size one frame is rasterised at. */
+struct Viewport {
+    pub(crate) w : i32,
+    pub(crate) h : i32,
+}
+
+/**
+ * The framebuffer to draw a window of this size into: the window's own shape,
+ * scaled down only as far as `Screen::MAX_RENDER_PIXELS` demands.
+ *
+ * It never scales UP, so the blit only ever shrinks an image and a small window
+ * costs what it looks like. What it does not do any more is pin the height:
+ * that is what turned fullscreen into a zoom, since the same rows were simply
+ * spread over a larger screen.
+ * @param winW  the window's width in pixels
+ * @param winH  the window's height in pixels
+ * @return the framebuffer size to render at
+ */
+fn viewportFor(winW : i32, winH : i32) : Viewport {
+    let w : i32 = winW;
+    let h : i32 = winH;
+    let px : i64 = (w as i64) * (h as i64);
+    let cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
+    if (px > cap) {
+        let k : f64 = ((cap as f64) / (px as f64)).sqrt();
+        w = ((w as f64) * k).floorToInt() as i32;
+        h = ((h as f64) * k).floorToInt() as i32;
+    }
+    if (w < Screen::MIN_RENDER_W) {
+        w = Screen::MIN_RENDER_W;
+    }
+    if (h < Screen::MIN_RENDER_H) {
+        h = Screen::MIN_RENDER_H;
+    }
+    return Viewport { w: w, h: h };
+}
+
+/**
  * The one camera: eye position, cached look trig (yaw cos/sin, pitch cos/sin)
- * and the horizontal projection centre `hw`. A value struct built per frame from
- * the Player; every render pass projects through it so there is a single copy of
- * the transform. `Screen::FOCAL` / `Screen::HALF_H` are fixed tunables, so they are read directly
- * rather than carried.
+ * and the lens. A value struct built per frame from the Player; every render
+ * pass projects through it so there is a single copy of the transform.
  */
 struct Camera : Projector {
     pub(crate) eye : Vec3,
@@ -63,7 +136,7 @@ struct Camera : Projector {
     siny : f64,
     cosp : f64,
     sinp : f64,
-    hw : f64,
+    lens : Lens,
 
     /**
      * Rotate a world point into camera space (post yaw + pitch): x = right,
@@ -89,8 +162,8 @@ struct Camera : Projector {
      */
     pub(crate) fn screenOf(self, cam : Vec3) : Projected {
         return Projected {
-            sx: self.hw + Screen::FOCAL * cam.x / cam.z,
-            sy: Screen::HALF_H - Screen::FOCAL * cam.y / cam.z,
+            sx: self.lens.hw + self.lens.focal * cam.x / cam.z,
+            sy: self.lens.hh - self.lens.focal * cam.y / cam.z,
             iz: 1.0 / cam.z,
             cz: cam.z,
         };
@@ -118,8 +191,8 @@ struct Camera : Projector {
         let ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
         let rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
         return Projected {
-            sx: self.hw + Screen::FOCAL * rx / rz2,
-            sy: Screen::HALF_H - Screen::FOCAL * ry2 / rz2,
+            sx: self.lens.hw + self.lens.focal * rx / rz2,
+            sy: self.lens.hh - self.lens.focal * ry2 / rz2,
             iz: 1.0 / rz2,
             cz: rz2,
         };
@@ -134,16 +207,6 @@ struct Camera : Projector {
  */
 trait PostEffect {
     fn apply(mut self, fb : FrameBuf) : void;
-}
-
-/**
- * Sun-direction shading capability: brightness for a surface normal under the
- * current sun. Owned by the per-frame day/night state (DayState) so the face
- * shader asks the lighting "how bright is this normal now?" rather than
- * re-deriving the sun dot-product against loose sun scalars.
- */
-trait SkyLighting {
-    fn shade(self, n : Vec3) : f64;
 }
 
 /**
@@ -170,40 +233,6 @@ fn maxf(a : f64, b : f64) : f64 {
         return a;
     }
     return b;
-}
-
-/**
- * Lambert brightness for a surface normal under a sun direction, lifted by the
- * ambient floor: `Render::AMBIENT + (1 - Render::AMBIENT) * max(0, n · sun)`. The single shared
- * shade term — the world faces and the mob boxes both call it instead of each
- * open-coding the same dot-product.
- * @param n    the (unit) surface normal
- * @param sun  the (unit) sun direction
- * @return the brightness factor in [ambient, 1]
- */
-fn shadeLambert(n : Vec3, sun : Vec3) : f64 {
-    let ndl : f64 = n.dot(sun);
-    if (ndl < 0.0) {
-        ndl = 0.0;
-    }
-    return Render::AMBIENT + (1.0 - Render::AMBIENT) * ndl;
-}
-
-/**
- * The exposed directional term: the ambient floor, plus the sun's own share of
- * `shadeLambert` scaled by how much of the sun this point can see and by
- * `Render::SUN_STRENGTH`. Only the sun's share is exposed — lifting the floor
- * with it would raise the shadows by exactly as much and show nothing.
- *
- * The world faces pass their corner's soft shadow fraction; a mob, which has
- * no shadow map, passes 1. Both go through here so a mob standing in the open
- * is lit by the same sun as the ground it stands on.
- * @param bright  the Lambert term for the surface normal
- * @param vis     the fraction of the direct term this point keeps (0..1)
- * @return the light factor for the surface
- */
-fn sunExposure(bright : f64, vis : f64) : f64 {
-    return Render::AMBIENT + Render::SUN_STRENGTH * vis * (bright - Render::AMBIENT);
 }
 
 /**
@@ -516,10 +545,10 @@ fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : 
  * @param tri    the triangle: 3 RasterVerts + atlas tile index + wrap flag
  * @param atlas  the texture atlas mip chain (buffer + offset / size tables)
  * @param gam    the colour space the texels are lit in
- * @param fogCol  distance-fog colour (terrain dissolves toward the sky)
+ * @param fogT    the fog: the sky's colour behind each pixel, and how much of it
  * @param band   the worker's disjoint screen-column band [x0, x1) to fill
  */
-fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, fogCol : Rgb, band : Band) : void {
+fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, fogT : FogTable, band : Band) : void {
     let pixels : i64 = fb.pixels;
     let zbuf : i64 = fb.zbuf;
     let w : i32 = fb.w;
@@ -748,17 +777,17 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                         let r : i32 = gam.encode(rf * trp);
                         let g : i32 = gam.encode(gf * tgp);
                         let bl : i32 = gam.encode(bf * tbp);
-                        // Distance fog: blend toward the sky past `Render::FOG_START`
-                        // so far terrain dissolves instead of shimmering.
-                        if (invz > Render::FOG_START) {
-                            let fog : f64 = (invz - Render::FOG_START) / (Render::FOG_END - Render::FOG_START);
-                            if (fog > 1.0) {
-                                fog = 1.0;
-                            }
+                        // Aerial perspective: dissolve into the sky THAT IS
+                        // THERE, behind this pixel — not into one average colour
+                        // for the frame, which is grey against the sun's glow and
+                        // too pale against the deep blue away from it.
+                        let fog : f64 = fogT.amount(invz);
+                        if (fog > 0.002) {
+                            let sky : SkyColour = fogT.skyAt(px, py);
                             let keep : f64 = 1.0 - fog;
-                            r = ((r as f64) * keep + (fogCol.r as f64) * fog).floorToInt() as i32;
-                            g = ((g as f64) * keep + (fogCol.g as f64) * fog).floorToInt() as i32;
-                            bl = ((bl as f64) * keep + (fogCol.b as f64) * fog).floorToInt() as i32;
+                            r = ((r as f64) * keep + sky.r * fog).floorToInt() as i32;
+                            g = ((g as f64) * keep + sky.g * fog).floorToInt() as i32;
+                            bl = ((bl as f64) * keep + sky.b * fog).floorToInt() as i32;
                         }
                         *zp = izp;
                         let pp : ptr<i32> = (pixels + idx * 4) as ptr<i32>;

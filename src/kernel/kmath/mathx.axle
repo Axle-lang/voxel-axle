@@ -12,6 +12,47 @@ pub const TAU : f64 = 6.28318530717959;   // 2π
  * @param hi  the upper bound
  * @return v clamped to [lo, hi]
  */
+/**
+ * Linear interpolation from `a` to `b`.
+ * @param a  the value at t = 0
+ * @param b  the value at t = 1
+ * @param t  the fraction (not clamped — callers that want it clamped say so)
+ * @return the interpolated value
+ */
+pub fn lerp(a : f64, b : f64, t : f64) : f64 {
+    return a + (b - a) * t;
+}
+
+/**
+ * The smooth 0→1 ramp between two edges: 0 at or below `e0`, 1 at or above
+ * `e1`, and eased between.
+ *
+ * What a threshold wants to be. A hard comparison gives a cloud an edge like a
+ * cut sheet of paper; this gives it the shoulder where it thins out, which is
+ * what a cloud's edge actually is.
+ * @param e0  the lower edge
+ * @param e1  the upper edge
+ * @param x   the value to ramp
+ * @return the eased fraction in [0, 1]
+ */
+pub fn smoothstep(e0 : f64, e1 : f64, x : f64) : f64 {
+    let d : f64 = e1 - e0;
+    if (d > 0.0 - 0.000001 && d < 0.000001) {
+        if (x < e0) {
+            return 0.0;
+        }
+        return 1.0;
+    }
+    let t : f64 = (x - e0) / d;
+    if (t < 0.0) {
+        return 0.0;
+    }
+    if (t > 1.0) {
+        return 1.0;
+    }
+    return t * t * (3.0 - 2.0 * t);
+}
+
 pub fn clampF64(v : f64, lo : f64, hi : f64) : f64 {
     if (v < lo) {
         return lo;

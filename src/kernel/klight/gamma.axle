@@ -9,21 +9,21 @@
 //
 // So the world pass DECODES each texel to linear light on the way in,
 // multiplies and adds there, and ENCODES the result back on the way
-// out. Both directions are tables: 256 f64 in, `Render::TONE_STEPS`
+// out. Both directions are tables: 256 f64 in, `Light::TONE_STEPS`
 // bytes out, so the hot loop pays a load rather than a `pow`. The mip
 // downsample averages through the same pair, which is what stops
 // distant textures from darkening as they shrink.
 //
 // The way out also carries the tone map. Light ADDS — a torch on a
 // sunlit wall exceeds full white — and a hard clamp turns every such
-// place into a flat white blob. Below `Render::TONE_KNEE` the curve is
+// place into a flat white blob. Below `Light::TONE_KNEE` the curve is
 // exactly the identity, so a fully lit surface still comes out as the
 // byte the texture was painted with; above it the excess rolls off
 // toward white, and the curve's slope matches at the join.
 
 use smalt::Mem;
 use smalt::Color;
-use crate::configs::render::{ Render };
+use crate::configs::light::{ Light };
 
 /** Entries in the decode table: one per source byte. */
 const DECODE_STEPS : i32 = 256;
@@ -68,19 +68,19 @@ fn linearToSrgb(x : f64) : f64 {
 }
 
 /**
- * The highlight shoulder: identity up to `Render::TONE_KNEE`, then a roll-off
+ * The highlight shoulder: identity up to `Light::TONE_KNEE`, then a roll-off
  * that approaches 1 without ever clipping. The two pieces meet with the same
  * value AND the same slope, so nothing bands at the knee.
  * @param x  the linear light amount (may exceed 1)
  * @return the tone-mapped amount, in 0..1
  */
 fn toneMap(x : f64) : f64 {
-    if (x <= Render::TONE_KNEE) {
+    if (x <= Light::TONE_KNEE) {
         return x;
     }
-    let head : f64 = 1.0 - Render::TONE_KNEE;
-    let over : f64 = x - Render::TONE_KNEE;
-    return Render::TONE_KNEE + head * over / (over + head);
+    let head : f64 = 1.0 - Light::TONE_KNEE;
+    let over : f64 = x - Light::TONE_KNEE;
+    return Light::TONE_KNEE + head * over / (over + head);
 }
 
 /** A colour held as three linear light amounts (a filtered texture sample). */
@@ -121,7 +121,7 @@ struct Gamma {
 
     /**
      * Tone-map a linear channel and encode it back to a display byte. Values
-     * below zero and above `Render::TONE_MAX` clamp to the table's ends.
+     * below zero and above `Light::TONE_MAX` clamp to the table's ends.
      * @param x  the channel's light amount
      * @return the display byte, 0..255
      */
@@ -130,7 +130,7 @@ struct Gamma {
         if (i < 0) {
             i = 0;
         }
-        let top : i32 = Render::TONE_STEPS - 1;
+        let top : i32 = Light::TONE_STEPS - 1;
         if (i > top) {
             i = top;
         }
@@ -169,7 +169,7 @@ struct Gamma {
  */
 class GammaTables {
     toLin : i64,  // f64[256]: display byte → linear light
-    toByte : i64, // byte[Render::TONE_STEPS]: linear light → tone-mapped byte
+    toByte : i64, // byte[Light::TONE_STEPS]: linear light → tone-mapped byte
 
     /** Fill both tables. */
     constructor() {
@@ -180,10 +180,10 @@ class GammaTables {
             i = i + 1;
         }
 
-        self.toByte = Mem::take(Render::TONE_STEPS as i64);
-        let step : f64 = Render::TONE_MAX / (Render::TONE_STEPS as f64);
+        self.toByte = Mem::take(Light::TONE_STEPS as i64);
+        let step : f64 = Light::TONE_MAX / (Light::TONE_STEPS as f64);
         let j : i32 = 0;
-        while (j < Render::TONE_STEPS) {
+        while (j < Light::TONE_STEPS) {
             let lin : f64 = ((j as f64) + 0.5) * step;
             let out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
             Mem::putByte(self.toByte, j as i64, out.floorToInt() as i32);
@@ -199,7 +199,7 @@ class GammaTables {
         return Gamma {
             toLin: self.toLin,
             toByte: self.toByte,
-            scale: (Render::TONE_STEPS as f64) / Render::TONE_MAX,
+            scale: (Light::TONE_STEPS as f64) / Light::TONE_MAX,
         };
     }
 }

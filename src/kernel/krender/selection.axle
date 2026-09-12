@@ -9,7 +9,7 @@
 
 use smalt::Mem;
 use smalt::Color;
-use crate::kernel::krender::raster::{ FrameBuf, Camera, Projected };
+use crate::kernel::krender::raster::{ FrameBuf, Camera, Lens, Projected };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::kentity::player::Player;
 use crate::configs::screen::{ Screen };
@@ -130,15 +130,15 @@ class Selection {
      * it reads as an outline on the block, not a see-through cage.
      * @param p     player providing the eye position and orientation
      * @param fb    the render target (framebuffer + z-buffer + size)
-     * @param hw    half the render width (horizontal projection centre)
+     * @param lens  the frame's projection centre + focal length
      * @param bx    targeted block x
      * @param by    targeted block y
      * @param bz    targeted block z
      * @param topH  the block's real height (1.0 full, snowDepth for a thin snow
      *              layer) so the outline hugs the true box, not a cube
      */
-    pub(crate) fn draw(self, p : Player, fb : FrameBuf, hw : f64, bx : i32, by : i32, bz : i32, topH : f64) : void {
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: hw };
+    pub(crate) fn draw(self, p : Player, fb : FrameBuf, lens : Lens, bx : i32, by : i32, bz : i32, topH : f64) : void {
+        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: lens };
         let k : i32 = 0;
         while (k < 8) {
             let cdx : f64 = (k & 1) as f64;

@@ -1,0 +1,195 @@
+// cloudmap — how much of the sun survives the cloud, per world column.
+//
+// The other half of `cloud`: that file says where the water is, this one marches
+// light through it. Beer-Lambert, integrated along the ray toward whichever body
+// is up, with a floor for the light that multiple-scattered its way out instead
+// of being absorbed — a real cloud is never black, and pure extinction makes one
+// that is.
+//
+// It is a MAP because the alternative is unaffordable. The ground asks "how much
+// sun reaches me" once per lit cell per shadow bake, and answering that with a
+// fresh march through a noise field would cost more than the voxel shadow it is
+// multiplying. So the march happens once per map cell on the light thread, a
+// dozen blocks apart (`MAP_SPAN / MAP_SIDE`), and the bake reads a byte. That is
+// still finer than the thing being sampled: a cloud shadow's edge is soft over
+// tens of blocks.
+//
+// The map follows the camera and re-bakes on a cadence rather than on a dirty
+// flag, because what makes it stale is the wind, and the wind never stops.
+
+use smalt::Mem;
+use crate::kernel::ksky::cloud::{ CloudField };
+use crate::kernel::kmath::vec3::{ Vec3 };
+use crate::configs::cloud::{ Cloud };
+
+/**
+ * The sun's transmittance through the cloud deck over a square of world,
+ * centred on wherever the camera was when it was baked.
+ *
+ * One byte a cell: 255 is open sky, 0 is a column of water the light did not get
+ * through. Reads outside the square return open sky — a shadow you have walked
+ * out of the map for is better absent than wrong.
+ */
+class CloudMap {
+    cells : i64,      // MAP_SIDE² bytes of transmittance
+    originX : i32,    // world x of cell 0, in blocks
+    originZ : i32,
+    step : i32,       // blocks per cell
+    live : i32,       // 0 until the first bake, so an unbaked map reads as clear
+    due : i32,        // passes until the next re-march
+
+    /** Allocate the map, open everywhere until the first bake fills it. */
+    constructor() {
+        let n : i64 = (Cloud::MAP_SIDE as i64) * (Cloud::MAP_SIDE as i64);
+        self.cells = Mem::takeZeroed(n);
+        let i : i64 = 0;
+        while (i < n) {
+            Mem::putByte(self.cells, i, 255);
+            i = i + 1;
+        }
+        self.originX = 0;
+        self.originZ = 0;
+        self.step = Cloud::MAP_SPAN / Cloud::MAP_SIDE;
+        self.live = 0;
+        self.due = 0;
+    }
+
+    /**
+     * The fraction of the body's light that reaches a world column through the
+     * cloud, 0..1. Bilinear between cells, so a cloud's shadow edge arrives as a
+     * gradient rather than as the map's own grid.
+     * @param wx  world x
+     * @param wz  world z
+     * @return the transmittance, 1 where there is no map or no cloud
+     */
+    pub(crate) fn transmit(self, wx : f64, wz : f64) : f64 {
+        if (self.live == 0) {
+            return 1.0;
+        }
+        let fx : f64 = (wx - (self.originX as f64)) / (self.step as f64);
+        let fz : f64 = (wz - (self.originZ as f64)) / (self.step as f64);
+        let ix : i32 = fx.floorToInt() as i32;
+        let iz : i32 = fz.floorToInt() as i32;
+        if (ix < 0 || iz < 0 || ix >= Cloud::MAP_SIDE - 1 || iz >= Cloud::MAP_SIDE - 1) {
+            return 1.0;
+        }
+        let tx : f64 = fx - (ix as f64);
+        let tz : f64 = fz - (iz as f64);
+        let s : i32 = Cloud::MAP_SIDE;
+        let a : f64 = (Mem::byteAt(self.cells, (iz * s + ix) as i64) as f64);
+        let b : f64 = (Mem::byteAt(self.cells, (iz * s + ix + 1) as i64) as f64);
+        let c : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix) as i64) as f64);
+        let d : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix + 1) as i64) as f64);
+        let top : f64 = a + (b - a) * tx;
+        let bot : f64 = c + (d - c) * tx;
+        return (top + (bot - top) * tz) * 0.00392157;
+    }
+
+    /**
+     * Re-march the whole map around a camera column, for this field and this
+     * light direction.
+     *
+     * Cheap enough to do whole rather than in shares: six thousand cells of a
+     * seven-step march, on the light thread, beside bakes that are two orders of
+     * magnitude larger.
+     * @param field  the cloud field, already drifted
+     * @param sun    the direction light arrives from (unit)
+     * @param camX   world x to centre the map on
+     * @param camZ   world z to centre the map on
+     */
+    pub(crate) fn rebake(mut self, field : CloudField, sun : Vec3, camX : i32, camZ : i32) : void {
+        // Not every pass. The march is thousands of noise evaluations and the
+        // wind moves a cloud across one cell in seconds; the exception is a map
+        // that has never been filled, or one the player has walked off.
+        self.due = self.due - 1;
+        if (self.live == 1 && self.due > 0
+            && (camX - self.originX - Cloud::MAP_SPAN / 2).abs() < Cloud::MAP_SPAN / 4
+            && (camZ - self.originZ - Cloud::MAP_SPAN / 2).abs() < Cloud::MAP_SPAN / 4) {
+            return;
+        }
+        self.due = Cloud::MAP_EVERY;
+        let half : i32 = Cloud::MAP_SPAN / 2;
+        self.originX = camX - half;
+        self.originZ = camZ - half;
+        let s : i32 = Cloud::MAP_SIDE;
+        let iz : i32 = 0;
+        while (iz < s) {
+            let wz : f64 = (self.originZ + iz * self.step) as f64;
+            let ix : i32 = 0;
+            while (ix < s) {
+                let wx : f64 = (self.originX + ix * self.step) as f64;
+                let t : f64 = sunThrough(field, wx, wz, sun);
+                let v : i32 = (t * 255.0 + 0.5).floorToInt() as i32;
+                if (v < 0) {
+                    v = 0;
+                }
+                if (v > 255) {
+                    v = 255;
+                }
+                Mem::putByte(self.cells, (iz * s + ix) as i64, v);
+                ix = ix + 1;
+            }
+            iz = iz + 1;
+        }
+        self.live = 1;
+    }
+}
+
+/**
+ * March from a ground column up toward the light and return what survives.
+ *
+ * The ray is followed through the whole altitude band the deck can occupy, and
+ * the column is re-sampled at every step — the ray leans, so it leaves the
+ * column it started under, and a shadow that ignored that would fall straight
+ * down under every cloud whatever the hour.
+ *
+ * A very low body is treated as blocked: at a grazing angle the path through the
+ * deck is effectively unbounded, and marching it honestly would cost more than
+ * the answer, which is "almost none".
+ * @param field  the cloud field
+ * @param wx     the column's world x
+ * @param wz     the column's world z
+ * @param sun    the direction light arrives from (unit)
+ * @return the fraction of the light that gets through, 0..1
+ */
+fn sunThrough(field : CloudField, wx : f64, wz : f64, sun : Vec3) : f64 {
+    if (!Cloud::ON) {
+        return 1.0;
+    }
+    if (sun.y < 0.08) {
+        return Cloud::SCATTER_FLOOR;
+    }
+    let lo : f64 = Cloud::BASE;
+    let hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
+    // Where the ray enters and leaves the band, and how far that is along it.
+    // Measured from the surface the shadow lands on, not from y = 0: the lean is
+    // (altitude difference) / sin(elevation), and starting a hundred blocks too
+    // low leans the whole march half again too far.
+    let t0 : f64 = (lo - Cloud::SHADOW_FROM) / sun.y;
+    let t1 : f64 = (hi - Cloud::SHADOW_FROM) / sun.y;
+    // A fixed count over a length that is capped but continuous — the same rule
+    // the view march uses, and for the same reason: a count derived from the span
+    // jumps, and a jump in a shadow map is a hard edge in the light on the ground
+    // that no cloud put there.
+    let span : f64 = t1 - t0;
+    let cut : f64 = span;
+    if (cut > Cloud::MAX_PATH) {
+        cut = Cloud::MAX_PATH;
+    }
+    let n : i32 = Cloud::SUN_STEPS_MIN;
+    let ds : f64 = cut / (n as f64);
+    let sum : f64 = 0.0;
+    let i : i32 = 0;
+    while (i < n) {
+        let t : f64 = t0 + ((i as f64) + 0.5) * ds;
+        let px : f64 = wx + sun.x * t;
+        let py : f64 = Cloud::SHADOW_FROM + sun.y * t;
+        let pz : f64 = wz + sun.z * t;
+        sum = sum + field.densityAt(vec3(px, py, pz));
+        i = i + 1;
+    }
+    let e : f64 = (0.0 - sum * ds).exp();
+    // The light that scattered its way out rather than being absorbed. Without
+    // it a thick cloud casts a black hole, and no cloud does.
+    return Cloud::SCATTER_FLOOR + (1.0 - Cloud::SCATTER_FLOOR) * e;
+}

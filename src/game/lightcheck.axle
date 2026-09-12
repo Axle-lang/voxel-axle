@@ -26,12 +26,47 @@ use crate::kernel::kblock::blocks::{ emissionOf, isOpaque, Emission };
 use crate::kernel::seams::{ ChannelLevels };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
+use crate::configs::cloud::{ Cloud };
+use crate::configs::light::{ Light };
+use crate::kernel::kmath::vec3::{ Vec3, vec3 };
+use crate::kernel::klight::facelight::{ FaceLight, shadeLambert };
+use crate::kernel::ksky::cloud::{ CloudField, cloudFieldAt };
+use crate::kernel::ksky::cloudlight::{ sunThrough };
+use crate::kernel::ksky::clouddome::{ CloudSky, CloudDome, CloudCell };
+use crate::kernel::klight::daymodel::{ DayState, computeDayState };
+use smalt::Mem;
 
 /** How far out the probe searches the loaded ring for a test site. */
 const LIGHT_SCAN : i32 = 60;
 
 /** Blocks of clear air the site needs along +X, to sample the falloff along. */
 const LIGHT_RUN : i32 = 14;
+
+/**
+ * How much brighter a sunward face must be than one turned away, and how much a
+ * cast shadow must take off the SAME face.
+ *
+ * The same face, deliberately. Comparing a shadowed floor against a face turned
+ * away compares two different things: the floor still sees the whole sky dome
+ * and the turned-away face sees almost none of it, so the floor is rightly the
+ * brighter of the two and nothing is wrong. What a shadow has to do is darken
+ * the surface IT falls on.
+ *
+ * Loose numbers on purpose — the point is to catch the light going flat, not to
+ * freeze today's tuning.
+ */
+const DIRECTIONAL_MIN : f64 = 6.0;
+/**
+ * How much the cloud shadow must vary across the world for it to read as a
+ * shadow at all. A deck that shades everything by the same amount is a dimmer
+ * switch, not weather.
+ */
+const CLOUD_SHADOW_RANGE : f64 = 0.30;
+const SHADOW_MIN_RATIO : f64 = 4.0;
+
+/** How deep the plugged-tunnel check sinks its shaft, and how far the branch runs. */
+const TUNNEL_DEPTH : i32 = 6;
+const TUNNEL_RUN : i32 = 5;
 
 /**
  * Run the coloured-light checks and report the failures.
@@ -57,6 +92,11 @@ fn runLightCheck() : i32 {
     fails = fails + checkRemoval(man, site);
     fails = fails + checkBuried(man, site);
     fails = fails + checkSealedPocket(man, site);
+    fails = fails + checkPluggedTunnel(man, site);
+    fails = fails + checkDirectional();
+    fails = fails + checkCloud();
+    fails = fails + checkCloudShape();
+    fails = fails + checkCloudCoherence();
 
     man.stopLight();
     Console::println("light failures: ${fails}");
@@ -208,6 +248,234 @@ fn checkSealedPocket(man : ChunkManager, site : IVec3) : i32 {
 }
 
 /**
+ * A tunnel lit through its mouth must go dark when the mouth is PLUGGED, and
+ * with the one block that plugs it.
+ *
+ * The sealed pocket above only ever tests light that never arrived. This tests
+ * light that did: a shaft sunk from the open sky, a side branch off the bottom
+ * of it that the sideways gradient fills, and then a single block dropped into
+ * the shaft's mouth. Every cell the sky was reaching has to give its light back.
+ *
+ * It is the case the vertical reconciliation alone cannot answer — the branch's
+ * own columns are roofed by rock and do not change when the mouth does, so the
+ * only thing that can darken them is the removal flood walking the path the
+ * light actually took.
+ * @param man   the world to dig in
+ * @param site  an air cell above open ground, to sink the shaft from
+ * @return the number of cells still lit after the mouth was plugged
+ */
+fn checkPluggedTunnel(man : ChunkManager, site : IVec3) : i32 {
+    // The mouth is the SURFACE block, not a fixed offset below the site: the
+    // air above the ground is open sideways, so a plug placed there seals
+    // nothing and the check would be measuring its own geometry.
+    let top : i32 = site.y;
+    while (top > site.y - 4 && !isOpaque(man.worldGet(ivec3(site.x, top, site.z)))) {
+        top = top - 1;
+    }
+    if (!isOpaque(man.worldGet(ivec3(site.x, top, site.z)))) {
+        Console::println("  no ground under the site — the plug check could not run");
+        return 0;
+    }
+    let mouth : IVec3 = ivec3(site.x, top, site.z);
+    let floor : i32 = top - TUNNEL_DEPTH + 1;
+    let d : i32 = 0;
+    while (d < TUNNEL_DEPTH) {
+        let cell : IVec3 = ivec3(site.x, top - d, site.z);
+        man.breakAt(cell);
+        man.lightUpdate(cell);
+        d = d + 1;
+    }
+    let b : i32 = 1;
+    while (b <= TUNNEL_RUN) {
+        let cell : IVec3 = ivec3(site.x + b, floor, site.z);
+        man.breakAt(cell);
+        man.lightUpdate(cell);
+        b = b + 1;
+    }
+    // The branch has to be lit first, or "it went dark" says nothing.
+    let far : IVec3 = ivec3(site.x + TUNNEL_RUN, floor, site.z);
+    let before : i32 = man.skGetW(far);
+    if (before == 0) {
+        Console::println("  tunnel end never lit (sky=0) — the plug check could not run");
+        return 0;
+    }
+    Console::println("  tunnel end lit to sky=${before}, plugging the mouth");
+
+    man.placeAt(mouth, Block::Stone);
+    man.lightUpdate(mouth);
+
+    let bad : i32 = 0;
+    let k : i32 = 0;
+    while (k <= TUNNEL_RUN) {
+        let cell : IVec3 = ivec3(site.x + k, floor, site.z);
+        let sky : i32 = man.skGetW(cell);
+        if (sky != 0) {
+            Console::println("  plugged tunnel at +${k}: sky=${sky} — still lit");
+            bad = bad + 1;
+        }
+        k = k + 1;
+    }
+    return bad;
+}
+
+/**
+ * The rule the whole engine is built on, as a number: THE LIGHT COMES FROM THE
+ * SUN, so a face turned toward it must be far brighter than the same face turned
+ * away — and a face in a cast shadow must be down with the one turned away, not
+ * halfway between.
+ *
+ * It is asserted rather than looked at because it is exactly the sort of thing a
+ * later tuning pass undoes without noticing: raise an ambient a little here,
+ * soften a shadow a little there, and the world goes back to being lit from
+ * nowhere while every individual change looked reasonable.
+ * @return the number of ratios that came out too flat
+ */
+fn checkDirectional() : i32 {
+    let sun : Vec3 = vec3(0.455, 0.827, 0.330);
+    let toward : FaceLight = shadeLambert(vec3(0.0, 1.0, 0.0), sun);
+    let away : FaceLight = shadeLambert(vec3(0.0 - 0.455, 0.0 - 0.827, 0.0 - 0.330), sun);
+    let lit : f64 = toward.exposure(1.0);
+    let dark : f64 = away.exposure(1.0);
+    let shadowed : f64 = toward.exposure(Light::SHADOW_KEEP);
+    Console::println("  sunward=${lit} away=${dark} same-face-shadowed=${shadowed}"
+        + "  (directional ${lit / dark}x, shadow ${lit / shadowed}x)");
+    let bad : i32 = 0;
+    if (lit < dark * DIRECTIONAL_MIN) {
+        Console::println("  sunward is only ${lit / dark}x the away face — the light is not coming from the sun");
+        bad = bad + 1;
+    }
+    if (lit < shadowed * SHADOW_MIN_RATIO) {
+        Console::println("  a cast shadow only takes this face from ${lit} to ${shadowed} — the shadow is not a shadow");
+        bad = bad + 1;
+    }
+    return bad;
+}
+
+/**
+ * The cloud deck has to cast a shadow that VARIES, and stay inside what it
+ * promises: never darker than its own multiple-scattering floor, never brighter
+ * than open sky.
+ *
+ * It deliberately does not compare a column's cloud against that column's
+ * shadow. Once the sun leans — and at fifty degrees, through a deck three
+ * hundred blocks up, it leans three hundred blocks sideways — the water above a
+ * column and the water shading it are not the same water at all. An earlier
+ * version of this check did compare them and reported the thickest column as the
+ * BRIGHTER one, which was the check being wrong, not the engine.
+ *
+ * What is left is what can honestly be said from outside: the field is not
+ * constant, and it respects its own bounds.
+ * @return the number of claims that did not hold
+ */
+fn checkCloud() : i32 {
+    let sun : Vec3 = vec3(0.455, 0.827, 0.330);
+    let field : CloudField = cloudFieldAt(0.0);
+    let lo : f64 = 2.0;
+    let hi : f64 = 0.0 - 1.0;
+    let i : i32 = 0;
+    while (i < 600) {
+        let t : f64 = sunThrough(field, (i as f64) * 23.0, (i as f64) * 17.0, sun);
+        if (t < lo) {
+            lo = t;
+        }
+        if (t > hi) {
+            hi = t;
+        }
+        i = i + 1;
+    }
+    Console::println("  cloud shadow over 600 columns: ${lo} .. ${hi}");
+    let bad : i32 = 0;
+    if (hi - lo < CLOUD_SHADOW_RANGE) {
+        Console::println("  the deck shades everything alike (${lo}..${hi}) — no shadow would sweep the ground");
+        bad = bad + 1;
+    }
+    if (lo < Cloud::SCATTER_FLOOR - 0.001 || hi > 1.001) {
+        Console::println("  transmittance left its bounds: ${lo} .. ${hi}");
+        bad = bad + 1;
+    }
+    return bad;
+}
+
+/**
+ * Does the cloud have a SHAPE on the vertical axis?
+ *
+ * A picture cannot answer this — a tall cloud seen from underneath shows its
+ * base and looks as flat as a sheet does. So the field is probed directly:
+ * walk a column from the deck's floor to its ceiling and count how far the water
+ * extends and how many separate spans of it there are.
+ *
+ * The span COUNT is the part that matters. One span per column is what a
+ * heightfield produces and is all it can ever produce: a bottom, a top, nothing
+ * between. Two or more means the noise has cut clean through the mass — a hole
+ * with sky behind it, an overhang above it — and that is the thing that cannot
+ * be drawn on a sheet of paper.
+ * @return the number of claims about the vertical shape that did not hold
+ */
+fn checkCloudShape() : i32 {
+    let field : CloudField = cloudFieldAt(0.0);
+    let step : f64 = 2.0;
+    let tallest : f64 = 0.0;
+    let gaps : i32 = 0;
+    let sampled : i32 = 0;
+    let z : i32 = 0;
+    while (z < 24) {
+        let x : i32 = 0;
+        while (x < 24) {
+            let wx : f64 = (x as f64) * 37.0;
+            let wz : f64 = (z as f64) * 41.0;
+            if (field.coverAt(wx, wz, 1.0) > 0.0) {
+                sampled = sampled + 1;
+                let spans : i32 = 0;
+                let inside : bool = false;
+                let lowest : f64 = 0.0;
+                let highest : f64 = 0.0;
+                let y : f64 = Cloud::BASE;
+                while (y <= Cloud::BASE + Cloud::THICK_MAX) {
+                    let solid : bool = field.densityAt(vec3(wx, y, wz)) > 0.0005;
+                    if (solid && !inside) {
+                        spans = spans + 1;
+                        if (lowest == 0.0) {
+                            lowest = y;
+                        }
+                    }
+                    if (solid) {
+                        highest = y;
+                    }
+                    inside = solid;
+                    y = y + step;
+                }
+                if (spans > 1) {
+                    gaps = gaps + 1;
+                }
+                if (highest - lowest > tallest) {
+                    tallest = highest - lowest;
+                }
+            }
+            x = x + 1;
+        }
+        z = z + 1;
+    }
+    if (sampled == 0) {
+        Console::println("  cloud shape: no cloudy column found — the check could not run");
+        return 1;
+    }
+    Console::println("  cloud shape: ${sampled} cloudy columns, tallest spans ${tallest} blocks,"
+        + " ${gaps} of them broken by a gap");
+    let bad : i32 = 0;
+    if (tallest < Cloud::THICK_MAX * 0.35) {
+        Console::println("  the tallest column is only ${tallest} of ${Cloud::THICK_MAX} — the deck is a layer, not a volume");
+        bad = bad + 1;
+    }
+    // A tenth is not a target, it is a floor: below it the field is making one
+    // unbroken slab per column, which is a heightfield wearing 3-D noise.
+    if (gaps * 10 < sampled) {
+        Console::println("  only ${gaps} of ${sampled} columns are broken through — the noise is not carving the mass");
+        bad = bad + 1;
+    }
+    return bad;
+}
+
+/**
  * The level a flood seeded at `emit` leaves `d` blocks away: one lost per block
  * travelled, never below nothing.
  * @param emit  the source's level on this channel
@@ -220,4 +488,122 @@ fn floodLevel(emit : i32, d : i32) : i32 {
         return 0;
     }
     return v;
+}
+
+/**
+ * Does the sky ever show two moments at once?
+ *
+ * The cloud table is refreshed a slice at a time, and every band that has ever
+ * crossed the sky came from the same place: rows marched in different frames
+ * with different inputs, read together. The picture cannot prove that is gone
+ * — a band needs motion to be seen — so the table is driven directly.
+ *
+ * Three claims. While a new march is in progress, the table that is READ must
+ * not change by a single bit: nothing partial is ever visible. When the march
+ * completes, every cell must move toward it by the SAME fraction each frame —
+ * that sameness is the absence of a frontier. And it must actually arrive.
+ * @return the number of claims that did not hold
+ */
+fn checkCloudCoherence() : i32 {
+    let fA : CloudField = cloudFieldAt(0.0);
+    let fB : CloudField = cloudFieldAt(2.0);
+    let dsA : DayState = computeDayState(0.70);
+    let dsB : DayState = computeDayState(0.74);
+
+    // A: one full march. B: the same, a little later, higher, with the sun lower.
+    let a : CloudSky = new CloudSky();
+    a.march(fA, dsA, 70.0);
+    let b : CloudSky = new CloudSky();
+    b.march(fB, dsB, 76.0);
+    let n : i64 = a.dome().cells();
+    let snapA : i64 = Mem::take(n * 8);   // the check's own copy, at full width
+    let i : i64 = 0;
+    while (i < n) {
+        Mem::putRealOf(snapA, i, a.dome().cellAt(i).cov);
+        i = i + 1;
+    }
+
+    // A whole cycle at B, during which nothing visible may change.
+    let moved : i32 = 0;
+    let f : i32 = 0;
+    while (f < a.cycleFrames()) {
+        a.march(fB, dsB, 76.0);
+        let d : CloudDome = a.dome();
+        let j : i64 = 0;
+        let diff : i32 = 0;
+        while (j < n) {
+            if (d.cellAt(j).cov != Mem::realOf(snapA, j)) {
+                diff = diff + 1;
+            }
+            j = j + 1;
+        }
+        if (diff > 0) {
+            moved = moved + 1;
+        }
+        f = f + 1;
+    }
+
+    // Then the fade: every cell the same fraction of the way, every frame.
+    let worstSpread : f64 = 0.0;
+    f = 0;
+    while (f < 60) {
+        a.march(fB, dsB, 76.0);
+        let d : CloudDome = a.dome();
+        let bd : CloudDome = b.dome();
+        let lo : f64 = 2.0;
+        let hi : f64 = 0.0 - 1.0;
+        let j : i64 = 0;
+        while (j < n) {
+            let va : f64 = Mem::realOf(snapA, j);
+            let vb : f64 = bd.cellAt(j).cov;
+            let gap : f64 = vb - va;
+            if (gap > 0.02 || gap < 0.0 - 0.02) {
+                let r : f64 = (d.cellAt(j).cov - va) / gap;
+                if (r < lo) {
+                    lo = r;
+                }
+                if (r > hi) {
+                    hi = r;
+                }
+            }
+            j = j + 1;
+        }
+        if (hi >= lo && hi - lo > worstSpread) {
+            worstSpread = hi - lo;
+        }
+        f = f + 1;
+    }
+
+    // And it arrives.
+    let far : i32 = 0;
+    let bd : CloudDome = b.dome();
+    let d : CloudDome = a.dome();
+    i = 0;
+    while (i < n) {
+        let e : f64 = d.cellAt(i).cov - bd.cellAt(i).cov;
+        if (e > 0.01 || e < 0.0 - 0.01) {
+            far = far + 1;
+        }
+        i = i + 1;
+    }
+
+    Console::println("  cloud coherence: ${moved} frames of a cycle changed the shown table,"
+        + " worst spread of the fade ${worstSpread}, ${far} cells short of the target after it");
+    let bad : i32 = 0;
+    if (moved > 0) {
+        Console::println("  a march in progress leaked into the shown table — that is a band");
+        bad = bad + 1;
+    }
+    // The tables hold sixteen-bit fractions, so each cell's step rounds to its
+    // own quantum: over a gap of 0.02 that is a part in a thousand of scatter
+    // between cells. A frontier is a spread of about one.
+    if (worstSpread > 0.005) {
+        Console::println("  cells faded at different rates — that is a frontier");
+        bad = bad + 1;
+    }
+    if (far > 0) {
+        Console::println("  the shown table never reached the completed march");
+        bad = bad + 1;
+    }
+    return bad;
 }

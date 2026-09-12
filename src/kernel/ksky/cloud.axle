@@ -1,0 +1,216 @@
+// cloud — where the water is in the sky, and how much of it.
+//
+// A real three-dimensional field. `densityAt(x, y, z)` answers how much water is
+// at a POINT, and the answer genuinely depends on all three coordinates — there
+// is no surface, no thickness attribute, nothing that could be drawn on a sheet.
+//
+// It was a heightfield first: base, top and density per column. That is a sheet
+// of paper with a thickness written on it, and it fails in two ways that turn
+// out to be the same failure. It cannot make an overhang or a hole, because a
+// column has one top. And its silhouette is HARD — a column is either thick or
+// it is not — so wherever the deck saturates, the only thing still varying is
+// the outline, which is precisely the high-frequency detail a coarse march
+// cannot carry. Seen along its own plane, toward the horizon, it collapses into
+// the thinness it actually has: the clouds came out as horizontal streaks,
+// because that is what a sheet looks like edge-on.
+//
+// The volume is built the other way round. A slow 2-D weather field says how
+// much of the altitude band a region may fill; a profile gives the cloud a flat
+// base and a domed top and ties its height to that coverage, so the field has
+// wisps and towers. Then the 3-D noise ERODES the envelope — subtracted, not
+// multiplied. That distinction is the whole thing: a multiplied field only thins
+// a shape it cannot reshape, while a subtracted one cuts INTO it, opening holes,
+// leaving overhangs, and giving the boundary a fractal softness that resolves
+// gracefully however coarsely it is sampled.
+
+use crate::kernel::kmath::noise2::{ fbm };
+use crate::kernel::kmath::noise3::{ fbm3 };
+use crate::kernel::kmath::mathx::{ smoothstep };
+use crate::configs::noise::{ Noise };
+use crate::kernel::kmath::vec3::{ Vec3, vec3 };
+use crate::configs::cloud::{ Cloud };
+
+/**
+ * The cloud field at one instant: the noise, plus how far the wind has carried
+ * it. A value struct, so it crosses `spawn` into the sky's worker rows and onto
+ * the light thread without being shared.
+ */
+struct CloudField {
+    pub(crate) driftX : f64,
+    pub(crate) driftZ : f64,
+    pub(crate) coverage : f64,
+
+    /**
+     * The weather over a column: how much of the altitude band this region of
+     * sky may fill, 0 (clear) to 1 (a tower to the top of the deck).
+     *
+     * The one 2-D thing left, and it earns its place — it varies over kilometres,
+     * it is what a ray can be tested against before marching at all, and it is
+     * what gives the sky large-scale structure instead of uniform fractal mush.
+     * What it no longer does is describe the cloud's SHAPE.
+     * @param wx  world x
+     * @param wz  world z
+     * @return the band fraction this column may fill, 0..1
+     */
+    pub(crate) fn coverAt(self, wx : f64, wz : f64, lod : f64) : f64 {
+        let x : f64 = wx * Cloud::SHAPE_SCALE + self.driftX;
+        let z : f64 = wz * Cloud::SHAPE_SCALE + self.driftZ;
+        let c : f64 = fbm(x, z, Noise::SEED + 7001, 4);
+        // `coverage` moves the THRESHOLD, so more of it fills more sky rather
+        // than making the same clouds heavier.
+        let lo : f64 = 1.0 - self.coverage;
+        // The shoulder widens as the sample coarsens. A cloud's EDGE is the
+        // sharpest thing in the field, and near the horizon a table cell spans
+        // most of one, so the deck's silhouette was being cut into teeth by a
+        // shoulder narrower than the sample that had to carry it. Softening it
+        // exactly as far as the cell is wide is the same filtering the 3-D
+        // detail gets, applied to the one part of the field that is not detail.
+        let soft : f64 = Cloud::EDGE_SOFT + (1.0 - lod) * Cloud::EDGE_WIDEN;
+        return smoothstep(lo, lo + soft, c);
+    }
+
+    /**
+     * How far up the band a column with this much weather reaches, as a fraction.
+     *
+     * Separate from coverage, and that separation is what lets the sky be SPARSE
+     * without being small. Coverage decides whether there is a cloud here at all;
+     * left doing double duty as the height too, thinning the sky to isolated
+     * clouds also flattened every one of them, because the columns that survived
+     * a higher threshold were the ones near its edge — present, but barely tall.
+     * A floor under the height breaks that: a cloud that exists at all rises.
+     * @param cov  the band fraction from the weather field
+     * @return the fraction of the band this column fills
+     */
+    pub(crate) fn heightOf(self, cov : f64) : f64 {
+        return Cloud::HEIGHT_MIN + (1.0 - Cloud::HEIGHT_MIN) * cov;
+    }
+
+    /**
+     * The water at a point, given the weather already sampled there.
+     *
+     * Split from `densityAt` because a march crosses the band mostly VERTICALLY
+     * while the weather varies horizontally over hundreds of blocks: a caller
+     * with a ray samples the weather once at each end and interpolates, then
+     * spends what it saved on the 3-D field — which is the part that actually
+     * changes from one step to the next.
+     * @param cov  the band fraction at this column
+     * @param at   the world point
+     * @param lod  how much of the 3-D detail this sample can resolve, 0..1
+     * @param oct  octaves of the 3-D field to sum — fewer where a path integrates them away
+     * @return the extinction per block of path there
+     */
+    pub(crate) fn densityAtCover(self, cov : f64, at : Vec3, lod : f64, oct : i32) : f64 {
+        if (cov <= 0.0) {
+            return 0.0;
+        }
+        let h : f64 = (at.y - Cloud::BASE) / Cloud::THICK_MAX;
+        if (h < 0.0 || h > 1.0) {
+            return 0.0;
+        }
+        // A flat base and a domed top, the top's height following the weather —
+        // which is where the random depth comes from. Cumulus sit on a level
+        // bottom because that is the altitude their water condenses at, and they
+        // billow up from it by however much they have.
+        let prof : f64 = smoothstep(0.0, Cloud::BASE_SOFT, h)
+            * smoothstep(0.0, Cloud::TOP_SOFT, self.heightOf(cov) - h);
+        if (prof <= 0.0) {
+            return 0.0;
+        }
+        // And now the shape itself.
+        //
+        // The 3-D field IS the mass; the profile only biases how much of it
+        // survives. That is the difference between a volume and a decorated
+        // sheet, and getting it wrong is subtle: subtracting the noise from the
+        // profile — `prof - erosion * (1 - n)` — reads as erosion but cannot
+        // erode, because in the core `prof` is 1 and the subtraction can never
+        // reach it. Measured, that shape left 0 of 228 columns broken through:
+        // every one a single unbroken slab from bottom to top, which is a
+        // heightfield wearing 3-D noise.
+        //
+        // Thresholding the noise instead lets the mass be absent wherever the
+        // field happens to be low — INCLUDING mid-column. That is what makes a
+        // hole with sky behind it, and an overhang above it.
+        let n : f64 = fbm3(
+            (at.x + self.driftX * Cloud::DRIFT_TO_WORLD) * Cloud::DETAIL_SCALE,
+            at.y * Cloud::DETAIL_SCALE_Y,
+            (at.z + self.driftZ * Cloud::DRIFT_TO_WORLD) * Cloud::DETAIL_SCALE,
+            Noise::SEED + 7004, oct);
+        // Widened around its middle. A summed, normalised fbm crowds toward 0.5
+        // — three octaves at halving amplitude have most of their mass in the
+        // middle third — so a threshold cuts it into a solid majority and a few
+        // slivers, and the slivers are never deep enough to open a hole. Pushing
+        // the distribution outward is what gives the field both real voids and
+        // real cores rather than an even haze.
+        n = (n - 0.5) * Cloud::CONTRAST + 0.5;
+        let d : f64 = n - Cloud::THRESHOLD - (1.0 - prof) * Cloud::PROFILE_BIAS;
+        if (d < 0.0) {
+            d = 0.0;
+        }
+        // And then mixed toward what this column would hold with the detail
+        // AVERAGED OUT, by however coarsely the sample is being taken.
+        //
+        // A direction table cell covers a fixed solid angle, so the patch of deck
+        // behind it grows without bound as the deck tilts away toward the
+        // horizon; past about one feature per cell the field is not being
+        // sampled but aliased, which is what combed the low sky into teeth. The
+        // mix has to be of the DENSITY and not of the noise underneath it: fading
+        // `n` toward its mean instead leaves it sitting on the threshold, which
+        // turns the deck into a thin binary sheet — smoother noise, sharper
+        // shape, and a worse comb than before. The smooth end is the envelope
+        // times the detail's mean, which is the slab a cloud deck resolves to
+        // when it is too far away to have a texture.
+        let mean : f64 = prof * Cloud::MEAN_DETAIL;
+        let mix : f64 = d * lod + mean * (1.0 - lod);
+        if (mix <= 0.0) {
+            return 0.0;
+        }
+        // And thinned out toward the weather's own edge. `heightOf` floors the
+        // height, which is right for the mass but wrong for its outline: a
+        // column with a trace of weather was a full-height cloud and a column
+        // with none was nothing, so the silhouette was a STEP — and a step,
+        // marched into a grid of cells, is a staircase of teeth along every
+        // cloud's edge whatever the reconstruction does. The ramp makes the
+        // outline a ramp too, which is what the edge of a cloud is: wisps.
+        let edge : f64 = cov * Cloud::EDGE_RAMP;
+        if (edge < 1.0) {
+            mix = mix * edge;
+        }
+        return mix * Cloud::DENSITY;
+    }
+
+    /**
+     * The water at a point, sampling the weather there too — what a caller with
+     * a single point rather than a ray wants.
+     * @param at  the world point
+     * @return the extinction per block of path there
+     */
+    pub(crate) fn densityAt(self, at : Vec3) : f64 {
+        if (at.y < Cloud::BASE || at.y > Cloud::BASE + Cloud::THICK_MAX) {
+            return 0.0;
+        }
+        return self.densityAtCover(self.coverAt(at.x, at.z, 1.0), at, 1.0, Cloud::VIEW_OCTAVES);
+    }
+
+    /**
+     * How high the mass over a column reaches — the top of the envelope, before
+     * the 3-D field eats into it. What the lighting measures its depth from.
+     * @param cov  the band fraction at this column
+     * @return the world y the mass reaches
+     */
+    pub(crate) fn topFor(self, cov : f64) : f64 {
+        return Cloud::BASE + Cloud::THICK_MAX * self.heightOf(cov);
+    }
+}
+
+/**
+ * The cloud field as the wind has left it at this moment.
+ * @param time  seconds (or any monotonic clock) the wind has been blowing
+ * @return the drifted field
+ */
+fn cloudFieldAt(time : f64) : CloudField {
+    return CloudField {
+        driftX: time * Cloud::WIND_X,
+        driftZ: time * Cloud::WIND_Z,
+        coverage: Cloud::COVERAGE,
+    };
+}

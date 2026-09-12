@@ -570,9 +570,14 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.leng.stepBake();
     }
 
-    /** Publish the current time of day for the background light thread. */
-    fn setDayTime(mut self, d : f64) : void {
-        self.leng.setDayTime(d);
+    /** Publish the moment the background light thread bakes against. */
+    fn setMoment(mut self, m : LightMoment) : void {
+        self.leng.setMoment(m);
+    }
+
+    /** Light the whole loaded ring before the first frame, and block until it is. */
+    fn primeLight(mut self) : void {
+        self.leng.primeLight();
     }
 
     /** Tell the background light thread to stop (call before joining it). */

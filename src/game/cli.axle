@@ -9,6 +9,7 @@
 // So each flag here removes one source of variation:
 //
 //   --snap [ms]            play that long, write voxel.bmp, quit
+//   --size <w> <h>         open the window at that size
 //   --at <x> <z>           start around a named column instead of a random one
 //   --look <yaw> <pitch>   pin the view and ignore the mouse for the run
 //   --daytime <0..1>       start the day clock at a named hour
@@ -25,6 +26,7 @@ use std::lang::{IndexOutOfBoundsException, ParseException};
 use smalt::Clock;
 use crate::game::start::randomColumn;
 use crate::configs::time::{ Daylight };
+use crate::configs::screen::{ Screen };
 
 /**
  * The instant a scripted capture is due, in milliseconds after the first
@@ -56,7 +58,6 @@ fn snapDeadline() : i64 {
     return 0;
 }
 
-/**
 /**
  * The view a scripted capture is framed with, as (pinned, yaw, pitch) in
  * radians.
@@ -141,6 +142,39 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
         i = i + 1;
     }
     return randomColumn(clock.counter());
+}
+
+/**
+ * The window this run opens at, as (w, h) in pixels.
+ *
+ * `--size <w> <h>` names it. The overlay is laid out against the framebuffer,
+ * and the framebuffer now takes the window's shape — so "does the HUD hold its
+ * size at another resolution" is a question that cannot be asked at all without
+ * being able to name the window, and it is a question a screenshot answers.
+ * @return the window size, the configured one if the flag is absent
+ */
+fn windowSize() : (w: i32, h: i32) {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--size" && i + 2 < argc()) {
+                let w : i32 = argAt(i + 1).toI64() as i32;
+                let h : i32 = argAt(i + 2).toI64() as i32;
+                if (w >= 320 && h >= 240) {
+                    return (w, h);
+                }
+                Console::println("--size wants at least 320x240; using the configured window");
+                i = argc();
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--size wants two whole numbers; using the configured window");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return (Screen::WINDOW_W, Screen::WINDOW_H);
 }
 
 /** Whether `--physics-check` was asked for. */

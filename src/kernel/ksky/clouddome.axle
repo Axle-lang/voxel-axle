@@ -1,0 +1,838 @@
+// clouddome - the cloud deck marched into a table indexed by DIRECTION.
+//
+// The table is far too big to march every frame, so it is refreshed a slice at
+// a time over `SKY_SLICES` frames. That is the whole design, and it has been the
+// whole problem: three attempts, three kinds of band.
+//
+// It was indexed by screen pixel first, so turning the camera re-randomised it.
+// Then by azimuth and elevation, whose pole is the zenith, so the deck pinched
+// toward a point overhead. Now it is the Lambert azimuthal equal-area disc,
+// which has no pole and gives every cell the same solid angle:
+//
+//     forward   s = 1 / sqrt(1 + y)      u = x*s        v = z*s
+//     inverse   y = 1 - (u^2 + v^2)      k = sqrt(2-r2) x = u*k, z = v*k
+//
+// And then the bands that outlived every chart. A slice is a set of rows, and
+// rows marched in different frames were marched with different inputs - the
+// sun had moved, the eye had stepped up a block, the wind had blown - so the
+// table read as forty-eight sunsets interleaved, and the frontier between the
+// current cycle's rows and the last cycle's swept across the sky once a second.
+// Freezing the inputs per cycle does not help: two cycles still meet in the one
+// table being read, and wherever they meet there is an edge.
+//
+// So no table is ever read while it is being written. Three of them:
+//
+//   work    marched over a cycle with inputs frozen at the cycle's start
+//   target  the last completed march, swapped in whole when `work` finishes
+//   show    the only one anybody reads, chasing `target` a little every frame -
+//           EVERY cell by the same fraction, so a change in the inputs arrives
+//           as a smooth global fade and never as a frontier
+//
+// What the tables hold is what changes slowly: coverage, the share of the body's
+// light that survived the water, and the share of the SKY's light. No colour.
+// The colour - the sun's tint, the sky's, and the phase function that makes a
+// rim blaze when you look toward the sun through it - is applied when the table
+// is READ, from this frame's day state, so it is always this frame's.
+//
+// The march ignores the eye's horizontal position, deliberately: a deck a
+// quarter of a kilometre up barely parallaxes when you walk, and letting it
+// would make the table depend on where you stood.
+
+use smalt::Mem;
+use crate::kernel::kmath::vec3::{ Vec3, vec3 };
+use crate::kernel::klight::gamma::{ LinRgb };
+use crate::kernel::ksky::viewray::{ ViewRay };
+use crate::kernel::ksky::cloud::{ CloudField };
+use crate::kernel::klight::daymodel::{ DayState };
+use crate::configs::cloud::{ Cloud };
+
+/**
+ * Cells across the square the disc is inscribed in.
+ *
+ * Sized against the SCREEN. The disc covers the hemisphere in pi(N/2)^2 cells, so
+ * a cell spans about 162/N degrees: at 448 that is 0.36 degrees, three and a
+ * half pixels, the same everywhere. The corners outside the disc are not
+ * directions and are skipped.
+ */
+const SKY_N : i32 = 448;
+
+/** Frames a full refresh is spread over. Mirrored by nothing; see `SKY_CREW`. */
+const SKY_SLICES : i32 = 32;
+
+/** Workers the march and the chase are split across; mirrored by the `Task` array. */
+const SKY_CREW : i32 = 4;
+
+/**
+ * What the cloud contributes along one direction: its colour, premultiplied by
+ * how much of the sky behind it it hides.
+ */
+struct CloudSample {
+    pub(crate) r : f64,
+    pub(crate) g : f64,
+    pub(crate) b : f64,
+    pub(crate) a : f64,
+}
+
+/** One cell of the table: the three slow quantities, all premultiplied by coverage. */
+struct CloudCell {
+    pub(crate) cov : f64,   // how much of the sky this direction is cloud
+    pub(crate) lit : f64,   // ...times the share of the body's light that reached it
+    pub(crate) amb : f64,   // ...times the share of the sky's light that reached it
+}
+
+/**
+ * The light the deck is READ under: where the body is, and the three lights
+ * that reach a cloud.
+ *
+ * Four values, and they were twelve scalars — declared flat in `CloudSky`,
+ * declared flat again in `CloudDome`, zeroed one at a time in a constructor,
+ * assigned one at a time in `takeLight` and copied one at a time in `dome`.
+ * Fifty lines of plumbing for one idea, and no name anywhere for the idea.
+ *
+ * It stays separate from the tables on purpose: the tables are a second or so
+ * old and this was computed on the frame it is used, which is what lets a stale
+ * cell and a fresh one be lit identically.
+ */
+struct DeckLight {
+    dir : Vec3,       // the body's direction, for the phase function
+    body : LinRgb,    // the body's light: its tint times its strength
+    sky : LinRgb,     // the sky's own light on the deck, in the sky's own colour
+    ground : LinRgb,  // what the ground throws back up into the shadowed bases
+}
+
+/**
+ * The point `t` along `dir` from `at`.
+ * @param at   where the walk starts
+ * @param dir  the direction walked, unit
+ * @param t    how far along it
+ * @return the point reached
+ */
+fn along(at : Vec3, dir : Vec3, t : f64) : Vec3 {
+    return vec3(at.x + dir.x * t, at.y + dir.y * t, at.z + dir.z * t);
+}
+
+/**
+ * The Henyey-Greenstein phase function, normalised so its mean over the sphere
+ * is one: what a cloud does with light as a function of the angle between where
+ * the light came from and where it is going. Forward-peaked - most of what a
+ * droplet scatters keeps going - which is why a cloud's rim blazes when the sun
+ * is behind it and the same cloud is dull with the sun behind you.
+ * @param mu  cosine of the angle between the view direction and the body
+ * @param g   the asymmetry: positive scatters forward, negative back
+ * @return the relative brightness
+ */
+fn phaseHG(mu : f64, g : f64) : f64 {
+    let k : f64 = 1.0 + g * g - 2.0 * g * mu;
+    if (k < 0.0001) {
+        k = 0.0001;
+    }
+    return (1.0 - g * g) / (k * k.sqrt());
+}
+
+/**
+ * Catmull-Rom weights for the four taps around a fractional position. The
+ * middle two are the cell either side; the outer two lend the curvature that
+ * makes the reconstruction a curve rather than a tent, which is the difference
+ * between a soft edge and a lattice of diamonds.
+ */
+struct CubicW {
+    w0 : f64,
+    w1 : f64,
+    w2 : f64,
+    w3 : f64,
+}
+
+/**
+ * The weights for fraction `t` in [0, 1).
+ * @param t  the fraction between the two middle taps
+ * @return the four weights, summing to one
+ */
+fn cubicW(t : f64) : CubicW {
+    let t2 : f64 = t * t;
+    let t3 : f64 = t2 * t;
+    return CubicW {
+        w0: 0.0 - 0.5 * t + t2 - 0.5 * t3,
+        w1: 1.0 - 2.5 * t2 + 1.5 * t3,
+        w2: 0.5 * t + 2.0 * t2 - 1.5 * t3,
+        w3: 0.0 - 0.5 * t2 + 0.5 * t3,
+    };
+}
+
+/**
+ * A read-only view of the SHOW table, together with THIS frame's light.
+ *
+ * The two halves are deliberately different ages. The table is a second or so
+ * behind; the `DeckLight` beside it was computed this frame. A stale cell and a
+ * fresh one are lit identically, so nothing about the refresh can be seen.
+ *
+ * A value struct, so it crosses `spawn` into the sky gradient's worker rows.
+ */
+struct CloudDome {
+    cov : i64,
+    lit : i64,
+    amb : i64,
+    light : DeckLight,
+    on : bool,
+
+    /**
+     * The cloud along a world direction. It need not be unit: the ray carries
+     * one over its length, which every caller already has to hand.
+     * @param ray  the direction, with 1 / its length alongside
+     * @return the cloud's premultiplied colour and its coverage
+     */
+    pub(crate) fn sample(self, ray : ViewRay) : CloudSample {
+        if (!self.on || ray.dy <= 0.0) {
+            return CloudSample { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        }
+        let c : CloudCell = domeRead(self.cov, self.lit, self.amb, ray);
+        if (c.cov <= 0.0005) {
+            return CloudSample { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        }
+        // How the water hands the body's light on toward the eye: a strong
+        // forward lobe and a weak back one, so the rim toward the sun is bright
+        // and the face away from it is lit by the sky alone.
+        let b : Vec3 = self.light.dir;
+        let mu : f64 = (ray.dx * b.x + ray.dy * b.y + ray.dz * b.z) * ray.inv;
+        let phase : f64 = Cloud::PHASE_FWD_W * phaseHG(mu, Cloud::PHASE_G)
+            + (1.0 - Cloud::PHASE_FWD_W) * phaseHG(mu, 0.0 - Cloud::PHASE_BACK);
+        if (phase > Cloud::PHASE_MAX) {
+            phase = Cloud::PHASE_MAX;
+        }
+        let direct : f64 = c.lit * phase;
+        let deep : f64 = c.cov - c.amb;
+        return CloudSample {
+            r: (direct * self.light.body.r + c.amb * self.light.sky.r + deep * self.light.ground.r) * 255.0,
+            g: (direct * self.light.body.g + c.amb * self.light.sky.g + deep * self.light.ground.g) * 255.0,
+            b: (direct * self.light.body.b + c.amb * self.light.sky.b + deep * self.light.ground.b) * 255.0,
+            a: c.cov,
+        };
+    }
+
+    /**
+     * One raw cell, for the checks that need to see the table rather than the
+     * picture.
+     * @param idx  the cell index, 0..cells()
+     * @return the cell's stored values
+     */
+    pub(crate) fn cellAt(self, idx : i64) : CloudCell {
+        return CloudCell {
+            cov: Mem::realOf(self.cov, idx),
+            lit: Mem::realOf(self.lit, idx),
+            amb: Mem::realOf(self.amb, idx),
+        };
+    }
+
+    /** Cells in the table. */
+    pub(crate) fn cells(self) : i64 {
+        return (SKY_N as i64) * (SKY_N as i64);
+    }
+}
+
+/**
+ * A table index held inside the table.
+ * @param i  the index
+ * @return the same, or the nearest edge
+ */
+fn clampIdx(i : i32) : i32 {
+    if (i < 0) {
+        return 0;
+    }
+    if (i > SKY_N - 1) {
+        return SKY_N - 1;
+    }
+    return i;
+}
+
+/**
+ * The three stored quantities along a direction, reconstructed bicubically.
+ *
+ * Bilinear at three and a half pixels a cell is neither sharp nor smooth: it
+ * blurs an edge and draws the lattice through it at once. Catmull-Rom over
+ * the 4x4 neighbourhood is a curve through the samples — an edge stays an
+ * edge, and nothing about the grid shows.
+ * @param cov  the coverage table
+ * @param lit  the lit table
+ * @param amb  the ambient table
+ * @param ray  the direction to read along
+ * @return the cell values, clamped back into their premultiplied ranges
+ */
+fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
+    // Lambert azimuthal equal-area, from the zenith.
+    let uy : f64 = ray.dy * ray.inv;
+    let sc : f64 = 1.0 / (1.0 + uy).sqrt();
+    let edge : f64 = ((SKY_N - 1) as f64) * 0.5;
+    let fu : f64 = (ray.dx * ray.inv * sc + 1.0) * edge;
+    let fv : f64 = (ray.dz * ray.inv * sc + 1.0) * edge;
+    let iu : i32 = fu.floorToInt() as i32;
+    let iv : i32 = fv.floorToInt() as i32;
+    // Most of the sky is sky. The four cells around the point say so before
+    // the sixteen are read: a cloud's edge can only be where coverage is.
+    let ci : i64 = (clampIdx(iv) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
+    let cj : i64 = (clampIdx(iv + 1) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
+    let ku : i64 = (clampIdx(iu + 1) - clampIdx(iu)) as i64;
+    if (Mem::realOf(cov, ci) <= 0.0 && Mem::realOf(cov, ci + ku) <= 0.0
+        && Mem::realOf(cov, cj) <= 0.0 && Mem::realOf(cov, cj + ku) <= 0.0) {
+        return CloudCell { cov: 0.0, lit: 0.0, amb: 0.0 };
+    }
+    let wu : CubicW = cubicW(fu - (iu as f64));
+    let wv : CubicW = cubicW(fv - (iv as f64));
+    let r0 : CloudCell = rowTaps(cov, lit, amb, clampIdx(iv - 1), iu, wu);
+    let r1 : CloudCell = rowTaps(cov, lit, amb, clampIdx(iv), iu, wu);
+    let r2 : CloudCell = rowTaps(cov, lit, amb, clampIdx(iv + 1), iu, wu);
+    let r3 : CloudCell = rowTaps(cov, lit, amb, clampIdx(iv + 2), iu, wu);
+    let vc : f64 = r0.cov * wv.w0 + r1.cov * wv.w1 + r2.cov * wv.w2 + r3.cov * wv.w3;
+    let vl : f64 = r0.lit * wv.w0 + r1.lit * wv.w1 + r2.lit * wv.w2 + r3.lit * wv.w3;
+    let va : f64 = r0.amb * wv.w0 + r1.amb * wv.w1 + r2.amb * wv.w2 + r3.amb * wv.w3;
+    // The curve overshoots at a step; the premultiplied ranges are the truth.
+    if (vc < 0.0) {
+        vc = 0.0;
+    }
+    if (vc > 1.0) {
+        vc = 1.0;
+    }
+    if (vl < 0.0) {
+        vl = 0.0;
+    }
+    if (vl > vc) {
+        vl = vc;
+    }
+    if (va < 0.0) {
+        va = 0.0;
+    }
+    if (va > vc) {
+        va = vc;
+    }
+    return CloudCell { cov: vc, lit: vl, amb: va };
+}
+
+/**
+ * Four horizontal taps of one row, weighted.
+ * @param cov  the coverage table
+ * @param lit  the lit table
+ * @param amb  the ambient table
+ * @param row  the table row (already clamped)
+ * @param iu   the column of the second tap
+ * @param w    the four weights
+ * @return the weighted sum of the three channels
+ */
+fn rowTaps(cov : i64, lit : i64, amb : i64, row : i32, iu : i32, w : CubicW) : CloudCell {
+    let base : i64 = (row as i64) * (SKY_N as i64);
+    let c0 : i64 = base + (clampIdx(iu - 1) as i64);
+    let c1 : i64 = base + (clampIdx(iu) as i64);
+    let c2 : i64 = base + (clampIdx(iu + 1) as i64);
+    let c3 : i64 = base + (clampIdx(iu + 2) as i64);
+    return CloudCell {
+        cov: Mem::realOf(cov, c0) * w.w0 + Mem::realOf(cov, c1) * w.w1
+           + Mem::realOf(cov, c2) * w.w2 + Mem::realOf(cov, c3) * w.w3,
+        lit: Mem::realOf(lit, c0) * w.w0 + Mem::realOf(lit, c1) * w.w1
+           + Mem::realOf(lit, c2) * w.w2 + Mem::realOf(lit, c3) * w.w3,
+        amb: Mem::realOf(amb, c0) * w.w0 + Mem::realOf(amb, c1) * w.w1
+           + Mem::realOf(amb, c2) * w.w2 + Mem::realOf(amb, c3) * w.w3,
+    };
+}
+
+/** The three buffers of one table. */
+struct CloudTable {
+    cov : i64,
+    lit : i64,
+    amb : i64,
+}
+
+/**
+ * A blank table.
+ * @return three zeroed buffers of `SKY_N`² cells
+ */
+fn newTable() : CloudTable {
+    let n : i64 = (SKY_N as i64) * (SKY_N as i64) * 8;
+    return CloudTable { cov: Mem::takeZeroed(n), lit: Mem::takeZeroed(n), amb: Mem::takeZeroed(n) };
+}
+
+/** Owns the three tables and marches them. */
+class CloudSky {
+    work : CloudTable,    // being marched, a slice a frame; nobody reads it
+    target : CloudTable,  // the last completed march
+    show : CloudTable,    // what is read; chases `target`
+    slice : i32,          // which share of `work` this frame refreshes
+    filled : i32,         // 0 until the first pass, which is not amortised
+    refY : f64,           // the eye altitude THIS CYCLE is being marched at
+    refSx : f64,          // ...the body direction
+    refSy : f64,
+    refSz : f64,
+    refField : CloudField, // ...and the wind, all frozen with it
+    light : DeckLight,    // this frame's light, applied when the table is read
+
+    /** Allocate the tables, empty until the first march. */
+    constructor() {
+        self.work = newTable();
+        self.target = newTable();
+        self.show = newTable();
+        self.slice = 0;
+        self.filled = 0;
+        self.refY = 0.0;
+        self.refSx = 0.0;
+        self.refSy = 1.0;
+        self.refSz = 0.0;
+        self.refField = CloudField { driftX: 0.0, driftZ: 0.0, coverage: 0.0 };
+        // Straight up and unlit until the first `takeLight`.
+        self.light = DeckLight {
+            dir: vec3(0.0, 1.0, 0.0),
+            body: LinRgb { r: 0.0, g: 0.0, b: 0.0 },
+            sky: LinRgb { r: 0.0, g: 0.0, b: 0.0 },
+            ground: LinRgb { r: 0.0, g: 0.0, b: 0.0 },
+        };
+    }
+
+    /**
+     * Move the deck on by one frame: take this frame's light, and either march
+     * the whole table (the first time) or the next slice of it, chasing the last
+     * completed march meanwhile.
+     * @param field  the cloud field, already drifted
+     * @param ds     the day/night state (which body, how strong, what colour)
+     * @param eyeY   the camera's altitude, which decides where the band is crossed
+     */
+    pub(crate) fn march(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
+        self.takeLight(ds);
+        if (self.filled == 0) {
+            self.fill(field, ds, eyeY);
+            return;
+        }
+        if (self.slice == 0) {
+            // The cycle just finished: what it marched becomes the target, and
+            // the buffer it displaces is marched next, with fresh inputs.
+            let done : CloudTable = self.work;
+            self.work = self.target;
+            self.target = done;
+            self.freezeView(field, ds, eyeY);
+        }
+
+        let crew : Task<i32>[3];
+        for (i of 0..3) {
+            crew[i] = spawn cloudSliceJob(self, i);
+        }
+        self.frameShare(3);
+        for (i of 0..3) {
+            let d : i32 = crew[i].join();
+        }
+
+        self.slice = self.slice + 1;
+        if (self.slice >= SKY_SLICES) {
+            self.slice = 0;
+        }
+    }
+
+    /**
+     * One worker's share of one frame: chase its quarter of `show` toward
+     * `target`, then march its rows of this frame's slice into `work`.
+     * @param who  the worker, 0..SKY_CREW
+     */
+    pub(file) fn frameShare(mut self, who : i32) : void {
+        let rows : i32 = SKY_N / SKY_CREW;
+        self.chaseRows(who * rows, (who + 1) * rows);
+        self.marchRows(self.slice + SKY_SLICES * who, SKY_SLICES * SKY_CREW);
+    }
+
+    /**
+     * The first frame: march everything, and start with all three tables agreeing.
+     */
+    fn fill(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
+        self.freezeView(field, ds, eyeY);
+        let crew : Task<i32>[3];
+        for (i of 0..3) {
+            crew[i] = spawn cloudFillJob(self, i);
+        }
+        self.marchRows(3, SKY_CREW);
+        for (i of 0..3) {
+            let d : i32 = crew[i].join();
+        }
+        let n : i64 = (SKY_N as i64) * (SKY_N as i64);
+        let i : i64 = 0;
+        while (i < n) {
+            Mem::putRealOf(self.target.cov, i, Mem::realOf(self.work.cov, i));
+            Mem::putRealOf(self.target.lit, i, Mem::realOf(self.work.lit, i));
+            Mem::putRealOf(self.target.amb, i, Mem::realOf(self.work.amb, i));
+            Mem::putRealOf(self.show.cov, i, Mem::realOf(self.work.cov, i));
+            Mem::putRealOf(self.show.lit, i, Mem::realOf(self.work.lit, i));
+            Mem::putRealOf(self.show.amb, i, Mem::realOf(self.work.amb, i));
+            i = i + 1;
+        }
+        self.filled = 1;
+        self.slice = 0;
+    }
+
+    /**
+     * Pull `show` toward `target` over the rows [y0, y1), every cell by the
+     * same fraction. That sameness is the point: the whole sky moves together,
+     * so a change arrives as a fade and not as a frontier.
+     * @param y0  first row (inclusive)
+     * @param y1  last row (exclusive)
+     */
+    fn chaseRows(mut self, y0 : i32, y1 : i32) : void {
+        let k : f64 = Cloud::CHASE;
+        let i : i64 = (y0 as i64) * (SKY_N as i64);
+        let end : i64 = (y1 as i64) * (SKY_N as i64);
+        while (i < end) {
+            let c : f64 = Mem::realOf(self.show.cov, i);
+            Mem::putRealOf(self.show.cov, i, c + (Mem::realOf(self.target.cov, i) - c) * k);
+            let l : f64 = Mem::realOf(self.show.lit, i);
+            Mem::putRealOf(self.show.lit, i, l + (Mem::realOf(self.target.lit, i) - l) * k);
+            let a : f64 = Mem::realOf(self.show.amb, i);
+            Mem::putRealOf(self.show.amb, i, a + (Mem::realOf(self.target.amb, i) - a) * k);
+            i = i + 1;
+        }
+    }
+
+    /**
+     * Take this frame's light. It is NOT baked into the table — it is handed out
+     * with it, so every cell is lit by the same hour whatever hour it was
+     * marched in.
+     *
+     * The sky's share is the sky's own colour this frame, which is what a cloud
+     * base is actually lit by: blue at noon, the dusk's own pink and mauve at
+     * dusk, and never a fixed grey that belongs to neither.
+     * @param ds  the day/night state
+     */
+    fn takeLight(mut self, ds : DayState) : void {
+        let skyShare : f64 = Cloud::SKY_LIGHT * ds.skyAmbient / 255.0;
+        let gnd : f64 = Cloud::GROUND_K * ds.skyAmbient;
+        self.light = DeckLight {
+            dir: vec3(ds.dirX, ds.dirY, ds.dirZ),
+            body: LinRgb {
+                r: ds.dirTintR * ds.dirStrength,
+                g: ds.dirTintG * ds.dirStrength,
+                b: ds.dirTintB * ds.dirStrength,
+            },
+            sky: LinRgb {
+                r: (ds.skyColR as f64) * skyShare,
+                g: (ds.skyColG as f64) * skyShare,
+                b: (ds.skyColB as f64) * skyShare,
+            },
+            ground: LinRgb {
+                r: Cloud::GROUND_R * gnd,
+                g: Cloud::GROUND_G * gnd,
+                b: Cloud::GROUND_B * gnd,
+            },
+        };
+    }
+
+    /**
+     * Freeze everything the next cycle's march depends on. One snapshot per
+     * cycle is what makes `work` describe one moment rather than thirty-two.
+     * @param field  the cloud field, drifted to now
+     * @param ds     the day/night state
+     * @param eyeY   the camera's altitude
+     */
+    fn freezeView(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
+        self.refY = eyeY;
+        self.refSx = ds.dirX;
+        self.refSy = ds.dirY;
+        self.refSz = ds.dirZ;
+        self.refField = CloudField { driftX: field.driftX, driftZ: field.driftZ, coverage: field.coverage };
+    }
+
+    /**
+     * March every row of `work` from `first`, stepping by `stride`.
+     *
+     * Cells just outside the disc are pulled onto its rim (see `marchDir`) so a
+     * bicubic read near the edge has something real on every tap; cells further
+     * out are never read and are skipped.
+     * @param first   this worker's first table row
+     * @param stride  rows between one worker's rows
+     */
+    pub(file) fn marchRows(mut self, first : i32, stride : i32) : void {
+        let lo : f64 = Cloud::BASE;
+        let hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
+        let cell : f64 = 2.0 / ((SKY_N - 1) as f64);
+        let rim : f64 = (1.0 + 3.0 * cell) * (1.0 + 3.0 * cell);
+        let iv : i32 = first;
+        while (iv < SKY_N) {
+            let v : f64 = (iv as f64) * cell - 1.0;
+            let row : i32 = iv * SKY_N;
+            let iu : i32 = 0;
+            while (iu < SKY_N) {
+                let u : f64 = (iu as f64) * cell - 1.0;
+                let r2 : f64 = u * u + v * v;
+                if (r2 > rim) {
+                    self.clear((row + iu) as i64);
+                } else if (r2 > Cloud::HORIZON_SS) {
+                    // Low in the sky the deck compresses along the disc's
+                    // RADIUS: one cell there spans tens of blocks of deck in
+                    // elevation and almost none across. So the cell is marched
+                    // twice, a quarter-cell either side along that radius, and
+                    // averaged — a prefilter on the one axis that aliases.
+                    let f : f64 = 0.25 * cell / r2.sqrt();
+                    let du : f64 = u * f;
+                    let dv : f64 = v * f;
+                    let c0 : CloudCell = self.marchDir(u - du, v - dv, lo, hi);
+                    let c1 : CloudCell = self.marchDir(u + du, v + dv, lo, hi);
+                    self.store((row + iu) as i64, CloudCell {
+                        cov: (c0.cov + c1.cov) * 0.5,
+                        lit: (c0.lit + c1.lit) * 0.5,
+                        amb: (c0.amb + c1.amb) * 0.5,
+                    });
+                } else {
+                    self.store((row + iu) as i64, self.marchDir(u, v, lo, hi));
+                }
+                iu = iu + 1;
+            }
+            iv = iv + stride;
+        }
+    }
+
+    /**
+     * March the direction under a point of the disc.
+     *
+     * The point comes back out of the chart: `y = 1 - r^2` and the horizontal
+     * part scaled by `sqrt(2 - r^2)`, which is exactly unit length. A point
+     * just outside the disc is pulled onto its rim, the horizon.
+     * @param u   disc x
+     * @param v   disc z
+     * @param lo  the deck's floor
+     * @param hi  the deck's ceiling
+     * @return what the march found along that direction
+     */
+    fn marchDir(self, u : f64, v : f64, lo : f64, hi : f64) : CloudCell {
+        let r2 : f64 = u * u + v * v;
+        let cu : f64 = u;
+        let cv : f64 = v;
+        if (r2 > 1.0) {
+            let f : f64 = 1.0 / r2.sqrt();
+            cu = u * f;
+            cv = v * f;
+            r2 = 1.0;
+        }
+        let ey : f64 = 1.0 - r2;
+        if (ey < Cloud::MIN_UP) {
+            ey = Cloud::MIN_UP;
+        }
+        let k : f64 = (2.0 - r2).sqrt();
+        return self.marchCell(cu * k, ey, cv * k, lo, hi);
+    }
+
+    /**
+     * Write one cell of `work`.
+     * @param idx  the cell
+     * @param c    its values
+     */
+    fn store(mut self, idx : i64, c : CloudCell) : void {
+        Mem::putRealOf(self.work.cov, idx, c.cov);
+        Mem::putRealOf(self.work.lit, idx, c.lit);
+        Mem::putRealOf(self.work.amb, idx, c.amb);
+    }
+
+    /**
+     * March one direction through the deck and return what comes back: how much
+     * of the sky it covers, how much of the body's light survived to it, and how
+     * much of the sky's.
+     *
+     * The path is CAPPED, and what lies past the cap is added as its mean rather
+     * than marched. A grazing ray crosses kilometres of deck: no affordable step
+     * count resolves that, and marching it badly is exactly what turns a deck
+     * into noise. A deck seen edge-on is physically opaque, and the mean says so
+     * smoothly.
+     * @param dx   the direction (unit)
+     * @param dy   …
+     * @param dz   …
+     * @param lo   the deck's floor
+     * @param hi   the deck's ceiling
+     * @return the three premultiplied quantities
+     */
+    fn marchCell(self, dx : f64, dy : f64, dz : f64, lo : f64, hi : f64) : CloudCell {
+        let field : CloudField = self.refField;
+        let eyeY : f64 = self.refY;
+        let t0 : f64 = (lo - eyeY) / dy;
+        let t1 : f64 = (hi - eyeY) / dy;
+        if (t0 < 0.0) {
+            t0 = 0.0;
+        }
+        if (!Cloud::ON || t1 <= t0) {
+            return CloudCell { cov: 0.0, lit: 0.0, amb: 0.0 };
+        }
+        // How much of the ray is marched, and it has to be a CONTINUOUS function
+        // of the ray's direction: a step COUNT derived from the span jumps, and a
+        // jump in something that varies with elevation is a ring about the
+        // zenith. A fixed count over a capped, continuous length has no boundary.
+        let span : f64 = t1 - t0;
+        let cut : f64 = span;
+        if (cut > Cloud::MAX_PATH) {
+            cut = Cloud::MAX_PATH;
+        }
+        let n : i32 = Cloud::VIEW_STEPS;
+        // How coarse this cell's view of the deck is, and therefore how much of
+        // the 3-D detail it is entitled to. A cell subtends a fixed angle, so the
+        // patch of deck behind it grows as the SQUARE of how far the ray runs
+        // before it gets there; past one feature per cell the field aliases
+        // instead of resolving. Fourth power: full detail wherever the cell can
+        // carry it, gone within a few degrees of where it cannot.
+        let lift : f64 = lo - eyeY;
+        if (lift < 1.0) {
+            lift = 1.0;
+        }
+        let foot : f64 = t0 * t0 * (2.0 / ((SKY_N - 1) as f64)) / (lift * Cloud::DETAIL_FOOT);
+        let f2 : f64 = foot * foot;
+        let lod : f64 = 1.0 / (1.0 + f2 * f2);
+
+        // The weather at the two ends of the marched part, interpolated between:
+        // it varies over hundreds of blocks, so across one crossing it is very
+        // nearly linear, and it is the cheap 2-D half of the field.
+        let cA : f64 = field.coverAt(dx * t0, dz * t0, lod);
+        let cB : f64 = field.coverAt(dx * (t0 + cut), dz * (t0 + cut), lod);
+        if (cA <= 0.0 && cB <= 0.0) {
+            return CloudCell { cov: 0.0, lit: 0.0, amb: 0.0 };
+        }
+        // The body's direction, frozen with the cycle. Its elevation is floored
+        // only to keep the divide finite — a per-frame scalar, the same in every
+        // direction, so unlike an elevation-dependent clamp it can draw nothing.
+        let sx : f64 = self.refSx;
+        let sy : f64 = self.refSy;
+        let sz : f64 = self.refSz;
+        if (sy < 0.02) {
+            sy = 0.02;
+        }
+
+        let dsx : f64 = cut / (n as f64);
+        let trans : f64 = 1.0;
+        let acc : f64 = 0.0;
+        let accLit : f64 = 0.0;
+        let accAmb : f64 = 0.0;
+        let i : i32 = 0;
+        // Past a hundredth the rest of the ray is behind water the eye cannot
+        // see through; what it would add is below the table's own precision.
+        while (i < n && trans > 0.01) {
+            let f : f64 = ((i as f64) + 0.5) / (n as f64);
+            let t : f64 = t0 + f * cut;
+            let py : f64 = eyeY + dy * t;
+            let cov : f64 = cA + (cB - cA) * f;
+            let here : Vec3 = vec3(dx * t, py, dz * t);
+            let d : f64 = field.densityAtCover(cov, here, lod, Cloud::VIEW_OCTAVES);
+            if (d > 0.0001) {
+                // How much of THIS step the eye sees...
+                let take : f64 = 1.0 - (0.0 - d * dsx).exp();
+                let wgt : f64 = trans * take;
+                // ...and how much of each light got to it.
+                let top : f64 = field.topFor(cov);
+                let lit : f64 = self.litAt(field, cov, top, here, d, vec3(sx, sy, sz), lod);
+                let amb : f64 = ambientAt(top - py, d);
+                acc = acc + wgt;
+                accLit = accLit + wgt * lit;
+                accAmb = accAmb + wgt * amb;
+                trans = trans * (1.0 - take);
+            }
+            i = i + 1;
+        }
+        if (span > cut && trans > 0.01) {
+            let meanD : f64 = cB * Cloud::MEAN_PROFILE * Cloud::DENSITY;
+            let take : f64 = 1.0 - (0.0 - meanD * (span - cut)).exp();
+            let wgt : f64 = trans * take;
+            acc = acc + wgt;
+            accLit = accLit + wgt * Cloud::FAR_LIT;
+            accAmb = accAmb + wgt * Cloud::FAR_LIT;
+            trans = trans * (1.0 - take);
+        }
+        // Aerial perspective: the deck thins into the sky with distance, and what
+        // shows through is the horizon the gradient already painted behind it.
+        let hz : f64 = t0 / Cloud::FADE_DIST;
+        let reach : f64 = (0.0 - hz * hz).exp();
+        return CloudCell { cov: acc * reach, lit: accLit * reach, amb: accAmb * reach };
+    }
+
+    /**
+     * The share of the body's light that reaches one point in the deck.
+     *
+     * The path is the one that leaves the deck along the BODY's direction, not
+     * straight up. That distinction is the whole of a sunset: with the path
+     * forced vertical, a low sun shone down through the deck's full thickness
+     * everywhere and every cloud went to soot at exactly the hour it should have
+     * gone gold.
+     *
+     * The water in that path is measured at three points along it, weighted
+     * with the density at the point itself — enough to tell a tower above from a
+     * hole above, and to see the light come in through a thin flank. The
+     * samples are cheaper than the view's: two octaves, because a path
+     * integrates and the third octave cannot survive the integral.
+     *
+     * The path length saturates rather than clamps. A clamp puts a boundary in
+     * the sky wherever the raw length crosses it, and any boundary that depends
+     * on where you look is a ring; `L(1 - e^-x/L)` is the same length for a short
+     * path, the same cap for a long one, and has no boundary in between.
+     * @param field  the cloud field
+     * @param cov    the column's weather, reused rather than resampled
+     * @param top    the envelope's top over this column
+     * @param at     the point in the deck
+     * @param d      the density already sampled there
+     * @param sun    the body's direction (elevation already floored)
+     * @param lod    how much 3-D detail this cell can resolve
+     * @return the surviving fraction, never below the multiple-scatter floor
+     */
+    fn litAt(self, field : CloudField, cov : f64, top : f64, at : Vec3,
+        d : f64, sun : Vec3, lod : f64) : f64 {
+        let raw : f64 = (top - at.y) / sun.y;
+        if (raw < 0.0) {
+            raw = 0.0;
+        }
+        let cap : f64 = Cloud::MAX_LIGHT_PATH;
+        let path : f64 = cap * (1.0 - (0.0 - raw / cap).exp());
+        let oct : i32 = Cloud::LIGHT_OCTAVES;
+        let p1 : f64 = path * 0.15;
+        let p2 : f64 = path * 0.45;
+        let p3 : f64 = path * 0.85;
+        let d1 : f64 = field.densityAtCover(cov, along(at, sun, p1), lod, oct);
+        let d2 : f64 = field.densityAtCover(cov, along(at, sun, p2), lod, oct);
+        let d3 : f64 = field.densityAtCover(cov, along(at, sun, p3), lod, oct);
+        let mean : f64 = 0.15 * d + 0.30 * d1 + 0.30 * d2 + 0.25 * d3;
+        return Cloud::SCATTER_FLOOR
+            + (1.0 - Cloud::SCATTER_FLOOR) * (0.0 - mean * path).exp();
+    }
+
+    /** Nothing along this direction — all three channels, so the resolve is clean. */
+    fn clear(mut self, idx : i64) : void {
+        Mem::putRealOf(self.work.cov, idx, 0.0);
+        Mem::putRealOf(self.work.lit, idx, 0.0);
+        Mem::putRealOf(self.work.amb, idx, 0.0);
+    }
+
+    /**
+     * The view of the SHOW table the sky pass and the god-rays read, carrying
+     * this frame's light alongside it.
+     * @return the dome view
+     */
+    pub(crate) fn dome(self) : CloudDome {
+        return CloudDome {
+            cov: self.show.cov, lit: self.show.lit, amb: self.show.amb,
+            light: self.light,
+            on: Cloud::ON,
+        };
+    }
+
+    /** Frames one refresh cycle takes — what a check has to wait for. */
+    pub(crate) fn cycleFrames(self) : i32 {
+        return SKY_SLICES;
+    }
+}
+
+/**
+ * The share of the SKY's light that reaches a point in the deck: full at the
+ * top, fading with the water above it, never below a floor because a base is
+ * lit from around and below as well as from above. Sun-independent, so it can
+ * live in the table without ever lagging the hour.
+ * @param below  how far under the envelope's top the point is
+ * @param d      the density there
+ * @return the surviving fraction
+ */
+fn ambientAt(below : f64, d : f64) : f64 {
+    if (below < 0.0) {
+        below = 0.0;
+    }
+    return Cloud::AMB_FLOOR + (1.0 - Cloud::AMB_FLOOR) * (0.0 - below * d * Cloud::AMB_K).exp();
+}
+
+/** Worker job: one worker's share of a normal frame. */
+fn cloudSliceJob(cs : CloudSky, who : i32) : i32 {
+    cs.frameShare(who);
+    return 0;
+}
+
+/** Worker job: one worker's share of the first, full march. */
+fn cloudFillJob(cs : CloudSky, who : i32) : i32 {
+    cs.marchRows(who, SKY_CREW);
+    return 0;
+}

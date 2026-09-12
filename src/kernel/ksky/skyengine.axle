@@ -1,0 +1,143 @@
+// skyengine — everything above the ground, behind one seam.
+//
+// The sky is not one thing and never was: it is an atmosphere whose colour
+// depends on where you look, a cloud field that is a volume of water, the light
+// that gets through that volume onto the ground, the light that comes back out
+// of it toward the eye, and the backdrop those are painted on. Five questions,
+// answered in five files — but a caller should not have to know that, and until
+// this existed the renderer knew all of it: it built the dome, marched the
+// clouds, refilled the fog tables, ordered the gradient and the discs, and held
+// the pieces in the right order by hand.
+//
+// So this owns them and answers for them. `update` moves the sky on by one
+// frame; `draw` paints it; `fog` and `clouds` hand out the two views the world
+// pass needs. What the ground's shadow needs — the cloud's transmittance, per
+// column — is the light thread's business and stays with `cloudlight`, because
+// it is baked on that thread and read by `kworld`, and routing it through here
+// would only put a render-frame object in a path that has no frames.
+//
+//   atmosphere   what colour the sky is in a direction, and the fog that follows
+//   cloud        where the water is: a 3-D density field
+//   cloudlight   what the sun makes of that water, on the way down to the ground
+//   clouddome    …and on the way to the eye, as a direction-indexed table
+//   backdrop     the gradient, the halo, the sun and the moon
+//
+// The ordering rules it enforces: the cloud table is marched BEFORE the fog
+// grid and the gradient, because both composite it; the discs are drawn after
+// the gradient but read the same table, so a cloud crossing the sun hides it;
+// and the whole paint happens AFTER the world, into the pixels it left empty.
+
+use std::time::monotonicNanos;
+use crate::kernel::ksky::atmosphere::{ FogTable, FogTables, SkyDome, ViewRays, skyDomeFor };
+use crate::kernel::ksky::backdrop::{ drawSkyGradient, drawCelestial };
+use crate::kernel::ksky::cloud::{ cloudFieldAt };
+use crate::kernel::ksky::clouddome::{ CloudDome, CloudSky };
+use crate::kernel::klight::daymodel::{ DayState };
+use crate::kernel::krender::raster::{ FrameBuf, Lens };
+use crate::kernel::kentity::player::Player;
+
+/**
+ * The sky, for one frame: the atmosphere's colour field, the cloud deck, and the
+ * tables the world pass reads out of them.
+ */
+class SkyEngine {
+    cloudSky : CloudSky,   // the cloud deck as a direction table (owns its buffers)
+    fogT : FogTables,      // the screen-space sky grid + the depth curve
+    dome : SkyDome,        // this frame's colour field
+    rays : ViewRays,       // …and how a pixel becomes a direction in it
+    lastFog : FogTable,    // the view of the fog tables this frame was built with
+    marchUs : i64,         // microseconds the cloud march + fog build have taken, over the run
+    drawUs : i64,          // ...and the sky paint
+
+    /** Compose the pieces; nothing is sized until the first `update`. */
+    constructor() {
+        self.cloudSky = new CloudSky();
+        self.fogT = new FogTables();
+        self.dome = SkyDome {
+            zenR: 0.0, zenG: 0.0, zenB: 0.0,
+            horR: 0.0, horG: 0.0, horB: 0.0,
+            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
+            haloFade: 0.0,
+        };
+        self.rays = ViewRays { cosy: 1.0, siny: 0.0, cosp: 1.0, sinp: 0.0, hw: 0.0, hh: 0.0, focal: 1.0 };
+        self.lastFog = FogTable {
+            cols: 1, rows: 1, r: 0, g: 0, b: 0, curve: 0,
+            xscale: 0.0, yscale: 0.0, dscale: 0.0,
+        };
+        self.marchUs = 0;
+        self.drawUs = 0;
+    }
+
+    /**
+     * Move the sky on by one frame: the hour's colour field, the camera's view
+     * rays, a slice of the cloud table and the fog tables that read them.
+     *
+     * The order matters and is the reason this is one call. The dome is the
+     * atmosphere's answer for this hour; the fog grid samples that same dome, so
+     * distant terrain dissolves into the sky actually painted behind it; and the
+     * cloud table is marched here rather than at draw time so the god-rays, which
+     * run after the world, can read the same deck the sky was painted with.
+     * @param ds         the day/night state
+     * @param p          player (camera orientation and eye)
+     * @param lens       the frame's projection centre + focal length
+     * @param worldTime  seconds since the run began, for the wind
+     * @param fb         the render target, for the fog grid's size
+     */
+    pub(crate) fn update(mut self, ds : DayState, p : Player, lens : Lens,
+        worldTime : f64, fb : FrameBuf) : void {
+        let t : i64 = monotonicNanos();
+        self.dome = skyDomeFor(ds);
+        self.rays = ViewRays {
+            cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp,
+            hw: lens.hw, hh: lens.hh, focal: lens.focal,
+        };
+        self.cloudSky.march(cloudFieldAt(worldTime), ds, p.eye.y);
+        self.lastFog = self.fogT.build(self.dome, self.rays, self.cloudSky.dome(), fb.w, fb.h);
+        self.marchUs = self.marchUs + (monotonicNanos() - t) / 1000;
+    }
+
+    /**
+     * Paint the backdrop into the pixels the world left empty: the gradient with
+     * the deck composited over it, then the sun and moon, which the same deck can
+     * hide. Called AFTER the world, mobs and torches — it reads their z.
+     * @param ds    the day/night state
+     * @param p     player (camera orientation)
+     * @param fb    the render target
+     * @param lens  the frame's projection centre + focal length
+     */
+    pub(crate) fn draw(mut self, ds : DayState, p : Player, fb : FrameBuf, lens : Lens) : void {
+        let t : i64 = monotonicNanos();
+        let deck : CloudDome = self.cloudSky.dome();
+        drawSkyGradient(self.dome, self.rays, deck, fb);
+        drawCelestial(ds, p, fb, lens, deck);
+        self.drawUs = self.drawUs + (monotonicNanos() - t) / 1000;
+    }
+
+    /** Microseconds the cloud march and fog build have taken, accumulated over the run. */
+    pub(crate) fn marchMicros(self) : i64 {
+        return self.marchUs;
+    }
+
+    /** Microseconds the sky paint has taken, accumulated over the run. */
+    pub(crate) fn drawMicros(self) : i64 {
+        return self.drawUs;
+    }
+
+    /**
+     * The fog this frame: the sky's colour behind each pixel, and how much of it
+     * stands between the eye and a given depth.
+     * @return the fog table view
+     */
+    pub(crate) fn fog(self) : FogTable {
+        return self.lastFog;
+    }
+
+    /**
+     * The cloud deck as a direction table — read by the god-rays, which are made
+     * of the light the deck let past.
+     * @return the dome view
+     */
+    pub(crate) fn clouds(self) : CloudDome {
+        return self.cloudSky.dome();
+    }
+}

@@ -1,0 +1,19 @@
+// viewray — the one direction the sky is asked about.
+//
+// Its own module for a reason that is not ceremony: the sky's colour lives in
+// `atmosphere` and the cloud deck in `clouddome`, `atmosphere` already reads the
+// deck, and both are asked the same question — what is along this direction.
+// Declaring the question in either one would point the dependency back at the
+// other. Declared here, both simply read it.
+//
+// The length arrives inverted because every caller has it that way already: the
+// gradient's per-row setup divides once and hands the reciprocal down the
+// scanline, and a caller with a unit direction passes one.
+
+/** A world-space view direction through a pixel, with its length already inverted. */
+struct ViewRay {
+    pub(crate) dx : f64,
+    pub(crate) dy : f64,
+    pub(crate) dz : f64,
+    pub(crate) inv : f64,
+}

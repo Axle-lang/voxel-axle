@@ -10,7 +10,7 @@
 //   PROVIDER                    BUNDLE (fine-grained capabilities)
 //   kworld (ChunkManager)   ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
 //                               VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
-//                                             + DayCycle + LightThread
+//                                             + DayCycle + LightPrime + LightThread
 //                               LightSample : BlockLightField + SkyLightField
 //                                             + SunLightField + BounceLightField
 //   kentity (Mob)           ->  ActorVisual : Kinded + Animated (+ pose/flash/fuse)
@@ -78,9 +78,30 @@ trait ChunkStreamer {
     fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32;
 }
 
-/** Publish the time of day the light thread bakes against. */
+/**
+ * What the light thread needs to know about the moment it is baking for: the
+ * hour (where the sun is), the clock (where the wind has carried the clouds) and
+ * where the player is standing (what square of world the cloud map should cover).
+ *
+ * One value rather than three published separately, because a bake that mixed
+ * this frame's hour with last frame's wind would put a cloud's shadow where the
+ * cloud is not.
+ */
+struct LightMoment {
+    pub(crate) dayTime : f64,
+    pub(crate) seconds : f64,
+    pub(crate) camX : i32,
+    pub(crate) camZ : i32,
+}
+
+/** Publish the moment the light thread bakes against. */
 trait DayCycle {
-    fn setDayTime(mut self, d : f64) : void;
+    fn setMoment(mut self, m : LightMoment) : void;
+}
+
+/** Light the whole loaded ring up front, before the first frame is drawn. */
+trait LightPrime {
+    fn primeLight(mut self) : void;
 }
 
 /** Stop + join the background light thread at shutdown. */
@@ -89,7 +110,7 @@ trait LightThread {
 }
 
 /** Bundle: the full write + world-lifecycle surface the interaction layer drives. */
-trait VoxelEdit : VoxelWriter, LightMutator, ChunkStreamer, DayCycle, LightThread {
+trait VoxelEdit : VoxelWriter, LightMutator, ChunkStreamer, DayCycle, LightPrime, LightThread {
 }
 
 // ─── Baked light-sample capabilities (read by the renderer per face corner) ──

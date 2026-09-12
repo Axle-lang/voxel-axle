@@ -55,6 +55,5 @@ class Mobs {
     static DEATH_FRAMES : i32 = 38;            // collapse animation length before removal
     static ATTACK_RANGE : f64 = 3.4;
     static ATTACK_DAMAGE : i32 = 4;
-    static ATTACK_COOLDOWN : i32 = 18;
     static HURT_FLASH_FRAMES : i32 = 10;       // frames a struck mob glows red
 }

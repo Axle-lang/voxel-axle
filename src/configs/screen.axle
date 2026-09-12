@@ -1,9 +1,20 @@
 // configs::screen — window size, framebuffer size and the camera projection.
 //
-// The window is `Screen::WINDOW_W × Screen::WINDOW_H`; the world is rasterised into a smaller
-// `Screen::RENDER_W × Screen::RENDER_H` framebuffer the blit upscales to the window. Fewer
-// pixels to fill is the main per-frame speed lever — the projection constants
-// (`Screen::HALF_W/Screen::HALF_H/Screen::FOCAL`) match the RENDER size.
+// The window is `Screen::WINDOW_W × Screen::WINDOW_H` and resizable; the world
+// is rasterised into its own framebuffer that the blit upscales to the window.
+//
+// That framebuffer follows the window's SHAPE exactly — both axes, not just the
+// width — and its size is bounded by a pixel budget rather than by a fixed
+// height. A fixed height is what made going fullscreen a zoom: the view kept
+// the six hundred rows it had in a small window, so the same cone of world was
+// simply magnified across a much larger screen.
+//
+// The lens is a field of view, not a focal length in pixels. `Screen::FOCAL`
+// used to be a constant, which only means anything against a fixed number of
+// rows — at any other height it silently changes the FOV and moves the horizon
+// off centre. What is fixed is the VERTICAL angle; the horizontal one follows
+// the window's aspect, so a wider window shows more world to the sides rather
+// than the same world stretched.
 
 /** Window size, framebuffer size and the camera projection. */
 class Screen {
@@ -11,8 +22,20 @@ class Screen {
     static WINDOW_H : i32 = 600;
     static RENDER_W : i32 = 960;
     static RENDER_H : i32 = 600;
-    static HALF_W : f64 = 480.0;
-    static HALF_H : f64 = 300.0;
-    static FOCAL : f64 = 495.0;   // wider FOV (~62° vert) — less "zoomed" than 373
+
+    // The vertical field of view, in degrees — the one angle the projection is
+    // pinned to at every resolution. Around seventy is what a first-person game
+    // is normally played at; below sixty-five the world starts to feel viewed
+    // through a tube, which is what "too zoomed" is.
+    static FOV_V_DEG : f64 = 73.0;
+
+    // The framebuffer's pixel budget. It takes the window's aspect and the
+    // largest size within this that fits it, and never supersamples past the
+    // window's own resolution. Roughly 1280×720 — the world pass costs pixels
+    // almost linearly, so this is the frame-rate lever.
+    static MAX_RENDER_PIXELS : i32 = 921600;
+    static MIN_RENDER_W : i32 = 256;
+    static MIN_RENDER_H : i32 = 160;
+
     static NEAR_PLANE : f64 = 0.12;
 }

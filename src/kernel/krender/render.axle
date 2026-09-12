@@ -6,9 +6,10 @@
 // Every heavy job lives in a component it composes and none of them knows
 // about the others:
 //
+//   `SkyEngine`    (ksky::skyengine)     owns everything above the ground
 //   `TextureAtlas` (krender::atlas)      owns the mip chain
-//   `GammaTables`  (krender::gamma)      owns the sRGB <-> linear tables
-//   `DayLighting`  (krender::daylight)   owns the sun / sky / brightness cache
+//   `GammaTables`  (klight::gamma)       owns the sRGB <-> linear tables
+//   `DayLighting`  (klight::daymodel)    owns the sun / sky / brightness cache
 //   `ChunkRenderer`(krender::chunkview)  the world-face raster crew
 //   `MobView`      (krender::mobview)    the mob box models
 //   `Selection`    (krender::selection)  the targeted-block wireframe
@@ -23,15 +24,18 @@ use smalt::Mem;
 use std::time::monotonicNanos;
 use smalt::Color;
 use crate::kernel::krender::bloom::Bloom;
+use crate::kernel::ksky::viewray::{ ViewRay };
+use crate::kernel::ksky::clouddome::{ CloudSample };
+use crate::kernel::ksky::skyengine::{ SkyEngine };
 use crate::kernel::krender::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::kernel::krender::atlas::{ TextureAtlas };
-use crate::kernel::krender::daylight::{ DayLighting };
+use crate::kernel::klight::daymodel::{ DayLighting };
 use crate::kernel::krender::chunkview::{ ChunkRenderer, buildSlotsJob, chunkVisible };
-use crate::kernel::krender::sky::{ DayState, drawSkyGradient, drawCelestial };
+use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
-use crate::kernel::krender::raster::{ clearFrame, FrameBuf, MipAtlas, Rgb, Camera, Projected, PostEffect };
-use crate::kernel::krender::gamma::{ Gamma, GammaTables, LinRgb };
+use crate::kernel::krender::raster::{ clearFrame, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected };
+use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::kmath::vec3::{ vec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kworld::manager::ChunkManager;
@@ -64,8 +68,8 @@ const RASTER_BANDS : i32 = 12;
  * component it delegates to.
  */
 class Renderer {
-    hw : f64,             // half the render width (horizontal projection centre);
-                          // updated on resize so the aspect / FOV track the window
+    lens : Lens,          // projection centre + focal length; rebuilt on resize so
+                          // the world keeps its scale and the FOV tracks the window
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
     day : DayLighting,    // owns the day/night colour + brightness cache
@@ -80,6 +84,8 @@ class Renderer {
      * the main thread's share — and is where the frame counters live.
      */
     crew : ChunkRenderer[],
+    sky : SkyEngine,  // everything above the ground: the atmosphere, the cloud
+                      // deck, the fog those two agree on, and the backdrop
     bloom : Bloom,   // soft-glow post-process (owns its half-res buffers + jobs)
     mobs : MobView,  // mob box-model renderer (owns its own projection scratch)
     sel : Selection, // targeted-block selection wireframe (owns its own scratch)
@@ -89,7 +95,7 @@ class Renderer {
      * render components (each owns its own scratch / buffers).
      */
     constructor() {
-        self.hw = Screen::HALF_W;
+        self.lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
         self.atlas = new TextureAtlas();
         self.gamma = new GammaTables();
         self.day = new DayLighting();
@@ -97,6 +103,7 @@ class Renderer {
         for (i of 0..BUILD_WORKERS) {
             self.crew[i as i64] = new ChunkRenderer();
         }
+        self.sky = new SkyEngine();
         self.bloom = new Bloom();
         self.mobs = new MobView();
         self.sel = new Selection();
@@ -121,14 +128,18 @@ class Renderer {
     }
 
     /**
-     * Match the projection to a framebuffer `renderW` wide. Height /
-     * vertical FOV stay fixed (`Screen::FOCAL`, `Screen::HALF_H` are constant), so widening
-     * the window widens the horizontal field of view instead of
-     * stretching — the view stays to scale.
+     * Match the projection to a framebuffer of this size.
+     *
+     * Both axes, because both move: the framebuffer follows the window's shape
+     * now, not just its ratio. The vertical field of view is what stays fixed
+     * (`Screen::FOV_V_DEG`), so more pixels mean a sharper image of the same
+     * world rather than a bigger one, and a wider window widens the horizontal
+     * angle instead of magnifying what was already there.
      * @param renderW  framebuffer width in pixels
+     * @param renderH  framebuffer height in pixels
      */
-    pub(crate) fn setViewWidth(mut self, renderW : i32) : void {
-        self.hw = (renderW as f64) * 0.5;
+    pub(crate) fn setViewport(mut self, renderW : i32, renderH : i32) : void {
+        self.lens = lensFor(renderW, renderH);
     }
 
     // ── World pass (clear → sky → world raster) ──
@@ -149,14 +160,14 @@ class Renderer {
      * @param phase   animation time phase (scrolls flowing-water textures)
      * @param atlas   the texture atlas mip chain view
      * @param gam     the colour space the texels are lit in
-     * @param fog     the distance-fog colour (this frame's sky colour)
+     * @param fogT    the fog: the sky's colour behind each pixel, and its depth curve
      * @param day     the day/night state
      * @param lcurve  the brightness-curve lookup
      */
     pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera,
-        phase : f64, atlas : MipAtlas, gam : Gamma, fog : Rgb, day : DayState, lcurve : i64) : void {
+        phase : f64, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
         for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64].setFrame(atlas, gam, fog, day, lcurve);
+            self.crew[i as i64].setFrame(atlas, gam, fogT, day, lcurve);
         }
         let builders : Task<i32>[5];
         for (i of 0..5) {
@@ -212,9 +223,9 @@ class Renderer {
 
     /**
      * Draw one full world frame: refresh the day/night state, clear to the
-     * sky/fog (or deep water when submerged), paint the atmospheric sky and
-     * sun/moon, then hand the world-face raster the visible chunks to project +
-     * light + clip + fill. Mobs, torches and post-fx are layered on by the caller
+     * sky/fog (or deep water when submerged), move the sky on a frame, then hand
+     * the world-face raster the visible chunks to project + light + clip + fill.
+     * Mobs, torches, the sky paint and post-fx are layered on by the caller
      * after this returns.
      * @param man        chunk manager holding the loaded chunks and baked faces
      * @param p          player providing the eye position and orientation
@@ -224,7 +235,7 @@ class Renderer {
      * @param phase      animation time phase (scrolls flowing-water textures)
      * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
      */
-    pub(crate) fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64) : void {
+    pub(crate) fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64, worldTime : f64) : void {
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
         let ds : DayState = self.day.update(dayTime);
@@ -234,17 +245,40 @@ class Renderer {
             bg = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
         }
         clearFrame(fb, bg);
-        // Atmospheric sky gradient + warm sun halo over the cleared frame, then
-        // the sun/moon discs ride on top — all behind the world (above water).
-        if (!underwater) {
-            drawSkyGradient(ds, p, fb, self.hw);
-            drawCelestial(ds, p, fb, self.hw);
-        }
+        // The sky moves on by a frame whether or not it is drawn: the fog reads
+        // its colour field, and the world is fogged even from under water. It
+        // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
+        self.sky.update(ds, p, self.lens, worldTime, fb);
         // One Camera carries the eye + look trig + projection width for every
         // face this frame; the world raster owns the rest of the pass.
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: self.hw };
-        let fog : Rgb = Rgb { r: ds.skyColR, g: ds.skyColG, b: ds.skyColB };
-        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), self.gamma.view(), fog, ds, self.day.curve());
+        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: self.lens };
+        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), self.gamma.view(),
+            self.sky.fog(), ds, self.day.curve());
+    }
+
+    /**
+     * Paint the sky into every pixel the opaque passes left empty. Call after
+     * the world, mobs and torches: it reads the z-buffer they wrote, and only
+     * computes the pixels that are actually sky.
+     * @param p           player (camera orientation)
+     * @param fb          the render target (framebuffer + z-buffer + size)
+     * @param underwater  true when the eye is submerged — no sky is visible
+     */
+    pub(crate) fn drawSky(mut self, p : Player, fb : FrameBuf, underwater : bool) : void {
+        if (underwater) {
+            return;
+        }
+        self.sky.draw(self.day.state(), p, fb, self.lens);
+    }
+
+    /** Microseconds the cloud march and fog build have taken, accumulated over the run. */
+    pub(crate) fn skyMarchMicros(self) : i64 {
+        return self.sky.marchMicros();
+    }
+
+    /** Microseconds the sky paint has taken, accumulated over the run. */
+    pub(crate) fn skyDrawMicros(self) : i64 {
+        return self.sky.drawMicros();
     }
 
     // ── Post-processing (god-rays, bloom, underwater) ──
@@ -265,7 +299,7 @@ class Renderer {
             return;
         }
         // Project the sun direction to screen through the shared camera.
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: self.hw };
+        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: self.lens };
         let pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
         if (pr.cz < 0.05) {
             return;   // sun behind the camera
@@ -275,7 +309,15 @@ class Renderer {
         if (climb > 1.0) {
             climb = 1.0;
         }
-        let expo : f64 = Render::GOD_RAY_WEIGHT * ds.daylight * climb;
+        // Shafts are made of the light that got past the deck, so a sun behind a
+        // cloud casts none. Sampled once, at the sun — not per march step per
+        // pixel, which is twenty-four cloud reads a pixel and was, measured, the
+        // single most expensive thing in a sunset frame.
+        let sunCloud : CloudSample = self.sky.clouds().sample(ViewRay { dx: ds.sunX, dy: ds.sunY, dz: ds.sunZ, inv: 1.0 });
+        let expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
+        if (expo < 0.002) {
+            return;
+        }
         if (expo <= 0.0) {
             return;
         }
@@ -362,14 +404,14 @@ class Renderer {
      * each frame.
      * @return the per-frame mob scene context
      */
-    fn mobScene(self) : MobScene {
+    fn mobScene(mut self) : MobScene {
         let ds : DayState = self.day.state();
         return MobScene {
             atlas: self.atlas.mip(),
             gam: self.gamma.view(),
-            fog: Rgb { r: ds.skyColR, g: ds.skyColG, b: ds.skyColB },
+            fogT: self.sky.fog(),
             ds: ds,
-            hw: self.hw,
+            lens: self.lens,
         };
     }
 
@@ -420,7 +462,7 @@ class Renderer {
      *              snow layer) so the outline hugs the true box, not a cube
      */
     pub(crate) fn drawSelection(self, p : Player, fb : FrameBuf, bx : i32, by : i32, bz : i32, topH : f64) : void {
-        self.sel.draw(p, fb, self.hw, bx, by, bz, topH);
+        self.sel.draw(p, fb, self.lens, bx, by, bz, topH);
     }
 }
 

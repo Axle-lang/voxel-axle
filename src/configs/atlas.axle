@@ -9,7 +9,6 @@
 /** Texture atlas geometry: tile size, tile counts, and the mip / filter settings. */
 class Atlas {
     static TILE_PX : i32 = 128;
-    static BLOCK_TILES : i32 = 81;
     static TILE_COUNT : i32 = 94;
     static USE_MOB_TEXTURES : bool = true;
     // Mip chain depth (64 → 32 → … → 1 = 7 levels). Distant faces sample a

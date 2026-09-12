@@ -6,21 +6,54 @@
 // direction drives the directional face shading, and the sky/fog colour
 // interpolates night → dusk → day.
 
-                                     // (round-robin → whole view refreshes in ~span²/this frames)
-                                     // larger = softer, wider shadow edges (exaggerated vs the real sun)
-
 /** The day/night cycle: its length, the sun's shadows, and the sky colours. */
 class Daylight {
     static LENGTH_TICKS : i32 = 14400; // a full day in fixed ticks (~4 min @ 60 Hz)
     static START : f64 = 0.42;         // start mid-morning
-    static NIGHT_LEVEL : f64 = 0.13;   // daylight floor at night (moonlight)
     static SUN_TILT : f64 = 0.35;      // sun's north/south lean (so it's not dead overhead)
 
+    // ── Night ───────────────────────────────────────────────────
+    // What the SKY alone gives once the sun is down: starlight, and almost
+    // nothing. It replaces a 0.13 floor that was applied to the whole light term,
+    // which made night a daylit world turned down — uniform, shadowless, and
+    // grey. Night is now dark for the right reason: its light source has set.
+    static STARLIGHT : f64 = 0.018;
+    // And what the moon casts, as a fraction of full sun. Small, but DIRECTIONAL:
+    // it runs through the same Lambert term and the same shadow bake, so a wall
+    // facing the moon is lit and the one behind it is not, and a tree still lays
+    // a shadow. That is the difference between a night you can read and a night
+    // that is merely dim.
+    static MOON_STRENGTH : f64 = 0.055;
+    // How fast a body reaches full strength as it climbs off the horizon —
+    // 1/sin(elevation at full). At 3.2 that is about eighteen degrees, which is
+    // roughly how long a real sunrise takes to stop being a sunrise.
+    static HORIZON_FADE : f64 = 3.2;
+
     // ── Directional sun shadows ─────────────────────────────────
-    static SUN_SHADOW_REACH : f64 = 30.0; // how far (blocks) a shadow ray probes toward the sun
-    static SUN_CHUNKS_PER_TICK : i32 = 6; // chunks whose sun-shadow map is refreshed per frame
+    static SUN_SHADOW_REACH : f64 = 40.0; // how far (blocks) a shadow ray probes toward the sun
+                                          // (a tree's own shadow is as long as the tree is tall,
+                                          // over the tangent of the sun's elevation — 30 cut it off
+                                          // at the hours the shadow is worth having)
+    static SUN_CHUNKS_PER_TICK : i32 = 32; // chunks whose sun-shadow map is refreshed per pass
+                                          // (round-robin → the whole ring refreshes in ~span²/this
+                                          // passes, and a cell only moves once per sweep, so the
+                                          // sweep's LENGTH is how coarsely the shadow tracks the sun)
     static SUN_SHADOW_SAMPLES : i32 = 6;  // rays per cell over the sun disc (1 = hard, more = softer penumbra)
     static SUN_DISC_ANGLE : f64 = 0.085;  // angular radius of the sun disc the rays spread over (rad);
+                                          // larger = softer, wider shadow edges (exaggerated vs the real sun)
+
+    // How far a cell's sun visibility moves toward its freshly measured value on
+    // each sweep of the ring. Not 1.0, and that is the whole point: a cell is
+    // visited once per sweep, so at 1.0 the shadow holds perfectly still and then
+    // JUMPS the whole distance the sun travelled since it was last looked at —
+    // a shadow that ticks forward once a sweep instead of moving. Moving a third
+    // of the way turns each of those jumps into the start of a fade, and what you
+    // see is an edge that softens and re-forms rather than one that hops.
+    //
+    // It only applies to the tracking sweep. A chunk that has just arrived, or
+    // one the player just edited, is written outright — there is nothing to glide
+    // from, and a shadow that faded in over two seconds would be its own bug.
+    static SUN_GLIDE : f64 = 0.34;
 
     // Sky colours interpolated across the day.
     static DAY_SKY_R : i32 = 150;

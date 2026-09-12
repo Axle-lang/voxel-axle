@@ -1,0 +1,287 @@
+// daymodel — what hour it is, and what that does to the light.
+//
+// The light engine's clock. It owns the per-frame `DayState` snapshot every pass
+// reads — where the sun is, how much daylight there is, what colour the sky has
+// gone and what colour the sun's own light arrives in — plus the fixed
+// brightness curve the light sampler indexes by baked level.
+//
+// It lives here rather than beside the sky's DRAWING because it is not about
+// drawing: the world raster, the mob pass and the shadow bake all ask it what
+// hour it is, and only one of its readers paints a pixel. `krender::sky` is left
+// with the backdrop.
+
+use smalt::Mem;
+use crate::kernel::klight::facelight::{ FaceLight, SkyLighting, shadeLambert };
+use crate::kernel::kmath::vec3::{ Vec3, vec3 };
+use crate::configs::light::{ Light };
+use crate::configs::cloud::{ Cloud };
+use crate::configs::time::{ Daylight };
+
+/**
+ * THE light in the sky right now: which way it comes from, how much of it there
+ * is, and what colour.
+ *
+ * One slot, filled by the sun while it is up and by the moon while it is not.
+ * The moon is not a special case and not a floor added to everything — it is the
+ * same directional light at a few percent of the strength and a colder colour,
+ * so it casts the same shadows through the same machinery. That is what makes a
+ * moonlit night read as a night with a moon in it, rather than as a daylit world
+ * turned down.
+ */
+struct SkyBodyLight {
+    pub(crate) dirX : f64,
+    pub(crate) dirY : f64,
+    pub(crate) dirZ : f64,
+    pub(crate) strength : f64,   // 1 = full sun
+    pub(crate) tintR : f64,
+    pub(crate) tintG : f64,
+    pub(crate) tintB : f64,
+}
+
+/**
+ * Which body is lighting the world at `dayTime`, from where, how strongly and in
+ * what colour.
+ *
+ * Shared by the renderer and by the shadow bake on the light thread — they have
+ * to agree about where the light comes from or the shadows point the wrong way,
+ * and the only way to guarantee that is for there to be one answer.
+ *
+ * Neither body switches AT the horizon: whichever is up, its strength fades to
+ * nothing as it crosses, so the handover happens where neither is contributing
+ * and cannot be seen.
+ * @param dayTime  time of day in [0, 1)
+ * @return the active body's direction, strength and colour
+ */
+fn activeBody(dayTime : f64) : SkyBodyLight {
+    let ang : f64 = (dayTime - 0.25) * 6.2831853;
+    let sx : f64 = ang.cos();
+    let sy : f64 = ang.sin();
+    let sz : f64 = Daylight::SUN_TILT;
+    let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
+    if (len < 0.0001) {
+        len = 0.0001;
+    }
+    if (sy > 0.0) {
+        let up : f64 = sy * Daylight::HORIZON_FADE;
+        if (up > 1.0) {
+            up = 1.0;
+        }
+        // The sun reddens as it sinks, off the same elevation that dims it.
+        let warm : f64 = 1.0 - up;
+        return SkyBodyLight {
+            dirX: sx / len, dirY: sy / len, dirZ: sz / len,
+            strength: up,
+            tintR: Light::SUN_TINT_R + (Light::DUSK_TINT_R - Light::SUN_TINT_R) * warm,
+            tintG: Light::SUN_TINT_G + (Light::DUSK_TINT_G - Light::SUN_TINT_G) * warm,
+            tintB: Light::SUN_TINT_B + (Light::DUSK_TINT_B - Light::SUN_TINT_B) * warm,
+        };
+    }
+    let up : f64 = (0.0 - sy) * Daylight::HORIZON_FADE;
+    if (up > 1.0) {
+        up = 1.0;
+    }
+    return SkyBodyLight {
+        dirX: (0.0 - sx) / len, dirY: (0.0 - sy) / len, dirZ: (0.0 - sz) / len,
+        strength: Daylight::MOON_STRENGTH * up,
+        tintR: Light::MOON_TINT_R, tintG: Light::MOON_TINT_G, tintB: Light::MOON_TINT_B,
+    };
+}
+
+/**
+ * The per-frame day/night state: where the sun is drawn, what light is actually
+ * arriving and from which body, how much sky there is, and the sky's colour. A
+ * value-type struct passed by value into every sky draw (and across the gradient
+ * job's thread), so no day-state is shared by reference.
+ */
+struct DayState : SkyLighting {
+    // Where the SUN is, for the things that draw it: its disc, the halo around
+    // it, the god-ray origin. A fact about the picture, not about the light — at
+    // night it is below the horizon and lighting nothing.
+    pub(crate) sunX : f64,
+    pub(crate) sunY : f64,
+    pub(crate) sunZ : f64,
+    // The light that is actually arriving, from whichever body is up.
+    pub(crate) dirX : f64,
+    pub(crate) dirY : f64,
+    pub(crate) dirZ : f64,
+    pub(crate) dirStrength : f64,
+    pub(crate) dirTintR : f64,
+    pub(crate) dirTintG : f64,
+    pub(crate) dirTintB : f64,
+    // How much of the sky's own light there is: full by day, starlight at night.
+    // It scales the AMBIENT half alone — the directional half carries its own
+    // strength — so a night is dark because its light source set, not because
+    // everything was multiplied down.
+    pub(crate) skyAmbient : f64,
+    pub(crate) skyColR : i32,
+    pub(crate) skyColG : i32,
+    pub(crate) skyColB : i32,
+
+    /**
+     * The two shares of the light on a surface normal right now: the body's, and
+     * the sky's. Every consumer asks the day-state rather than re-deriving the
+     * dot-product from loose scalars, so there is one answer to "what reaches
+     * this normal".
+     * @param n  the (unit) surface normal
+     * @return the face's direct and ambient terms
+     */
+    pub(crate) fn shade(self, n : Vec3) : FaceLight {
+        let f : FaceLight = shadeLambert(n, vec3(self.dirX, self.dirY, self.dirZ));
+        return FaceLight {
+            direct: f.direct * self.dirStrength,
+            ambient: f.ambient * self.skyAmbient,
+        };
+    }
+}
+
+/**
+ * Compute the day/night state from `dayTime` (0..1): the sun direction (0.25 =
+ * sunrise, 0.5 = noon, 0.75 = sunset), the daylight factor (full above the
+ * horizon, the moonlight floor below, smooth through dawn/dusk), and the sky
+ * colour (night → day with a warm dusk/dawn push at the transition).
+ * @param dayTime  time of day in [0, 1)
+ * @return the freshly computed day/night state
+ */
+fn computeDayState(dayTime : f64) : DayState {
+    // Sun angle around the sky dome, tilted out of the pure east-west plane.
+    let ang : f64 = (dayTime - 0.25) * 6.2831853;
+    let sx : f64 = ang.cos();
+    let sy : f64 = ang.sin();
+    let sz : f64 = Daylight::SUN_TILT;
+    let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
+    if (len < 0.0001) {
+        len = 0.0001;
+    }
+    // Daylight: full above the horizon, floor (moonlight) below, smooth dusk.
+    let dl : f64 = (sy + 0.2) * 2.0;
+    if (dl < 0.0) {
+        dl = 0.0;
+    }
+    if (dl > 1.0) {
+        dl = 1.0;
+    }
+    // Warm dusk/dawn push, strongest as the sun crosses the horizon (dl ≈ 0.5).
+    let ad : f64 = dl - 0.5;
+    if (ad < 0.0) {
+        ad = 0.0 - ad;
+    }
+    let dusk : f64 = 1.0 - ad * 2.0;
+    if (dusk < 0.0) {
+        dusk = 0.0;
+    }
+    dusk = dusk * 0.7;
+    let r : f64 = (Daylight::NIGHT_SKY_R as f64) + ((Daylight::DAY_SKY_R - Daylight::NIGHT_SKY_R) as f64) * dl;
+    let g : f64 = (Daylight::NIGHT_SKY_G as f64) + ((Daylight::DAY_SKY_G - Daylight::NIGHT_SKY_G) as f64) * dl;
+    let b : f64 = (Daylight::NIGHT_SKY_B as f64) + ((Daylight::DAY_SKY_B - Daylight::NIGHT_SKY_B) as f64) * dl;
+    r = r + ((Daylight::DUSK_SKY_R as f64) - r) * dusk;
+    g = g + ((Daylight::DUSK_SKY_G as f64) - g) * dusk;
+    b = b + ((Daylight::DUSK_SKY_B as f64) - b) * dusk;
+    // The same `dusk` that warms the SKY warms the light the sun casts, and for
+    // the same reason. Without this the warm hour lived only in the backdrop:
+    // the blocks facing a setting sun were lit the colour of noon, because the
+    // only thing tinting them was how squarely they faced it — and at sunset
+    // nothing faces it squarely, so the whole world went cool exactly when it
+    // should have gone gold.
+    let overcast : f64 = 0.0;
+    if (Cloud::ON) {
+        overcast = Cloud::COVERAGE;
+    }
+    let body : SkyBodyLight = activeBody(dayTime);
+    return DayState {
+        sunX: sx / len,
+        sunY: sy / len,
+        sunZ: sz / len,
+        dirX: body.dirX,
+        dirY: body.dirY,
+        dirZ: body.dirZ,
+        dirStrength: body.strength,
+        dirTintR: body.tintR,
+        dirTintG: body.tintG,
+        dirTintB: body.tintB,
+        // A cloud takes the sun away and hands part of it back diffused, so an
+        // overcast sky loses its shadows without losing its light. The
+        // directional half is cut per column by the cloud map; this is the other
+        // side of that trade, and it is bounded — the rule is still that the
+        // light comes from the sun, so overcast reads as SOFT, not as flat.
+        skyAmbient: (Daylight::STARLIGHT + (1.0 - Daylight::STARLIGHT) * dl)
+            * (1.0 + Cloud::AMBIENT_LIFT * overcast),
+        skyColR: r.floorToInt() as i32,
+        skyColG: g.floorToInt() as i32,
+        skyColB: b.floorToInt() as i32,
+    };
+}
+
+/**
+ * The day/night colour kernel: owns the sun direction, daylight factor and
+ * sky/fog colour (refreshed each frame from the clock) plus the fixed brightness
+ * curve the light sampler reads. `update` recomputes the cached `DayState` (the
+ * value snapshot handed to the sky draws, the world raster and the mob pass);
+ * `state` / `curve` expose it. The sun-direction shading itself lives on the
+ * `DayState` value (its `SkyLighting.shade`).
+ */
+class DayLighting {
+    cur : DayState, // this frame's sun / daylight / sky colour snapshot
+    lcurve : i64,   // 16 f64s: lightFalloff^(15-level), the brightness curve
+
+    /** Seed a noon day-state and build the brightness curve lookup. */
+    constructor() {
+        self.cur = DayState {
+            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
+            dirX: 0.0, dirY: 1.0, dirZ: 0.0,
+            dirStrength: 1.0,
+            dirTintR: Light::SUN_TINT_R, dirTintG: Light::SUN_TINT_G, dirTintB: Light::SUN_TINT_B,
+            skyAmbient: 1.0,
+            skyColR: Daylight::DAY_SKY_R, skyColG: Daylight::DAY_SKY_G, skyColB: Daylight::DAY_SKY_B,
+        };
+        // Brightness curve lookup: lcurve[level] = `Light::FALLOFF`^(15-level),
+        // and lcurve[0] = 0 — level zero is the ABSENCE of light, not the
+        // fifteenth step down from full. Left as the power it would be, a
+        // sealed cave still receives three-and-a-half percent of the sky, which
+        // the sun exposure then multiplies: enough to see by, from a light that
+        // by definition is not reaching there.
+        self.lcurve = Mem::take(16 * 8);
+        Mem::putRealOf(self.lcurve, 0, 0.0);
+        let li : i32 = 1;
+        while (li < 16) {
+            let pc : f64 = 1.0;
+            let kc : i32 = 0;
+            while (kc < 15 - li) {
+                pc = pc * Light::FALLOFF;
+                kc = kc + 1;
+            }
+            Mem::putRealOf(self.lcurve, li, pc);
+            li = li + 1;
+        }
+    }
+
+    /**
+     * Refresh the cached day/night state from dayTime (0..1) for this frame: the
+     * sun direction (face shading), the daylight factor (scales sky light) and
+     * the sky/fog colour. The math lives in `sky::computeDayState`; the fresh
+     * value is cached AND returned so the caller can hand the same snapshot to
+     * the sky draws (and across the gradient job's thread).
+     * @param dayTime  time of day in [0, 1)
+     * @return the day/night state for this frame
+     */
+    pub(crate) fn update(mut self, dayTime : f64) : DayState {
+        self.cur = computeDayState(dayTime);
+        return self.cur;
+    }
+
+    /**
+     * This frame's cached day/night state (sun / daylight / sky colour).
+     * @return the current day/night state
+     */
+    pub(crate) fn state(self) : DayState {
+        return self.cur;
+    }
+
+    /**
+     * The brightness-curve lookup (`Light::FALLOFF`^(15-level)) the light sampler and
+     * the mob ambient read.
+     * @return base address of the 16-entry f64 curve
+     */
+    pub(crate) fn curve(self) : i64 {
+        return self.lcurve;
+    }
+}
