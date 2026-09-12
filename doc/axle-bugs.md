@@ -150,3 +150,48 @@ sort alors un faux positif :
 sur une crate qui est une bibliothèque. Deux petites demandes : pouvoir demander
 un feature de dépendance depuis l'arête `[dependencies]` qui la nomme, et ne pas
 exiger de `main` d'une crate bibliothèque.
+
+## 7. `axle fmt` supprime le mot-clé `static` des champs de classe
+
+Le plus grave de la liste : le formateur change le sens du programme. Toutes les
+classes de configuration du projet déclarent des constantes `static`, lues par le
+reste du code sous la forme `Noise::TEMP_SCALE`. Un passage de `axle fmt` les
+réécrit sans le mot-clé.
+
+Avant :
+
+```
+class Gameplay {
+    static REACH_DIST : f64 = 5.0;   // how far the look-ray reaches, in blocks
+    static EDIT_COOLDOWN : i32 = 10; // frames between repeated digs/places
+}
+```
+
+Après :
+
+```
+class Gameplay {
+    REACH_DIST    : f64 = 5.0; // how far the look-ray reaches, in blocks
+    EDIT_COOLDOWN : i32 = 10;  // frames between repeated digs/places
+}
+```
+
+L'alignement des deux-points et des commentaires est le travail attendu ; la
+perte de `static` transforme des constantes de classe en champs d'instance. Sur
+ce projet le formateur a touché 19 fichiers de configuration d'un coup, donc un
+`axle fmt` suivi d'un commit sans relecture casse le programme en silence.
+
+## 8. `axle fmt` panique sur un fichier valide
+
+Sur le même passage, et sur un fichier que `axle build -O 3` compile sans une
+seule erreur :
+
+```
+thread 'main' (10412) panicked at crates\6-tools\axle_fmt\src\lower\punct.rs:65:39:
+```
+
+Le message imprime ensuite le début du commentaire de tête du fichier
+(`src/game/physcheck.axle`, un commentaire de bloc `//` de vingt lignes suivi
+d'un bloc `use`). Le formateur s'arrête là, donc les fichiers qui suivent dans
+l'ordre de parcours ne sont pas formatés du tout — l'échec est partiel et
+silencieux quant à ce qui reste à faire.
