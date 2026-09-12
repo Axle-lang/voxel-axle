@@ -3,7 +3,7 @@
 // A fixed ring of `World::SPAN × World::SPAN` slots follows the camera: a chunk keeps its
 // slot (addressed by chunk-coord modulo `World::SPAN`) as the player moves, so crossing
 // a chunk border only regenerates the newly-entered ones. Each slot stores a
-// FULL voxel field padded by a one-voxel skirt that mirrors the neighbouring
+// FULL voxel field, one chunk per slot, with border reads going to the neighbouring
 // chunks' edge columns, so the mesher culls seam faces without touching another
 // slot.
 //
@@ -77,19 +77,19 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         let torchCap : i32 = slots * World::MAX_TORCHES_PER_CHUNK;
         self.faces = FaceMesh {
             fcount: malloc<i32>(slots),
-            fx: malloc<i32>(faceCap), fy: malloc<i32>(faceCap), fz: malloc<i32>(faceCap),
-            ftile: malloc<i32>(faceCap),
-            frun: malloc<i32>(faceCap),
+            fx: malloc<i8>(faceCap), fy: malloc<i8>(faceCap), fz: malloc<i8>(faceCap),
+            ftile: malloc<i16>(faceCap),
+            frun: malloc<i8>(faceCap),
             flight: Mem::take((faceCap as i64) * 8),
-            fao: Mem::take((faceCap as i64) * 4),
+            fao: Mem::take(faceCap as i64),
         };
         self.torches = TorchField {
-            tx: malloc<i32>(torchCap), ty: malloc<i32>(torchCap), tz: malloc<i32>(torchCap),
+            tx: malloc<i8>(torchCap), ty: malloc<i8>(torchCap), tz: malloc<i8>(torchCap),
             tcount: malloc<i32>(slots),
         };
         self.cols = ColumnRing {
             cxs: malloc<i32>(slots), czs: malloc<i32>(slots),
-            loaded: malloc<i32>(slots), ctop: malloc<i32>(slots * s * s),
+            loaded: malloc<i32>(slots), ctop: malloc<i16>(slots * s * s),
         };
         self.store = new VoxStore(slots);
         self.gen = malloc<dyn Generator>(1);
@@ -159,7 +159,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     // ── Voxel access (delegates to the store) ───────────────────
 
     /**
-     * Flat voxel-array index for a padded local coordinate.
+     * Flat voxel-array index for a local coordinate.
      * @param slot  the slot index
      * @param lx    the local x coordinate
      * @param ly    the local y coordinate
@@ -171,9 +171,9 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     }
 
     /**
-     * Block id at a padded local voxel; bedrock below 0, air above.
+     * Block id at a local voxel; bedrock below 0, air above.
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @return the block id
      */
     fn getVox(self, slot : i32, local : IVec3) : Block {
@@ -181,9 +181,9 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     }
 
     /**
-     * Write block `id` at a padded local voxel (no bounds check).
+     * Write block `id` at a local voxel (no bounds check).
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @param id     the block id to write
      */
     fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
@@ -234,7 +234,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
             return World::SEA_LEVEL;
         }
-        return self.cols.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)];
+        return self.cols.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)] as i32;
     }
 
     /**
@@ -465,9 +465,11 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     // ── Editing (dig / place) ───────────────────────────────────
 
     /**
-     * Write `id` at a world voxel into every loaded slot whose padded volume
-     * contains it (owner chunk + edge/corner neighbours whose skirt copies must
-     * stay in sync), then re-mesh each.
+     * Write `id` at a world voxel into the chunk that owns it, then re-mesh
+     * that chunk and every neighbour whose faces look at the cell — the
+     * edge and corner neighbours when the cell sits on a border. The
+     * neighbours read the cell across the border rather than from a copy, so
+     * the write happens once; the re-mesh is what makes them see it.
      * @param cell  the world voxel
      * @param id    the block id to write
      */
@@ -492,10 +494,12 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
                 if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
                     let slot : i32 = self.slotFor(ccx, ccz);
                     if (self.cols.loaded[slot] == 1 && self.cols.cxs[slot] == ccx && self.cols.czs[slot] == ccz) {
-                        let v : Block = id;
-                        self.setVoxLocal(slot, ivec3(lx, wy, lz), v);
-                        if (id != Block::Air) {
-                            self.bumpFY(slot, wy);
+                        if (dcx == 0 && dcz == 0) {
+                            let v : Block = id;
+                            self.setVoxLocal(slot, ivec3(lx, wy, lz), v);
+                            if (id != Block::Air) {
+                                self.bumpFY(slot, wy);
+                            }
                         }
                         self.buildMesh(slot, ccx, ccz);
                     }

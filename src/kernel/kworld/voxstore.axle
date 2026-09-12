@@ -1,10 +1,17 @@
 // voxstore — the raw voxel storage of the chunk ring.
 //
-// A LEAF mini-manager (imports only `configs`) holding the padded per-slot voxel
-// field and the per-slot highest-face Y watermark, plus the master per-voxel
-// INDEX LAYOUT (`voxIdx`). That layout is shared: the manager's per-voxel byte
-// light volumes (block / sky / sun / sky-access / bounce) index with the very
-// same `voxIdx`, so it lives here as the single authority.
+// A LEAF mini-manager (imports only `configs`) holding the per-slot voxel field
+// and the per-slot highest-face Y watermark, plus the master per-voxel INDEX
+// LAYOUT (`voxIdx`). That layout is shared: the manager's per-voxel byte light
+// volumes (block / sky / sun / sky-access / bounce) index with the very same
+// `voxIdx`, so it lives here as the single authority.
+//
+// A slot holds exactly its chunk's sixteen-by-sixteen columns. It used to hold
+// a one-cell skirt around them too — a copy of the neighbours' edge columns, so
+// the mesher could look across a border without leaving the slot. That skirt
+// was 27% of every voxel and every light plane, kept in step by writing each
+// edit into up to four slots, and it was wrong the moment a neighbour had not
+// been generated yet. A border read now goes to the chunk that owns the cell.
 //
 // Because this is a leaf, both `manager.axle` (which composes a VoxStore) and
 // `treegen.axle` (which carves trees straight into one) depend on it one-way —
@@ -16,13 +23,13 @@ use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
 class VoxStore {
-    vox : Block[],            // padded block field: slots × (chunkSize+2)² × worldHeight
+    vox : Block[],            // block field: slots × chunkSize² × worldHeight
     lvl : i8[],               // per-voxel LEVEL, same layout; 0 = the id's default box
     pub(crate) maxFY : i32[], // per-slot highest-face Y watermark (bounds the mesh/light scan)
 
     /**
-     * Allocate the padded voxel field, its level field and the per-slot
-     * face-Y watermark.
+     * Allocate the voxel field, its level field and the per-slot face-Y
+     * watermark.
      *
      * The level is one byte a voxel beside the id — a quarter more memory
      * for the field, and the thing that makes a partial block a piece of
@@ -33,34 +40,30 @@ class VoxStore {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
-        self.vox = malloc<Block>(slots * hSide * hSide * World::HEIGHT);
-        self.lvl = malloc<i8>(slots * hSide * hSide * World::HEIGHT);
+        let s : i32 = World::CHUNK_SIZE;
+        self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
+        self.lvl = malloc<i8>(slots * s * s * World::HEIGHT);
         self.maxFY = malloc<i32>(slots);
     }
 
     /**
-     * Flat index of a padded local voxel. The inner dimension is Y; a one-voxel
-     * skirt (+1) on x/z mirrors the neighbour chunks' edge columns.
+     * Flat index of a local voxel. The inner dimension is Y.
      * @param slot  the slot index
-     * @param lx    the local x coordinate (skirt range [-1, chunkSize])
+     * @param lx    the local x coordinate, 0..chunkSize-1
      * @param ly    the local y coordinate
-     * @param lz    the local z coordinate (skirt range [-1, chunkSize])
+     * @param lz    the local z coordinate, 0..chunkSize-1
      * @return the flat offset into `vox` (and into the light byte volumes)
      */
     pub(crate) fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
-        let px : i32 = lx + 1;
-        let pz : i32 = lz + 1;
-        return slot * (hSide * hSide * World::HEIGHT)
-            + (pz * hSide + px) * World::HEIGHT + ly;
+        let s : i32 = World::CHUNK_SIZE;
+        return slot * (s * s * World::HEIGHT) + (lz * s + lx) * World::HEIGHT + ly;
     }
 
     /**
-     * Read a padded local voxel: bedrock (Stone) below y=0, Air at/above the
+     * Read a local voxel: bedrock (Stone) below y=0, Air at/above the
      * world top, the stored block otherwise.
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @return the block id at that cell
      */
     pub(crate) fn getVox(self, slot : i32, local : IVec3) : Block {
@@ -74,9 +77,9 @@ class VoxStore {
     }
 
     /**
-     * Write block `id` at a padded local voxel (no bounds check).
+     * Write block `id` at a local voxel (no bounds check).
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @param id     the block id to write
      */
     pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
@@ -89,14 +92,14 @@ class VoxStore {
     }
 
     /**
-     * Write block `id` at a padded local voxel with an explicit level.
+     * Write block `id` at a local voxel with an explicit level.
      *
      * The door a layered block goes through: a snow layer, a slab, a
      * fluid depth. `level` is 1..8 for a layered id and ignored by every
      * other one, so a caller that does not know which it holds can pass
      * the level it means and be right either way.
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @param id     the block id to write
      * @param level  the block's level, 1..8; 0 for the id's default
      */
@@ -107,9 +110,9 @@ class VoxStore {
     }
 
     /**
-     * The stored level of a padded local voxel; 0 outside the world.
+     * The stored level of a local voxel; 0 outside the world.
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @return the cell's level, or 0 for "the id's default"
      */
     pub(crate) fn getLevel(self, slot : i32, local : IVec3) : i32 {
@@ -120,15 +123,16 @@ class VoxStore {
     }
 
     /**
-     * Write `id` only if `local` is inside this slot's padded volume — used when
-     * stamping trees whose origin sits just outside the chunk.
+     * Write `id` only if `local` is inside this slot — used when stamping
+     * trees whose origin sits just outside the chunk, so the part of the canopy
+     * that is in this chunk lands and the rest is the neighbour's to stamp.
      * @param slot   the slot index
-     * @param local  the padded local voxel coordinate
+     * @param local  the local voxel coordinate
      * @param id     the block id to write
      */
     pub(crate) fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
         let s : i32 = World::CHUNK_SIZE;
-        if (local.x < 0 - 1 || local.x > s || local.z < 0 - 1 || local.z > s) {
+        if (local.x < 0 || local.x >= s || local.z < 0 || local.z >= s) {
             return;
         }
         if (local.y < 0 || local.y >= World::HEIGHT) {

@@ -8,7 +8,10 @@
 // colour in `color`, and a placement in a biome / the generator.
 
 /** A block id: what occupies one voxel cell. */
-enum Block : i32 {
+// A byte, not a word: this id is stored once per voxel of the loaded ring —
+// twelve million of them — and there are fewer than a hundred kinds of block.
+// At `i32` the voxel field alone was forty-eight megabytes.
+enum Block : u8 {
     Air,
     Grass,
     Dirt,

@@ -45,23 +45,73 @@ struct LightRemoval {
 }
 
 /**
- * The nine per-voxel light volumes (each a raw byte array in voxIdx layout):
- * block light per CHANNEL and sky light (0..15), soft sun visibility +
- * hemispherical sky access (0..255), and the one-bounce coloured indirect tint
- * (r/g/b, 128 = neutral). Grouped so `LightStore` carries one field instead of
- * nine loose pointers.
+ * One four-bit plane inside a byte volume: the volume, and which half of each
+ * byte is this plane's.
+ *
+ * Block light per channel and sky light are levels 0..15, and a level was
+ * stored in a byte of its own — four planes, forty-eight megabytes, half of
+ * every byte always zero. Two planes share a byte now; the flood and the
+ * readers go through this handle and never see the other half.
+ */
+struct Nibble {
+    base : i64,   // the byte volume, in voxIdx layout
+    shift : i32,  // 0 for the low half, 4 for the high
+}
+
+/**
+ * The plane's level at a byte offset.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @return the level 0..15
+ */
+fn nibGet(p : Nibble, off : i64) : i32 {
+    return (Mem::byteAt(p.base, off) >> p.shift) & 15;
+}
+
+/**
+ * Store a level in the plane's half of the byte, leaving the other half as
+ * it was. Whole-byte read-modify-write; the two halves of a byte are only ever
+ * written by the one thread that runs the floods, so nothing is torn.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @param v    the level 0..15
+ */
+fn nibPut(p : Nibble, off : i64, v : i32) : void {
+    let keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
+    Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
+}
+
+/**
+ * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
+ * block light per CHANNEL and sky light (0..15, two planes to a byte), soft
+ * sun visibility + hemispherical sky access (0..255), and the one-bounce
+ * coloured indirect tint (r/g/b, 128 = neutral). Grouped so `LightStore`
+ * carries one field instead of seven loose pointers.
  */
 struct LightVolumes {
-    lightR : i64,    // per-voxel block light 0..15, one volume per channel:
-    lightG : i64,    // a source floods each of them from its own level, so the
-    lightB : i64,    // light carries its colour and its reach together
-    skylight : i64,  // per-voxel sky light 0..15 (open-to-sky exposure)
+    lightRG : i64,   // per-voxel block light 0..15, red in the low nibble and
+                     // green in the high: a source floods each channel from its
+                     // own level, so the light carries its colour and its reach
+    lightBS : i64,   // ...blue in the low nibble, and SKY light 0..15 (open-to-
+                     // sky exposure) in the high
     sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
                      // 0 = full shadow, between = penumbra)
     skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (AO / GI)
     bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
     bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
     bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
+
+    /** The red block-light plane. @return its handle */
+    fn red(self) : Nibble { return Nibble { base: self.lightRG, shift: 0 }; }
+
+    /** The green block-light plane. @return its handle */
+    fn green(self) : Nibble { return Nibble { base: self.lightRG, shift: 4 }; }
+
+    /** The blue block-light plane. @return its handle */
+    fn blue(self) : Nibble { return Nibble { base: self.lightBS, shift: 0 }; }
+
+    /** The sky-light plane. @return its handle */
+    fn sky(self) : Nibble { return Nibble { base: self.lightBS, shift: 4 }; }
 }
 
 /** The precomputed upper-hemisphere ray directions used by the sky-AO bake. */
@@ -104,15 +154,15 @@ class LightStore {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
-        let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (World::HEIGHT as i64);
+        let s : i32 = World::CHUNK_SIZE;
+        let vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
         // Zeroed, not merely taken: a slot's volumes are given their real
         // values by `clearLight` when a chunk lands in it, and until then every
         // read of them — the mesher's corner average, the renderer's sample —
         // would be reading whatever the allocator last left there.
         self.vols = LightVolumes {
-            lightR: Mem::takeZeroed(vol), lightG: Mem::takeZeroed(vol), lightB: Mem::takeZeroed(vol),
-            skylight: Mem::takeZeroed(vol), sunlit: Mem::takeZeroed(vol),
+            lightRG: Mem::takeZeroed(vol), lightBS: Mem::takeZeroed(vol),
+            sunlit: Mem::takeZeroed(vol),
             skyaccess: Mem::takeZeroed(vol),
             bnR: Mem::takeZeroed(vol), bnG: Mem::takeZeroed(vol), bnB: Mem::takeZeroed(vol),
         };
@@ -249,6 +299,37 @@ class LightEngine : LightSample, LightBaker {
     }
 
     /**
+     * A world voxel for the MESHER's neighbour reads: the block that is there,
+     * or a wall where the ring holds no chunk yet.
+     *
+     * The difference from `worldGet` is what an unloaded neighbour means. To
+     * the light it is open air, which is right — the sky is up there. To a face
+     * it would be a window: every chunk on the ring's edge would grow a wall of
+     * faces toward the chunks that have not arrived, and drop them the moment
+     * they do. A wall says the same thing the old skirt used to say there —
+     * nothing to draw — and when the neighbour lands, `regen` flags this chunk
+     * and the faces that are really open are meshed then.
+     * @param cell  the world voxel
+     * @return the block id, or Stone past the ring
+     */
+    pub(crate) fn worldGetOrWall(self, cell : IVec3) : Block {
+        if (cell.y < 0) {
+            return Block::Stone;
+        }
+        if (cell.y >= World::HEIGHT) {
+            return Block::Air;
+        }
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return Block::Stone;
+        }
+        return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
      * The stored LEVEL of a world cell; 0 outside the loaded ring.
      *
      * The other half of a voxel. A block id says what is there and the
@@ -310,13 +391,13 @@ class LightEngine : LightSample, LightBaker {
     // ── Block + sky light (flood-fill; opaque blocks cast shadow) ──
 
     /**
-     * Light level (0..15) of one channel volume at a world voxel; 0 if unloaded
-     * / out of range. `vol` selects the block-light or sky-light byte volume.
-     * @param vol   the light byte volume (lights.light or lights.skylight)
+     * Light level (0..15) of one plane at a world voxel; 0 if unloaded / out
+     * of range. `p` selects a block-light channel or the sky light.
+     * @param p     the plane
      * @param cell  the world voxel
      * @return the level 0..15
      */
-    fn lvGetW(self, vol : i64, cell : IVec3) : i32 {
+    fn lvGetW(self, p : Nibble, cell : IVec3) : i32 {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0;
         }
@@ -327,7 +408,7 @@ class LightEngine : LightSample, LightBaker {
         if (!self.owns(slot, cx, cz)) {
             return 0;
         }
-        return Mem::byteAt(vol, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+        return nibGet(p, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
     }
 
     /**
@@ -346,11 +427,11 @@ class LightEngine : LightSample, LightBaker {
      * across a border kept its old bright bake. Another block somewhere else
      * dirties another slot and another piece of the cave finally goes out,
      * which is why it took several.
-     * @param vol   the light byte volume (lights.light or lights.skylight)
+     * @param p     the plane
      * @param cell  the world voxel
      * @param v     the new level 0..15
      */
-    fn lvSetW(mut self, vol : i64, cell : IVec3, v : i32) : void {
+    fn lvSetW(mut self, p : Nibble, cell : IVec3, v : i32) : void {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return;
         }
@@ -364,8 +445,8 @@ class LightEngine : LightSample, LightBaker {
         let lx : i32 = cell.x - cx * s;
         let lz : i32 = cell.z - cz * s;
         let off : i64 = self.store.voxIdx(slot, lx, cell.y, lz) as i64;
-        if (Mem::byteAt(vol, off) != v) {
-            Mem::putByte(vol, off, v);
+        if (nibGet(p, off) != v) {
+            nibPut(p, off, v);
             self.lights.ldirty[slot] = 1;
             if (lx == 0) {
                 self.markDirtyAt(cx - 1, cz);
@@ -385,25 +466,25 @@ class LightEngine : LightSample, LightBaker {
     /** Block light per channel (0..15 each) at a world voxel; 0 if unloaded. */
     fn blGetW(self, cell : IVec3) : ChannelLevels {
         return ChannelLevels {
-            r: self.lvGetW(self.lights.vols.lightR, cell),
-            g: self.lvGetW(self.lights.vols.lightG, cell),
-            b: self.lvGetW(self.lights.vols.lightB, cell),
+            r: self.lvGetW(self.lights.vols.red(), cell),
+            g: self.lvGetW(self.lights.vols.green(), cell),
+            b: self.lvGetW(self.lights.vols.blue(), cell),
         };
     }
 
     /** Set one channel's block light; flags the slot for re-mesh if changed. */
-    fn blSetCh(mut self, vol : i64, cell : IVec3, v : i32) : void {
-        self.lvSetW(vol, cell, v);
+    fn blSetCh(mut self, p : Nibble, cell : IVec3, v : i32) : void {
+        self.lvSetW(p, cell, v);
     }
 
     /** Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
     fn skGetW(self, cell : IVec3) : i32 {
-        return self.lvGetW(self.lights.vols.skylight, cell);
+        return self.lvGetW(self.lights.vols.sky(), cell);
     }
 
     /** Set sky light at a world voxel; flags the slot for re-mesh if changed. */
     fn skSetW(mut self, cell : IVec3, v : i32) : void {
-        self.lvSetW(self.lights.vols.skylight, cell, v);
+        self.lvSetW(self.lights.vols.sky(), cell, v);
     }
 
     /**
@@ -429,8 +510,9 @@ class LightEngine : LightSample, LightBaker {
                 lit = 0;
             }
             let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-            if (Mem::byteAt(self.lights.vols.skylight, off) != lit) {
-                Mem::putByte(self.lights.vols.skylight, off, lit);
+            let sky : Nibble = self.lights.vols.sky();
+            if (nibGet(sky, off) != lit) {
+                nibPut(sky, off, lit);
                 self.lights.ldirty[slot] = 1;
             }
             y = y - 1;
@@ -467,7 +549,7 @@ class LightEngine : LightSample, LightBaker {
             while (bx < s) {
                 let by : i32 = 0;
                 while (by <= top) {
-                    if (Mem::byteAt(self.lights.vols.skylight, self.store.voxIdx(slot, bx, by, bz) as i64) == 15) {
+                    if (nibGet(self.lights.vols.sky(), self.store.voxIdx(slot, bx, by, bz) as i64) == 15) {
                         self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
                     }
                     by = by + 1;
@@ -476,22 +558,22 @@ class LightEngine : LightSample, LightBaker {
             }
             bz = bz + 1;
         }
-        self.floodAddCh(self.lights.vols.skylight);
+        self.floodAddCh(self.lights.vols.sky());
     }
 
     /**
      * Spread one channel's light into a neighbour, losing one level per block,
      * when it would be brighter there (and the neighbour isn't opaque).
-     * @param vol        the light volume (lights.light or lights.skylight)
+     * @param p          the plane
      * @param neighbour  the neighbour world voxel
      * @param lv         this cell's level (the neighbour gets lv-1)
      */
-    fn trySpreadCh(mut self, vol : i64, neighbour : IVec3, lv : i32) : void {
+    fn trySpreadCh(mut self, p : Nibble, neighbour : IVec3, lv : i32) : void {
         if (isOpaque(self.worldGet(neighbour))) {
             return;
         }
-        if (self.lvGetW(vol, neighbour) < lv - 1) {
-            self.lvSetW(vol, neighbour, lv - 1);
+        if (self.lvGetW(p, neighbour) < lv - 1) {
+            self.lvSetW(p, neighbour, lv - 1);
             self.lpush(neighbour);
         }
     }
@@ -499,20 +581,20 @@ class LightEngine : LightSample, LightBaker {
     /**
      * Flood one channel's add-stack to completion: each popped cell spreads to
      * its 6 neighbours.
-     * @param vol  the light volume (lights.light or lights.skylight)
+     * @param p    the plane
      */
-    fn floodAddCh(mut self, vol : i64) : void {
+    fn floodAddCh(mut self, p : Nibble) : void {
         while (self.lights.lqn > 0) {
             self.lights.lqn = self.lights.lqn - 1;
             let entry : IVec3 = self.lights.lq[self.lights.lqn];
-            let lv : i32 = self.lvGetW(vol, entry);
+            let lv : i32 = self.lvGetW(p, entry);
             if (lv > 1) {
-                self.trySpreadCh(vol, ivec3(entry.x + 1, entry.y, entry.z), lv);
-                self.trySpreadCh(vol, ivec3(entry.x - 1, entry.y, entry.z), lv);
-                self.trySpreadCh(vol, ivec3(entry.x, entry.y + 1, entry.z), lv);
-                self.trySpreadCh(vol, ivec3(entry.x, entry.y - 1, entry.z), lv);
-                self.trySpreadCh(vol, ivec3(entry.x, entry.y, entry.z + 1), lv);
-                self.trySpreadCh(vol, ivec3(entry.x, entry.y, entry.z - 1), lv);
+                self.trySpreadCh(p, ivec3(entry.x + 1, entry.y, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x - 1, entry.y, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y + 1, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y - 1, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y, entry.z + 1), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y, entry.z - 1), lv);
             }
         }
     }
@@ -521,15 +603,15 @@ class LightEngine : LightSample, LightBaker {
      * One channel removal neighbour step: a neighbour dimmer than the removed
      * level is cleared and queued for further removal; an equal/brighter
      * neighbour is a surviving source, queued onto the add-stack to refill.
-     * @param vol        the light volume (lights.light or lights.skylight)
+     * @param p          the plane
      * @param neighbour  the neighbour world voxel
      * @param lvl        the level being removed from the parent cell
      */
-    fn tryRemoveCh(mut self, vol : i64, neighbour : IVec3, lvl : i32) : void {
-        let nl : i32 = self.lvGetW(vol, neighbour);
+    fn tryRemoveCh(mut self, p : Nibble, neighbour : IVec3, lvl : i32) : void {
+        let nl : i32 = self.lvGetW(p, neighbour);
         if (nl != 0) {
             if (nl < lvl) {
-                self.lvSetW(vol, neighbour, 0);
+                self.lvSetW(p, neighbour, 0);
                 self.rpush(neighbour, nl);
             } else {
                 self.lpush(neighbour);
@@ -540,18 +622,18 @@ class LightEngine : LightSample, LightBaker {
     /**
      * Flood one channel's removal stack, feeding the add-stack from surviving
      * (brighter/equal) sources so they refill the cleared region.
-     * @param vol  the light volume (lights.light or lights.skylight)
+     * @param p    the plane
      */
-    fn floodRemoveCh(mut self, vol : i64) : void {
+    fn floodRemoveCh(mut self, p : Nibble) : void {
         while (self.lights.rqn > 0) {
             self.lights.rqn = self.lights.rqn - 1;
             let entry : LightRemoval = self.lights.rq[self.lights.rqn];
-            self.tryRemoveCh(vol, ivec3(entry.x + 1, entry.y, entry.z), entry.lvl);
-            self.tryRemoveCh(vol, ivec3(entry.x - 1, entry.y, entry.z), entry.lvl);
-            self.tryRemoveCh(vol, ivec3(entry.x, entry.y + 1, entry.z), entry.lvl);
-            self.tryRemoveCh(vol, ivec3(entry.x, entry.y - 1, entry.z), entry.lvl);
-            self.tryRemoveCh(vol, ivec3(entry.x, entry.y, entry.z + 1), entry.lvl);
-            self.tryRemoveCh(vol, ivec3(entry.x, entry.y, entry.z - 1), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x + 1, entry.y, entry.z), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x - 1, entry.y, entry.z), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, entry.y + 1, entry.z), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, entry.y - 1, entry.z), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, entry.y, entry.z + 1), entry.lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, entry.y, entry.z - 1), entry.lvl);
         }
     }
 
@@ -581,19 +663,19 @@ class LightEngine : LightSample, LightBaker {
      * A channel at a time, because the flood stacks are shared and because the
      * channels do not interact: what red does around a torch says nothing about
      * what blue does, beyond the level each started at.
-     * @param vol   the channel's light volume
+     * @param p     the channel's plane
      * @param cell  the edited world voxel
      * @param had   the level that cell held before the edit
      * @param emit  the level the block now there emits on this channel
      */
-    fn refloodChannel(mut self, vol : i64, cell : IVec3, had : i32, emit : i32) : void {
+    fn refloodChannel(mut self, p : Nibble, cell : IVec3, had : i32, emit : i32) : void {
         self.lights.lqn = 0;
         self.lights.rqn = 0;
-        self.blSetCh(vol, cell, 0);
+        self.blSetCh(p, cell, 0);
         self.rpush(cell, had + 1);
-        self.floodRemoveCh(vol);
+        self.floodRemoveCh(p);
         if (emit > 0) {
-            self.blSetCh(vol, cell, emit);
+            self.blSetCh(p, cell, emit);
             self.lpush(cell);
         }
         self.lpush(ivec3(cell.x + 1, cell.y, cell.z));
@@ -602,7 +684,7 @@ class LightEngine : LightSample, LightBaker {
         self.lpush(ivec3(cell.x, cell.y - 1, cell.z));
         self.lpush(ivec3(cell.x, cell.y, cell.z + 1));
         self.lpush(ivec3(cell.x, cell.y, cell.z - 1));
-        self.floodAddCh(vol);
+        self.floodAddCh(p);
     }
 
     /**
@@ -622,9 +704,9 @@ class LightEngine : LightSample, LightBaker {
         // in. The three channels share the flood stacks, so they run in turn.
         let cur : ChannelLevels = self.blGetW(cell);
         let emit : Emission = emissionOf(self.worldGet(ivec3(wx, wy, wz)));
-        self.refloodChannel(self.lights.vols.lightR, cell, cur.r, emit.r);
-        self.refloodChannel(self.lights.vols.lightG, cell, cur.g, emit.g);
-        self.refloodChannel(self.lights.vols.lightB, cell, cur.b, emit.b);
+        self.refloodChannel(self.lights.vols.red(), cell, cur.r, emit.r);
+        self.refloodChannel(self.lights.vols.green(), cell, cur.g, emit.g);
+        self.refloodChannel(self.lights.vols.blue(), cell, cur.b, emit.b);
         // 4. Sky light: reconcile the edited column's vertical exposure — seed a
         // REMOVAL where a cell darkened and an ADD where it brightened — then
         // flood both, so sky light recedes as well as fills.
@@ -643,20 +725,21 @@ class LightEngine : LightSample, LightBaker {
                     lit = 0;
                 }
                 let coff : i64 = self.store.voxIdx(sslot, slx, cy, slz) as i64;
-                let oldv : i32 = Mem::byteAt(self.lights.vols.skylight, coff);
+                let sky : Nibble = self.lights.vols.sky();
+                let oldv : i32 = nibGet(sky, coff);
                 if (oldv > lit) {
-                    Mem::putByte(self.lights.vols.skylight, coff, lit);
+                    nibPut(sky, coff, lit);
                     self.lights.ldirty[sslot] = 1;
                     self.rpush(ivec3(wx, cy, wz), oldv);
                 } else if (lit > oldv) {
-                    Mem::putByte(self.lights.vols.skylight, coff, lit);
+                    nibPut(sky, coff, lit);
                     self.lights.ldirty[sslot] = 1;
                     self.lpush(ivec3(wx, cy, wz));
                 }
                 cy = cy - 1;
             }
         }
-        self.floodRemoveCh(self.lights.vols.skylight);
+        self.floodRemoveCh(self.lights.vols.sky());
         // Also seed the add from the edited cell + its 6 neighbours, so the
         // sideways sky gradient flows into a newly opened space even when the
         // edit doesn't change the column.
@@ -667,7 +750,7 @@ class LightEngine : LightSample, LightBaker {
         self.lpush(ivec3(wx, wy - 1, wz));
         self.lpush(ivec3(wx, wy, wz + 1));
         self.lpush(ivec3(wx, wy, wz - 1));
-        self.floodAddCh(self.lights.vols.skylight);
+        self.floodAddCh(self.lights.vols.sky());
         // A border face is baked from the NEIGHBOUR chunk's light, which didn't
         // change — re-flag the edited chunk plus any border neighbour so their
         // shared faces re-bake with the final light.
@@ -690,15 +773,13 @@ class LightEngine : LightSample, LightBaker {
      * @param slot  the slot index
      */
     pub(crate) fn clearLight(mut self, slot : i32) : void {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
-        let n : i32 = hSide * hSide * World::HEIGHT;
+        let s : i32 = World::CHUNK_SIZE;
+        let n : i32 = s * s * World::HEIGHT;
         let base : i64 = (slot as i64) * (n as i64);
         let i : i32 = 0;
         while (i < n) {
-            Mem::putByte(self.lights.vols.lightR, base + (i as i64), 0);
-            Mem::putByte(self.lights.vols.lightG, base + (i as i64), 0);
-            Mem::putByte(self.lights.vols.lightB, base + (i as i64), 0);
-            Mem::putByte(self.lights.vols.skylight, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.lightRG, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.lightBS, base + (i as i64), 0);
             Mem::putByte(self.lights.vols.sunlit, base + (i as i64), 255);
             Mem::putByte(self.lights.vols.skyaccess, base + (i as i64), 255);
             Mem::putByte(self.lights.vols.bnR, base + (i as i64), 128);
@@ -863,14 +944,25 @@ class LightEngine : LightSample, LightBaker {
      * @param lz    local z
      * @return whether a block sits within the cell's 3×3×3 neighbourhood
      */
-    fn nearSolid(self, slot : i32, lx : i32, y : i32, lz : i32) : bool {
+    fn nearSolid(self, slot : i32, lx : i32, y : i32, lz : i32, wx : i32, wz : i32) : bool {
+        // Inside the chunk the neighbours are this slot's own cells; on its
+        // border one step crosses into another chunk, and only then is the
+        // slot lookup paid.
+        let s : i32 = World::CHUNK_SIZE;
+        let inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
         let dz : i32 = 0 - 1;
         while (dz <= 1) {
             let dx : i32 = 0 - 1;
             while (dx <= 1) {
                 let dy : i32 = 0 - 1;
                 while (dy <= 1) {
-                    if (self.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz)) != Block::Air) {
+                    let b : Block = Block::Air;
+                    if (inner) {
+                        b = self.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz));
+                    } else {
+                        b = self.worldGet(ivec3(wx + dx, y + dy, wz + dz));
+                    }
+                    if (b != Block::Air) {
                         return true;
                     }
                     dy = dy + 1;
@@ -916,8 +1008,8 @@ class LightEngine : LightSample, LightBaker {
                 while (y <= top) {
                     let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
-                        && Mem::byteAt(self.lights.vols.skylight, off) > 0
-                        && self.nearSolid(slot, lx, y, lz)) {
+                        && nibGet(self.lights.vols.sky(), off) > 0
+                        && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
                         let v : i32 = ((self.sunRaySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil) as f64) * cloudT).floorToInt() as i32;
                         if (!snap) {
                             v = self.glideTo(Mem::byteAt(self.lights.vols.sunlit, off), v);
@@ -1280,8 +1372,8 @@ class LightEngine : LightSample, LightBaker {
                 while (y <= top) {
                     let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
-                        && Mem::byteAt(self.lights.vols.skylight, off) > 0
-                        && self.nearSolid(slot, lx, y, lz)) {
+                        && nibGet(self.lights.vols.sky(), off) > 0
+                        && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
                         let wx : i32 = cx * s + lx;
                         let wz : i32 = cz * s + lz;
                         // A ray now comes back with a FRACTION of the sky rather

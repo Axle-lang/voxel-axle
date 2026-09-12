@@ -23,7 +23,7 @@
 use crate::kernel::kworld::manager::ChunkManager;
 use crate::game::world::terraingen::TerrainGen;
 use crate::kernel::kentity::player::Player;
-use crate::kernel::kmath::vec3::{ ivec3 };
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::kernel::kblock::blocks::{ hasCollisionBox };
 use smalt::{Mem, SlotIndex};
 use crate::configs::blocks::{ Block };
@@ -251,7 +251,8 @@ fn surveyFaces(man : ChunkManager) : void {
         let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
         for (fi of 0..man.faces.fcount[slot]) {
             let i : i32 = base + fi;
-            byDir[(man.faces.ftile[i] / 256) as i64] = byDir[(man.faces.ftile[i] / 256) as i64] + 1;
+            let d : i64 = ((man.faces.ftile[i] as i32) / 256) as i64;
+            byDir[d] = byDir[d] + 1;
             index.put(faceKey(man, i), i);
         }
     }
@@ -260,14 +261,24 @@ fn surveyFaces(man : ChunkManager) : void {
     // identical neighbour to merge onto.
     let geom : i32 = 0;
     let strict : i32 = 0;
+    // The same, over the slots whose eight neighbours are all loaded. A slot
+    // on the ring's edge meshes against chunks that are not there, and what it
+    // does there is a policy, not a property of the world — so the number a
+    // change must leave alone is the interior one.
+    let inner : i32 = 0;
+    let innerGeom : i32 = 0;
     for (slot of 0..slots) {
         if (man.cols.loaded[slot] != 1) {
             continue;
         }
+        let interior : bool = ringInterior(man, slot);
+        if (interior) {
+            inner = inner + man.faces.fcount[slot];
+        }
         let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
         for (fi of 0..man.faces.fcount[slot]) {
             let i : i32 = base + fi;
-            let d : i32 = man.faces.ftile[i] / 256;
+            let d : i32 = (man.faces.ftile[i] as i32) / 256;
             // The two axes that lie IN the face's plane.
             let ax : i32 = 0;
             let az : i32 = 0;
@@ -282,6 +293,9 @@ fn surveyFaces(man : ChunkManager) : void {
             let j : i32 = index.get(neighbourKey(man, i, ax, ay, az));
             if (j >= 0 && man.faces.ftile[j] == man.faces.ftile[i]) {
                 geom = geom + 1;
+                if (interior) {
+                    innerGeom = innerGeom + 1;
+                }
                 if (sameCorners(man, j, i)) {
                     strict = strict + 1;
                 }
@@ -295,18 +309,57 @@ fn surveyFaces(man : ChunkManager) : void {
         + " +Z=${byDir[4]} -Z=${byDir[5]}");
     Console::println("  one-axis merges: ${geom} by geometry,"
         + " ${strict} once the baked corner light and AO must match");
+    Console::println("  interior slots: ${inner} faces, ${innerGeom} merges by geometry");
     free(byDir);
+}
+
+/** The ring row/column a chunk coordinate lands in — the manager's own wrap. */
+fn ringSlot(v : i32) : i32 {
+    let m : i32 = v % World::SPAN;
+    if (m < 0) {
+        m = m + World::SPAN;
+    }
+    return m;
+}
+
+/** Whether every one of a slot's eight neighbours is loaded. */
+fn ringInterior(man : ChunkManager, slot : i32) : bool {
+    let cx : i32 = man.cols.cxs[slot];
+    let cz : i32 = man.cols.czs[slot];
+    let dz : i32 = 0 - 1;
+    while (dz <= 1) {
+        let dx : i32 = 0 - 1;
+        while (dx <= 1) {
+            let n : i32 = ringSlot(cz + dz) * World::SPAN + ringSlot(cx + dx);
+            if (man.cols.loaded[n] != 1 || man.cols.cxs[n] != cx + dx || man.cols.czs[n] != cz + dz) {
+                return false;
+            }
+            dx = dx + 1;
+        }
+        dz = dz + 1;
+    }
+    return true;
+}
+
+/** A face's world cell: its chunk-local bytes, placed by its slot's origin. */
+fn faceCell(man : ChunkManager, i : i32) : IVec3 {
+    let slot : i32 = i / World::MAX_FACES_PER_CHUNK;
+    return ivec3(
+        man.cols.cxs[slot] * World::CHUNK_SIZE + (man.faces.fx[i] as i32),
+        man.faces.fy[i] as i32,
+        man.cols.czs[slot] * World::CHUNK_SIZE + (man.faces.fz[i] as i32));
 }
 
 /** A face's identity: its direction and its cell. */
 fn faceKey(man : ChunkManager, i : i32) : i64 {
-    return keyOf(man.faces.ftile[i] / 256, man.faces.fx[i], man.faces.fy[i], man.faces.fz[i]);
+    let c : IVec3 = faceCell(man, i);
+    return keyOf((man.faces.ftile[i] as i32) / 256, c.x, c.y, c.z);
 }
 
 /** The same, for the cell one step along (ax, ay, az). */
 fn neighbourKey(man : ChunkManager, i : i32, ax : i32, ay : i32, az : i32) : i64 {
-    return keyOf(man.faces.ftile[i] / 256,
-        man.faces.fx[i] + ax, man.faces.fy[i] + ay, man.faces.fz[i] + az);
+    let c : IVec3 = faceCell(man, i);
+    return keyOf((man.faces.ftile[i] as i32) / 256, c.x + ax, c.y + ay, c.z + az);
 }
 
 /** Pack a direction and a world cell into one key. */
@@ -330,11 +383,6 @@ fn sameCorners(man : ChunkManager, a : i32, b : i32) : bool {
             return false;
         }
     }
-    for (k of 0..4) {
-        if (Mem::byteAt(man.faces.fao, (a * 4 + k) as i64)
-            != Mem::byteAt(man.faces.fao, (b * 4 + k) as i64)) {
-            return false;
-        }
-    }
-    return true;
+    // The four corners' occlusion is one byte, two bits each.
+    return Mem::byteAt(man.faces.fao, a as i64) == Mem::byteAt(man.faces.fao, b as i64);
 }

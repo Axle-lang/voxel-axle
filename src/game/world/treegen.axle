@@ -23,8 +23,8 @@ use crate::configs::world::{ World };
 
 /**
  * Stamp one leaf voxel of `leafId`, but only into air (never carving terrain).
- * Clipped to the slot's padded volume so a canopy straddling the border is
- * trimmed cleanly.
+ * Clipped to the slot so a canopy straddling the border is trimmed cleanly —
+ * the neighbour stamps its own part of the same tree, from the same hash.
  * @param vs      the slot voxel storage
  * @param slot    the slot index
  * @param pos     the leaf cell (local coords)
@@ -32,7 +32,7 @@ use crate::configs::world::{ World };
  */
 fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
     let s : i32 = World::CHUNK_SIZE;
-    if (pos.x < 0 - 1 || pos.x > s || pos.z < 0 - 1 || pos.z > s) {
+    if (pos.x < 0 || pos.x >= s || pos.z < 0 || pos.z >= s) {
         return;
     }
     if (pos.y < 0 || pos.y >= World::HEIGHT) {

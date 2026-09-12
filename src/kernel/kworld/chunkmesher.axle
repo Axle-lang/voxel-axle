@@ -40,11 +40,11 @@ class ChunkMesher : Mesher {
     store : VoxStore,
     leng : LightEngine,
     fcount : i32[],
-    fx : i32[],
-    fy : i32[],
-    fz : i32[],
-    ftile : i32[],
-    frun : i32[],
+    fx : i8[],
+    fy : i8[],
+    fz : i8[],
+    ftile : i16[],
+    frun : i8[],
     // The open greedy runs. `runU` carries the runs that grow along X — top,
     // bottom and the two Z-facing walls — keyed by (dir, ly) and valid only
     // while `lz` is fixed, because the scan's middle loop is the one that
@@ -59,11 +59,11 @@ class ChunkMesher : Mesher {
     runWAt : i32[],
     flight : i64,
     fao : i64,
-    tx : i32[],
-    ty : i32[],
-    tz : i32[],
+    tx : i8[],
+    ty : i8[],
+    tz : i8[],
     tcount : i32[],
-    ctop : i32[],
+    ctop : i16[],
     lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz);
                      // MUST mirror Renderer.fillTable so baked corner k aligns.
 
@@ -139,13 +139,14 @@ class ChunkMesher : Mesher {
     /**
      * Append a face to the slot's face buffer (dropped if at capacity), baking
      * its 4 corners' smooth light + AO.
-     * @param slot  the slot index
-     * @param cell  the face's world voxel
-     * @param dir   the face direction
-     * @param tile  the atlas tile index
+     * @param slot   the slot index
+     * @param cell   the face's world voxel
+     * @param local  the same cell in chunk-local coordinates — what is stored
+     * @param dir    the face direction
+     * @param tile   the atlas tile index
      */
-    fn addFace(mut self, slot : i32, cell : IVec3, own dir : FaceDir, tile : i32) : void {
-        self.addFaceRun(slot, cell, ivec3(0, 0, 0), dir, tile, false);
+    fn addFace(mut self, slot : i32, cell : IVec3, local : IVec3, own dir : FaceDir, tile : i32) : void {
+        self.addFaceRun(slot, cell, local, dir, tile, false);
     }
 
     /**
@@ -176,14 +177,17 @@ class ChunkMesher : Mesher {
             return;
         }
         let i : i32 = slot * World::MAX_FACES_PER_CHUNK + fc;
-        self.fx[i] = cell.x;
-        self.fy[i] = cell.y;
-        self.fz[i] = cell.z;
+        // Chunk-local x/z and world y, a byte each: every reader has the slot,
+        // and the slot has the origin. Four bytes for a number under sixteen
+        // was most of what the face arrays weighed.
+        self.fx[i] = local.x as i8;
+        self.fy[i] = cell.y as i8;
+        self.fz[i] = local.z as i8;
         // Pack the face direction (0..5) and atlas tile (< 256) into one slot.
         // renderFace unpacks dir = ftile / 256, tile = ftile % 256.
         let di : i32 = dir as i32;
-        self.ftile[i] = di * 256 + tile;
-        self.frun[i] = 1;
+        self.ftile[i] = (di * 256 + tile) as i16;
+        self.frun[i] = 1 as i8;
         self.bakeFaceCorners(i, cell, di);
         if (!mergeable) {
             self.fcount[slot] = fc + 1;
@@ -195,7 +199,7 @@ class ChunkMesher : Mesher {
             let k : i32 = (di * World::CHUNK_SIZE + local.x) * World::HEIGHT + local.y;
             let head : i32 = self.runW[k];
             if (head >= 0 && self.runWAt[k] == local.z - 1 && self.canMerge(head, i)) {
-                self.frun[head] = self.frun[head] + 1;
+                self.frun[head] = ((self.frun[head] as i32) + 1) as i8;
                 self.runWAt[k] = local.z;
                 return;
             }
@@ -206,7 +210,7 @@ class ChunkMesher : Mesher {
             let k : i32 = di * World::HEIGHT + local.y;
             let head : i32 = self.runU[k];
             if (head >= 0 && self.runUAt[k] == local.x - 1 && self.canMerge(head, i)) {
-                self.frun[head] = self.frun[head] + 1;
+                self.frun[head] = ((self.frun[head] as i32) + 1) as i8;
                 self.runUAt[k] = local.x;
                 return;
             }
@@ -237,7 +241,7 @@ class ChunkMesher : Mesher {
      * @return whether they are the same face repeated
      */
     fn canMerge(self, a : i32, b : i32) : bool {
-        if (self.ftile[a] != self.ftile[b] || self.frun[a] >= MESH_MAX_RUN) {
+        if (self.ftile[a] != self.ftile[b] || (self.frun[a] as i32) >= MESH_MAX_RUN) {
             return false;
         }
         for (k of 0..8) {
@@ -246,11 +250,8 @@ class ChunkMesher : Mesher {
                 return false;
             }
         }
-        for (k of 0..4) {
-            if (Mem::byteAt(self.fao, (a * 4 + k) as i64)
-                != Mem::byteAt(self.fao, (b * 4 + k) as i64)) {
-                return false;
-            }
+        if (Mem::byteAt(self.fao, a as i64) != Mem::byteAt(self.fao, b as i64)) {
+            return false;
         }
         return true;
     }
@@ -294,6 +295,8 @@ class ChunkMesher : Mesher {
 
         // Normal axis: 0 = X (dir 0/1), 1 = Y (2/3), 2 = Z (4/5).
         let naxis : i32 = di / 2;
+        // The four corners' occlusion, two bits each, gathered into one byte.
+        let aoByte : i32 = 0;
         let k : i32 = 0;
         while (k < 4) {
             let b : i32 = (di * 4 + k) * 3;
@@ -385,26 +388,28 @@ class ChunkMesher : Mesher {
             if (s1 == 1 && s2 == 1) {
                 ao = 0;
             }
-            Mem::putByte(self.fao, (i * 4 + k) as i64, ao);
+            aoByte = aoByte | (ao << (2 * k));
             k = k + 1;
         }
+        Mem::putByte(self.fao, i as i64, aoByte);
     }
 
     /**
-     * Record a torch at a world voxel in this slot's torch list (dropped if at
-     * capacity). The renderer draws these as thin posts.
-     * @param slot  the slot index
-     * @param cell  the torch's world voxel
+     * Record a torch in this slot's torch list (dropped if at capacity). The
+     * renderer draws these as thin posts, at the slot's origin plus the
+     * chunk-local cell stored here.
+     * @param slot   the slot index
+     * @param local  the torch's cell, chunk-local x/z and world y
      */
-    fn addTorch(mut self, slot : i32, cell : IVec3) : void {
+    fn addTorch(mut self, slot : i32, local : IVec3) : void {
         let tc : i32 = self.tcount[slot];
         if (tc >= World::MAX_TORCHES_PER_CHUNK) {
             return;
         }
         let i : i32 = slot * World::MAX_TORCHES_PER_CHUNK + tc;
-        self.tx[i] = cell.x;
-        self.ty[i] = cell.y;
-        self.tz[i] = cell.z;
+        self.tx[i] = local.x as i8;
+        self.ty[i] = local.y as i8;
+        self.tz[i] = local.z as i8;
         self.tcount[slot] = tc + 1;
     }
 
@@ -416,12 +421,13 @@ class ChunkMesher : Mesher {
      * @param nlx   neighbour local x
      * @param nly   neighbour local/world y
      * @param nlz   neighbour local z
+     * @param nwx   neighbour world x
+     * @param nwz   neighbour world z
      * @param myH   this block's box height
      * @return whether to emit the side wall toward the neighbour
      */
-    fn partialSideOpen(self, slot : i32, nlx : i32, nly : i32, nlz : i32, myH : f64) : bool {
-        let nl : IVec3 = ivec3(nlx, nly, nlz);
-        let nb : Block = self.store.getVox(slot, nl);
+    fn partialSideOpen(self, slot : i32, nlx : i32, nly : i32, nlz : i32, nwx : i32, nwz : i32, myH : f64) : bool {
+        let nb : Block = self.beside(slot, nlx, nly, nlz, nwx, nwz);
         if (nb == Block::Air) {
             return true;
         }
@@ -429,9 +435,51 @@ class ChunkMesher : Mesher {
             return false;
         }
         // The neighbour's box comes from the neighbour's own stored level,
-        // read through the same padded index as its id — so the wall a step
-        // between two snow depths shows is the step that is really there.
-        return boxOf(nb, self.store.getLevel(slot, nl)).yMax < myH - 0.001;
+        // read from the same chunk as its id — so the wall a step between two
+        // snow depths shows is the step that is really there.
+        return boxOf(nb, self.besideLevel(slot, nlx, nly, nlz, nwx, nwz)).yMax < myH - 0.001;
+    }
+
+    /**
+     * The block in a cell beside the one being meshed.
+     *
+     * Inside the chunk that is this slot's own cell. On the border it is the
+     * neighbour chunk's, and the slot no longer keeps a copy of it: the read
+     * goes to the chunk that owns the cell, which is also the only chunk that
+     * is ever right about it.
+     * @param slot  the slot being meshed
+     * @param lx    the neighbour cell, chunk-local (may be -1 or chunkSize)
+     * @param ly    …
+     * @param lz    …
+     * @param wx    the same cell in world x
+     * @param wz    …and z
+     * @return the block there; a wall where no chunk is loaded
+     */
+    fn beside(self, slot : i32, lx : i32, ly : i32, lz : i32, wx : i32, wz : i32) : Block {
+        let s : i32 = World::CHUNK_SIZE;
+        if (lx >= 0 && lx < s && lz >= 0 && lz < s) {
+            return self.store.getVox(slot, ivec3(lx, ly, lz));
+        }
+        return self.leng.worldGetOrWall(ivec3(wx, ly, wz));
+    }
+
+    /**
+     * The stored level of a cell beside the one being meshed — same lookup as
+     * `beside`, so a partial block's height comes from the chunk its id did.
+     * @param slot  the slot being meshed
+     * @param lx    the neighbour cell, chunk-local
+     * @param ly    …
+     * @param lz    …
+     * @param wx    the same cell in world x
+     * @param wz    …and z
+     * @return the level, 0 for the id's default box
+     */
+    fn besideLevel(self, slot : i32, lx : i32, ly : i32, lz : i32, wx : i32, wz : i32) : i32 {
+        let s : i32 = World::CHUNK_SIZE;
+        if (lx >= 0 && lx < s && lz >= 0 && lz < s) {
+            return self.store.getLevel(slot, ivec3(lx, ly, lz));
+        }
+        return self.leng.worldLevel(ivec3(wx, ly, wz));
     }
 
     /**
@@ -470,7 +518,7 @@ class ChunkMesher : Mesher {
                     }
                     ly = ly + 1;
                 }
-                self.ctop[slot * s * s + lz * s + lx] = coll;
+                self.ctop[slot * s * s + lz * s + lx] = coll as i16;
                 lx = lx + 1;
             }
             lz = lz + 1;
@@ -499,53 +547,53 @@ class ChunkMesher : Mesher {
         let local : IVec3 = ivec3(lx, ly, lz);
         if (id == Block::Torch) {
             // Torches emit no cube faces; a thin post is drawn separately.
-            self.addTorch(slot, cell);
+            self.addTorch(slot, local);
             return false;
         }
         if (isWater(id)) {
             // Water: top surface, plus side walls only where it borders air.
             if (self.store.getVox(slot, ivec3(lx, ly + 1, lz)) == air) {
-                self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+                self.addFace(slot, cell, local, FaceDir::Top, tileFor(id, FaceDir::Top));
             }
-            if (self.store.getVox(slot, ivec3(lx + 1, ly, lz)) == air) {
-                self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            if (self.beside(slot, lx + 1, ly, lz, wx + 1, wz) == air) {
+                self.addFace(slot, cell, local, FaceDir::PosX, tileFor(id, FaceDir::PosX));
             }
-            if (self.store.getVox(slot, ivec3(lx - 1, ly, lz)) == air) {
-                self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            if (self.beside(slot, lx - 1, ly, lz, wx - 1, wz) == air) {
+                self.addFace(slot, cell, local, FaceDir::NegX, tileFor(id, FaceDir::NegX));
             }
-            if (self.store.getVox(slot, ivec3(lx, ly, lz + 1)) == air) {
-                self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            if (self.beside(slot, lx, ly, lz + 1, wx, wz + 1) == air) {
+                self.addFace(slot, cell, local, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
             }
-            if (self.store.getVox(slot, ivec3(lx, ly, lz - 1)) == air) {
-                self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            if (self.beside(slot, lx, ly, lz - 1, wx, wz - 1) == air) {
+                self.addFace(slot, cell, local, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
             }
             return false;
         }
         if (isPartialShape(id)) {
             // A partial, floor-resting block at its real height. Emit the top, and
             // a side wall toward a neighbour that is air OR a LOWER partial block.
-            self.addFace(slot, cell, FaceDir::Top, tileFor(id, FaceDir::Top));
+            self.addFace(slot, cell, local, FaceDir::Top, tileFor(id, FaceDir::Top));
             let myH : f64 = boxOf(id, self.store.getLevel(slot, ivec3(lx, ly, lz))).yMax;
-            if (self.partialSideOpen(slot, lx + 1, ly, lz, myH)) {
-                self.addFace(slot, cell, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+            if (self.partialSideOpen(slot, lx + 1, ly, lz, wx + 1, wz, myH)) {
+                self.addFace(slot, cell, local, FaceDir::PosX, tileFor(id, FaceDir::PosX));
             }
-            if (self.partialSideOpen(slot, lx - 1, ly, lz, myH)) {
-                self.addFace(slot, cell, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+            if (self.partialSideOpen(slot, lx - 1, ly, lz, wx - 1, wz, myH)) {
+                self.addFace(slot, cell, local, FaceDir::NegX, tileFor(id, FaceDir::NegX));
             }
-            if (self.partialSideOpen(slot, lx, ly, lz + 1, myH)) {
-                self.addFace(slot, cell, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+            if (self.partialSideOpen(slot, lx, ly, lz + 1, wx, wz + 1, myH)) {
+                self.addFace(slot, cell, local, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
             }
-            if (self.partialSideOpen(slot, lx, ly, lz - 1, myH)) {
-                self.addFace(slot, cell, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+            if (self.partialSideOpen(slot, lx, ly, lz - 1, wx, wz - 1, myH)) {
+                self.addFace(slot, cell, local, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
             }
             return false;
         }
         // A solid block shows a face wherever its neighbour is TRANSPARENT — air
         // or water — so submerged terrain stays visible through the water.
-        if (isTransparent(self.store.getVox(slot, ivec3(lx + 1, ly, lz)))) {
+        if (isTransparent(self.beside(slot, lx + 1, ly, lz, wx + 1, wz))) {
             self.addFaceRun(slot, cell, local, FaceDir::PosX, tileFor(id, FaceDir::PosX), true);
         }
-        if (isTransparent(self.store.getVox(slot, ivec3(lx - 1, ly, lz)))) {
+        if (isTransparent(self.beside(slot, lx - 1, ly, lz, wx - 1, wz))) {
             self.addFaceRun(slot, cell, local, FaceDir::NegX, tileFor(id, FaceDir::NegX), true);
         }
         // A partial block above (snow, a slab) is transparent but seals this top
@@ -558,10 +606,10 @@ class ChunkMesher : Mesher {
         if (isTransparent(self.store.getVox(slot, ivec3(lx, ly - 1, lz)))) {
             self.addFaceRun(slot, cell, local, FaceDir::Bottom, tileFor(id, FaceDir::Bottom), true);
         }
-        if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz + 1)))) {
+        if (isTransparent(self.beside(slot, lx, ly, lz + 1, wx, wz + 1))) {
             self.addFaceRun(slot, cell, local, FaceDir::PosZ, tileFor(id, FaceDir::PosZ), true);
         }
-        if (isTransparent(self.store.getVox(slot, ivec3(lx, ly, lz - 1)))) {
+        if (isTransparent(self.beside(slot, lx, ly, lz - 1, wx, wz - 1))) {
             self.addFaceRun(slot, cell, local, FaceDir::NegZ, tileFor(id, FaceDir::NegZ), true);
         }
         return isCollidable(id);

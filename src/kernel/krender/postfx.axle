@@ -12,6 +12,7 @@
 // disabled with the sun below the horizon, and skipped entirely underwater.
 
 use smalt::Mem;
+use crate::kernel::kmath::narrow::{ floatOf };
 use crate::kernel::krender::raster::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
 use crate::configs::water::{ Water };
@@ -159,7 +160,7 @@ class UnderwaterFX : PostEffect {
             while (x < w) {
                 let idx : i32 = row + x;
                 // Depth fog from the z-buffer: izp = 1/depth (0 = cleared bg).
-                let izp : f64 = Mem::realOf(zbuf, idx);
+                let izp : f64 = floatOf(zbuf, idx);
                 let depth : f64 = Water::FOG_FAR;
                 if (izp > 0.0) {
                     depth = 1.0 / izp;
@@ -259,7 +260,7 @@ fn godRayIllum(zbuf : i64, w : i32, h : i32, x : i32, y : i32, sun : SunScreen) 
         syp = syp + stepy;
         let ix : i32 = sxp.floorToInt() as i32;
         let iy : i32 = syp.floorToInt() as i32;
-        if (ix >= 0 && ix < w && iy >= 0 && iy < h && Mem::realOf(zbuf, (iy * w + ix) as i64) <= 0.0) {
+        if (ix >= 0 && ix < w && iy >= 0 && iy < h && floatOf(zbuf, (iy * w + ix) as i64) <= 0.0) {
             illum = illum + dec;   // a sky sample contributes
         }
         dec = dec * Render::GOD_RAY_DECAY;

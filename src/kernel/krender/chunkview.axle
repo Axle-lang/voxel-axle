@@ -355,14 +355,14 @@ class ChunkRenderer {
      */
     fn clippedVert(self, i : i32) : RasterVert {
         return RasterVert {
-            sx: Mem::realOf(self.cs.sx, i),
-            sy: Mem::realOf(self.cs.sy, i),
-            iz: Mem::realOf(self.cs.iz, i),
-            u: Mem::realOf(self.cb.u, i),
-            v: Mem::realOf(self.cb.v, i),
-            tr: Mem::realOf(self.cb.r, i),
-            tg: Mem::realOf(self.cb.g, i),
-            tb: Mem::realOf(self.cb.b, i),
+            sx: Mem::realOf(self.cs.sx, i) as f32,
+            sy: Mem::realOf(self.cs.sy, i) as f32,
+            iz: Mem::realOf(self.cs.iz, i) as f32,
+            u: Mem::realOf(self.cb.u, i) as f32,
+            v: Mem::realOf(self.cb.v, i) as f32,
+            tr: Mem::realOf(self.cb.r, i) as f32,
+            tg: Mem::realOf(self.cb.g, i) as f32,
+            tb: Mem::realOf(self.cb.b, i) as f32,
         };
     }
 
@@ -557,13 +557,16 @@ class ChunkRenderer {
      * @param idx     index of the face to draw
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
+     * @param ox      the slot's world x origin — the faces store chunk-local x
+     * @param oz      …and z
      */
-    fn renderFace(mut self, man : ChunkManager, idx : i32, cam : Camera, phase : f64) : void {
-        let x : i32 = man.faces.fx[idx];
-        let y : i32 = man.faces.fy[idx];
-        let z : i32 = man.faces.fz[idx];
+    fn renderFace(mut self, man : ChunkManager, idx : i32, cam : Camera, phase : f64,
+        ox : i32, oz : i32) : void {
+        let x : i32 = ox + (man.faces.fx[idx] as i32);
+        let y : i32 = man.faces.fy[idx] as i32;
+        let z : i32 = oz + (man.faces.fz[idx] as i32);
         // Unpack the direction and atlas tile from the packed ftile slot.
-        let packed : i32 = man.faces.ftile[idx];
+        let packed : i32 = man.faces.ftile[idx] as i32;
         let dir : FaceDir = faceDirFrom(packed / 256);
         let isWaterFace : bool = (packed % 256) == Tile::WATER;
         // Partial, floor-resting blocks (thin snow, slabs later) render at their
@@ -580,7 +583,7 @@ class ChunkRenderer {
         // The extent is wanted whole HERE, for the culling centre and the
         // distance cut, which measure the surface that is actually there; the
         // span loop below is what decides how many quads it is drawn as.
-        let run : i32 = man.faces.frun[idx];
+        let run : i32 = man.faces.frun[idx] as i32;
         let runF : f64 = run as f64;
         let runX : f64 = 1.0;
         let runZ : f64 = 1.0;
@@ -855,7 +858,7 @@ class ChunkRenderer {
             let lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
             let lb0 : i32 = Mem::byteAt(man.faces.flight, lo);
             let lb1 : i32 = Mem::byteAt(man.faces.flight, lo + 1);
-            let aok : i32 = Mem::byteAt(man.faces.fao, (fs.idx * 4 + k) as i64);
+            let aok : i32 = (Mem::byteAt(man.faces.fao, fs.idx as i64) >> (2 * k)) & 3;
             let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
             let lit : CornerLight = CornerLight {
                 sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.skyAOFactor(smp),
@@ -967,8 +970,8 @@ class ChunkRenderer {
                     a: self.clippedVert(o),
                     b: self.clippedVert((o + t) % n),
                     c: self.clippedVert((o + t + 1) % n),
-                    tile: fs.tile,
-                    wrap: wf
+                    tile: fs.tile as i16,
+                    wrap: wf as i8
                 };
                 self.triN = self.triN + 1;
             }
@@ -1024,9 +1027,11 @@ class ChunkRenderer {
             if (man.cols.loaded[slot] == 1 && chunkVisible(p, man.cols.cxs[slot], man.cols.czs[slot])) {
                 let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
                 let n : i32 = man.faces.fcount[slot];
+                let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
+                let oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
                 let fi : i32 = 0;
                 while (fi < n) {
-                    self.renderFace(man, base + fi, cam, phase);
+                    self.renderFace(man, base + fi, cam, phase, ox, oz);
                     fi = fi + 1;
                 }
             }

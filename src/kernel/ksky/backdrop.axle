@@ -12,6 +12,7 @@
 // the threaded gradient job, so no mutable day-state is shared across threads.
 
 use smalt::Mem;
+use crate::kernel::kmath::narrow::{ floatOf };
 use smalt::Color;
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::ksky::viewray::{ ViewRay };
@@ -110,7 +111,7 @@ fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Ve
                     // Inside the disc, and not behind the world: the body is
                     // drawn after the terrain now, so the terrain's z is what
                     // hides the part of it that has set.
-                    if (dx * dx + dy * dy <= r2 && Mem::realOf(zbuf, py * w + px) <= 0.0) {
+                    if (dx * dx + dy * dy <= r2 && floatOf(zbuf, py * w + px) <= 0.0) {
                         let c : i32 = discColor(body, dx, dy, d.radius);
                         // A cloud in front of the sun hides it, which is most of
                         // what a cloud in front of the sun is for. Blended
@@ -187,7 +188,7 @@ fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : 
             // AFTER the world for exactly this: most of a frame is ground, and
             // a bicubic cloud read under every blade of grass is a frame's
             // worth of work thrown away.
-            if (Mem::realOf(zbuf, row + px) <= 0.0) {
+            if (floatOf(zbuf, row + px) <= 0.0) {
                 let ray : ViewRay = rays.dir(vr, (px as f64) + 0.5);
                 let c : SkyColour = dome.colourAt(ray);
                 let cl : CloudSample = cloud.sample(ray);

@@ -26,6 +26,7 @@
 // re-measuring on the machine at hand before splitting anything else.
 
 use smalt::Mem;
+use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::configs::screen::{ Screen };
 use crate::kernel::krender::raster::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
@@ -89,12 +90,12 @@ class Bloom : PostEffect {
         Mem::release(self.btG);
         Mem::release(self.btB);
         self.cap = want;
-        self.blR = Mem::take(want * 8);
-        self.blG = Mem::take(want * 8);
-        self.blB = Mem::take(want * 8);
-        self.btR = Mem::take(want * 8);
-        self.btG = Mem::take(want * 8);
-        self.btB = Mem::take(want * 8);
+        self.blR = Mem::take(want * FLOAT_BYTES);
+        self.blG = Mem::take(want * FLOAT_BYTES);
+        self.blB = Mem::take(want * FLOAT_BYTES);
+        self.btR = Mem::take(want * FLOAT_BYTES);
+        self.btG = Mem::take(want * FLOAT_BYTES);
+        self.btB = Mem::take(want * FLOAT_BYTES);
     }
 
     /**
@@ -165,9 +166,9 @@ class Bloom : PostEffect {
         Mem::release(self.acG);
         Mem::release(self.acB);
         self.acc = want;
-        self.acR = Mem::take(want * 8);
-        self.acG = Mem::take(want * 8);
-        self.acB = Mem::take(want * 8);
+        self.acR = Mem::take(want * FLOAT_BYTES);
+        self.acG = Mem::take(want * FLOAT_BYTES);
+        self.acB = Mem::take(want * FLOAT_BYTES);
     }
 
     /**
@@ -200,14 +201,14 @@ class Bloom : PostEffect {
                 if (xx > last) {
                     xx = last;
                 }
-                sr = sr + Mem::realOf(self.blR, rb + xx);
-                sg = sg + Mem::realOf(self.blG, rb + xx);
-                sb = sb + Mem::realOf(self.blB, rb + xx);
+                sr = sr + floatOf(self.blR, rb + xx);
+                sg = sg + floatOf(self.blG, rb + xx);
+                sb = sb + floatOf(self.blB, rb + xx);
                 k = k + 1;
             }
-            Mem::putRealOf(self.btR, rb, sr * invK);
-            Mem::putRealOf(self.btG, rb, sg * invK);
-            Mem::putRealOf(self.btB, rb, sb * invK);
+            putFloatOf(self.btR, rb, sr * invK);
+            putFloatOf(self.btG, rb, sg * invK);
+            putFloatOf(self.btB, rb, sb * invK);
             let x : i32 = 1;
             while (x <= last) {
                 let ai : i32 = x + rad;
@@ -218,12 +219,12 @@ class Bloom : PostEffect {
                 if (si < 0) {
                     si = 0;
                 }
-                sr = sr + Mem::realOf(self.blR, rb + ai) - Mem::realOf(self.blR, rb + si);
-                sg = sg + Mem::realOf(self.blG, rb + ai) - Mem::realOf(self.blG, rb + si);
-                sb = sb + Mem::realOf(self.blB, rb + ai) - Mem::realOf(self.blB, rb + si);
-                Mem::putRealOf(self.btR, rb + x, sr * invK);
-                Mem::putRealOf(self.btG, rb + x, sg * invK);
-                Mem::putRealOf(self.btB, rb + x, sb * invK);
+                sr = sr + floatOf(self.blR, rb + ai) - floatOf(self.blR, rb + si);
+                sg = sg + floatOf(self.blG, rb + ai) - floatOf(self.blG, rb + si);
+                sb = sb + floatOf(self.blB, rb + ai) - floatOf(self.blB, rb + si);
+                putFloatOf(self.btR, rb + x, sr * invK);
+                putFloatOf(self.btG, rb + x, sg * invK);
+                putFloatOf(self.btB, rb + x, sb * invK);
                 x = x + 1;
             }
             y = y + 1;
@@ -250,9 +251,9 @@ class Bloom : PostEffect {
         let lastY : i32 = dh - 1;
         let z : i32 = x0;
         while (z < x1) {
-            Mem::putRealOf(self.acR, z, 0.0);
-            Mem::putRealOf(self.acG, z, 0.0);
-            Mem::putRealOf(self.acB, z, 0.0);
+            putFloatOf(self.acR, z, 0.0);
+            putFloatOf(self.acG, z, 0.0);
+            putFloatOf(self.acB, z, 0.0);
             z = z + 1;
         }
         let k : i32 = 0 - rad;
@@ -267,18 +268,18 @@ class Bloom : PostEffect {
             let rb : i32 = yy * dw;
             let xi : i32 = x0;
             while (xi < x1) {
-                Mem::putRealOf(self.acR, xi, Mem::realOf(self.acR, xi) + Mem::realOf(self.btR, rb + xi));
-                Mem::putRealOf(self.acG, xi, Mem::realOf(self.acG, xi) + Mem::realOf(self.btG, rb + xi));
-                Mem::putRealOf(self.acB, xi, Mem::realOf(self.acB, xi) + Mem::realOf(self.btB, rb + xi));
+                putFloatOf(self.acR, xi, floatOf(self.acR, xi) + floatOf(self.btR, rb + xi));
+                putFloatOf(self.acG, xi, floatOf(self.acG, xi) + floatOf(self.btG, rb + xi));
+                putFloatOf(self.acB, xi, floatOf(self.acB, xi) + floatOf(self.btB, rb + xi));
                 xi = xi + 1;
             }
             k = k + 1;
         }
         let xw : i32 = x0;
         while (xw < x1) {
-            Mem::putRealOf(self.blR, xw, Mem::realOf(self.acR, xw) * invK);
-            Mem::putRealOf(self.blG, xw, Mem::realOf(self.acG, xw) * invK);
-            Mem::putRealOf(self.blB, xw, Mem::realOf(self.acB, xw) * invK);
+            putFloatOf(self.blR, xw, floatOf(self.acR, xw) * invK);
+            putFloatOf(self.blG, xw, floatOf(self.acG, xw) * invK);
+            putFloatOf(self.blB, xw, floatOf(self.acB, xw) * invK);
             xw = xw + 1;
         }
         let y : i32 = 1;
@@ -296,15 +297,15 @@ class Bloom : PostEffect {
             let ob : i32 = y * dw;
             let xx : i32 = x0;
             while (xx < x1) {
-                let nr : f64 = Mem::realOf(self.acR, xx) + Mem::realOf(self.btR, ab + xx) - Mem::realOf(self.btR, sbb + xx);
-                let ng : f64 = Mem::realOf(self.acG, xx) + Mem::realOf(self.btG, ab + xx) - Mem::realOf(self.btG, sbb + xx);
-                let nb : f64 = Mem::realOf(self.acB, xx) + Mem::realOf(self.btB, ab + xx) - Mem::realOf(self.btB, sbb + xx);
-                Mem::putRealOf(self.acR, xx, nr);
-                Mem::putRealOf(self.acG, xx, ng);
-                Mem::putRealOf(self.acB, xx, nb);
-                Mem::putRealOf(self.blR, ob + xx, nr * invK);
-                Mem::putRealOf(self.blG, ob + xx, ng * invK);
-                Mem::putRealOf(self.blB, ob + xx, nb * invK);
+                let nr : f64 = floatOf(self.acR, xx) + floatOf(self.btR, ab + xx) - floatOf(self.btR, sbb + xx);
+                let ng : f64 = floatOf(self.acG, xx) + floatOf(self.btG, ab + xx) - floatOf(self.btG, sbb + xx);
+                let nb : f64 = floatOf(self.acB, xx) + floatOf(self.btB, ab + xx) - floatOf(self.btB, sbb + xx);
+                putFloatOf(self.acR, xx, nr);
+                putFloatOf(self.acG, xx, ng);
+                putFloatOf(self.acB, xx, nb);
+                putFloatOf(self.blR, ob + xx, nr * invK);
+                putFloatOf(self.blG, ob + xx, ng * invK);
+                putFloatOf(self.blB, ob + xx, nb * invK);
                 xx = xx + 1;
             }
             y = y + 1;
@@ -359,9 +360,9 @@ class Bloom : PostEffect {
                     jy = jy + 1;
                 }
                 let di : i32 = dy * dw + dx;
-                Mem::putRealOf(self.blR, di, ar * 0.25);
-                Mem::putRealOf(self.blG, di, ag * 0.25);
-                Mem::putRealOf(self.blB, di, ab * 0.25);
+                putFloatOf(self.blR, di, ar * 0.25);
+                putFloatOf(self.blG, di, ag * 0.25);
+                putFloatOf(self.blB, di, ab * 0.25);
                 dx = dx + 1;
             }
             dy = dy + 1;
@@ -386,9 +387,9 @@ class Bloom : PostEffect {
             let px : i32 = 0;
             while (px < w) {
                 let di : i32 = drow + px / 2;
-                let addr : f64 = Mem::realOf(self.blR, di) * st;
-                let addg : f64 = Mem::realOf(self.blG, di) * st;
-                let addb : f64 = Mem::realOf(self.blB, di) * st;
+                let addr : f64 = floatOf(self.blR, di) * st;
+                let addg : f64 = floatOf(self.blG, di) * st;
+                let addb : f64 = floatOf(self.blB, di) * st;
                 if (addr > 0.5 || addg > 0.5 || addb > 0.5) {
                     let c : i32 = Mem::dwordAt(pixels, (row + px) as i64 * 4);
                     let r : i32 = ((c >> 16) & 0xFF) + (addr.floorToInt() as i32);

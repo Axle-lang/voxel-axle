@@ -1,5 +1,5 @@
 // raster — software triangle rasteriser into the ARGB framebuffer with a
-// per-pixel inverse-depth z-buffer. Half-plane (edge-function) inside
+// per-pixel inverse-depth z-buffer (32-bit floats: a depth is compared, not accumulated). Half-plane (edge-function) inside
 // test; depth is the barycentric blend of vertex inverse depths, nearest
 // wins. Winding-agnostic (the area's sign flows through the weights).
 //
@@ -13,6 +13,7 @@ use smalt::Mem;
 use smalt::Color;
 use crate::kernel::kmath::mathx::clampI32;
 use crate::kernel::kmath::vec3::{ Vec3 };
+use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb, linearToSrgb };
 use crate::kernel::ksky::atmosphere::{ FogTable, SkyColour };
 use crate::configs::atlas::{ Atlas };
@@ -261,7 +262,7 @@ fn clearFrame(fb : FrameBuf, bg : i32) : void {
     let i : i32 = 0;
     while (i < n) {
         Mem::putWordOf(pixels, i, bg);
-        Mem::putRealOf(zbuf, i, 0.0);
+        putFloatOf(zbuf, i, 0.0);
         i = i + 1;
     }
 }
@@ -385,16 +386,22 @@ fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
  * position (sx, sy), inverse depth (iz), tile UV (u, v) and the per-vertex
  * Gouraud light-colour multipliers (tr, tg, tb). A value-type bundle so the
  * rasteriser takes 3 of these instead of two dozen loose scalars.
+ *
+ * Held at 32 bits. A screen position is a pixel and a fraction of one, a UV is
+ * a texel and a fraction, a light factor is a few hundred steps between dark
+ * and lit: none of them has anything to say past the seventh digit, and the
+ * queue holds tens of thousands of these per worker. The rasteriser widens
+ * them once, at the top, and does its arithmetic in `f64` as before.
  */
 struct RasterVert {
-    sx : f64,
-    sy : f64,
-    iz : f64,
-    u : f64,
-    v : f64,
-    tr : f64,
-    tg : f64,
-    tb : f64,
+    sx : f32,
+    sy : f32,
+    iz : f32,
+    u : f32,
+    v : f32,
+    tr : f32,
+    tg : f32,
+    tb : f32,
 }
 
 /**
@@ -407,8 +414,8 @@ struct RasterTri {
     a : RasterVert,
     b : RasterVert,
     c : RasterVert,
-    tile : i32,
-    wrap : i32,
+    tile : i16,   // atlas tile, under 256
+    wrap : i8,    // 0 or 1
 }
 
 /** The texture atlas mip chain: base buffer + per-level offset / size tables. */
@@ -549,14 +556,41 @@ fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : 
  * @param band   the worker's disjoint screen-column band [x0, x1) to fill
  */
 fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, fogT : FogTable, band : Band) : void {
+    // The three vertices, widened once: the queue keeps them at 32 bits, the
+    // edge functions and the perspective divide run at 64.
+    let asx : f64 = tri.a.sx as f64;
+    let asy : f64 = tri.a.sy as f64;
+    let aiz : f64 = tri.a.iz as f64;
+    let au : f64 = tri.a.u as f64;
+    let av : f64 = tri.a.v as f64;
+    let atr : f64 = tri.a.tr as f64;
+    let atg : f64 = tri.a.tg as f64;
+    let atb : f64 = tri.a.tb as f64;
+    let bsx : f64 = tri.b.sx as f64;
+    let bsy : f64 = tri.b.sy as f64;
+    let biz : f64 = tri.b.iz as f64;
+    let bu : f64 = tri.b.u as f64;
+    let bv : f64 = tri.b.v as f64;
+    let btr : f64 = tri.b.tr as f64;
+    let btg : f64 = tri.b.tg as f64;
+    let btb : f64 = tri.b.tb as f64;
+    let csx : f64 = tri.c.sx as f64;
+    let csy : f64 = tri.c.sy as f64;
+    let ciz : f64 = tri.c.iz as f64;
+    let cu : f64 = tri.c.u as f64;
+    let cv : f64 = tri.c.v as f64;
+    let ctr : f64 = tri.c.tr as f64;
+    let ctg : f64 = tri.c.tg as f64;
+    let ctb : f64 = tri.c.tb as f64;
+    let tile : i32 = tri.tile as i32;
     let pixels : i64 = fb.pixels;
     let zbuf : i64 = fb.zbuf;
     let w : i32 = fb.w;
     let h : i32 = fb.h;
-    let wrap : bool = tri.wrap != 0;
+    let wrap : bool = (tri.wrap as i32) != 0;
     // The triangle, atlas, fog and band stay bundled — the rasteriser reads
     // vertices / UV / Gouraud straight off tri.a/tri.b/tri.c (RasterVert).
-    let area : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy);
+    let area : f64 = edge(asx, asy, bsx, bsy, csx, csy);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
@@ -564,18 +598,18 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
 
     // Perspective-premultiplied UV (u/z, v/z) per vertex — the working set the
     // gradients and per-pixel sample interpolate.
-    let uw0 : f64 = tri.a.u * tri.a.iz;
-    let vw0 : f64 = tri.a.v * tri.a.iz;
-    let uw1 : f64 = tri.b.u * tri.b.iz;
-    let vw1 : f64 = tri.b.v * tri.b.iz;
-    let uw2 : f64 = tri.c.u * tri.c.iz;
-    let vw2 : f64 = tri.c.v * tri.c.iz;
+    let uw0 : f64 = au * aiz;
+    let vw0 : f64 = av * aiz;
+    let uw1 : f64 = bu * biz;
+    let vw1 : f64 = bv * biz;
+    let uw2 : f64 = cu * ciz;
+    let vw2 : f64 = cv * ciz;
 
     // Screen bounding box of the triangle.
-    let minx : i32 = (minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
-    let maxx : i32 = (maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
-    let miny : i32 = (minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
-    let maxy : i32 = (maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
+    let minx : i32 = (minf(asx, minf(bsx, csx))).floorToInt() as i32;
+    let maxx : i32 = (maxf(asx, maxf(bsx, csx))).floorToInt() as i32;
+    let miny : i32 = (minf(asy, minf(bsy, csy))).floorToInt() as i32;
+    let maxy : i32 = (maxf(asy, maxf(bsy, csy))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -606,15 +640,15 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     // them by constant deltas instead of recomputing per pixel.
     let cx0 : f64 = (minx as f64) + 0.5;
     let cy0 : f64 = (miny as f64) + 0.5;
-    let ax0 : f64 = tri.c.sy - tri.b.sy;
-    let ay0 : f64 = tri.b.sx - tri.c.sx;
-    let ax1 : f64 = tri.a.sy - tri.c.sy;
-    let ay1 : f64 = tri.c.sx - tri.a.sx;
-    let ax2 : f64 = tri.b.sy - tri.a.sy;
-    let ay2 : f64 = tri.a.sx - tri.b.sx;
-    let e0row : f64 = edge(tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy, cx0, cy0);
-    let e1row : f64 = edge(tri.c.sx, tri.c.sy, tri.a.sx, tri.a.sy, cx0, cy0);
-    let e2row : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, cx0, cy0);
+    let ax0 : f64 = csy - bsy;
+    let ay0 : f64 = bsx - csx;
+    let ax1 : f64 = asy - csy;
+    let ay1 : f64 = csx - asx;
+    let ax2 : f64 = bsy - asy;
+    let ay2 : f64 = asx - bsx;
+    let e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0);
+    let e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0);
+    let e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0);
 
     // Triangle-constant screen-space gradients of the perspective attributes
     // (u/z, v/z, 1/z): linear in screen x/y, so they're constant per triangle.
@@ -622,15 +656,15 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     // the mip level and the anisotropic tap count.
     let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * inv;
     let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * inv;
-    let gizx : f64 = (ax0 * tri.a.iz + ax1 * tri.b.iz + ax2 * tri.c.iz) * inv;
+    let gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * inv;
     let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * inv;
     let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * inv;
-    let gizy : f64 = (ay0 * tri.a.iz + ay1 * tri.b.iz + ay2 * tri.c.iz) * inv;
+    let gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * inv;
     let tp : f64 = Atlas::TILE_PX as f64;
     let maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
     let tf : f64 = tp;
-    let tbase : i32 = tri.tile * Atlas::TILE_PX;
+    let tbase : i32 = tile * Atlas::TILE_PX;
 
     let py : i32 = miny;
     while (py <= maxy) {
@@ -644,11 +678,11 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                 let b0 : f64 = e0 * inv;
                 let b1 : f64 = e1 * inv;
                 let b2 : f64 = e2 * inv;
-                let izp : f64 = b0 * tri.a.iz + b1 * tri.b.iz + b2 * tri.c.iz;
+                let izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
                 let idx : i64 = (rowbase + px) as i64;
                 unsafe {
-                    let zp : ptr<f64> = (zbuf + idx * 8) as ptr<f64>;
-                    if (izp > *zp) {
+                    let zp : ptr<f32> = (zbuf + idx * FLOAT_BYTES) as ptr<f32>;
+                    if (izp > ((*zp) as f64)) {
                         let invz : f64 = 1.0 / izp;
                         let u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
                         let v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
@@ -733,7 +767,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                                 mips: atlas.mips,
                                 base: Mem::dwordAt(atlas.mipOff, (mip as i64) * 4),
                                 size: lvlSz,
-                                row: tri.tile * lvlSz,
+                                row: tile * lvlSz,
                             };
                             let lvlF : f64 = lvlSz as f64;
                             let ratio : f64 = (major2 / minor2).sqrt();
@@ -771,9 +805,9 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                         // Gouraud: per-vertex tint interpolated by the
                         // screen-space barycentrics (low-frequency light, so
                         // affine interpolation is fine and cheap).
-                        let trp : f64 = b0 * tri.a.tr + b1 * tri.b.tr + b2 * tri.c.tr;
-                        let tgp : f64 = b0 * tri.a.tg + b1 * tri.b.tg + b2 * tri.c.tg;
-                        let tbp : f64 = b0 * tri.a.tb + b1 * tri.b.tb + b2 * tri.c.tb;
+                        let trp : f64 = b0 * atr + b1 * btr + b2 * ctr;
+                        let tgp : f64 = b0 * atg + b1 * btg + b2 * ctg;
+                        let tbp : f64 = b0 * atb + b1 * btb + b2 * ctb;
                         let r : i32 = gam.encode(rf * trp);
                         let g : i32 = gam.encode(gf * tgp);
                         let bl : i32 = gam.encode(bf * tbp);
@@ -789,7 +823,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                             g = ((g as f64) * keep + sky.g * fog).floorToInt() as i32;
                             bl = ((bl as f64) * keep + sky.b * fog).floorToInt() as i32;
                         }
-                        *zp = izp;
+                        *zp = izp as f32;
                         let pp : ptr<i32> = (pixels + idx * 4) as ptr<i32>;
                         *pp = (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (bl & 0xFF);
                     }
@@ -865,8 +899,8 @@ fn rasterTri(fb : FrameBuf,
             if (b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0) {
                 let iz : f64 = b0 * iz0 + b1 * iz1 + b2 * iz2;
                 let idx : i32 = py * w + px;
-                if (iz > Mem::realOf(zbuf, idx)) {
-                    Mem::putRealOf(zbuf, idx, iz);
+                if (iz > floatOf(zbuf, idx)) {
+                    putFloatOf(zbuf, idx, iz);
                     Mem::putWordOf(pixels, idx, color);
                 }
             }

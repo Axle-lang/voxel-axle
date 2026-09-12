@@ -23,7 +23,7 @@ use crate::configs::world::{ World };
 
 class TerrainGen : Generator {
     store : VoxStore, // shared voxel storage (aliased from the manager)
-    hmap : i32[],     // padded per-slot terrain top (tree-free), owned here
+    hmap : i8[],      // per-slot terrain top (tree-free), owned here — under 128
 
     /**
      * Allocate the padded heightmap over a shared store. Biome parameters are a
@@ -32,9 +32,9 @@ class TerrainGen : Generator {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(own store : VoxStore, slots : i32) {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
+        let s : i32 = World::CHUNK_SIZE;
         self.store = store;
-        self.hmap = malloc<i32>(slots * hSide * hSide);
+        self.hmap = malloc<i8>(slots * s * s);
     }
 
     /**
@@ -45,8 +45,8 @@ class TerrainGen : Generator {
      * @return the terrain top height
      */
     fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32 {
-        let hSide : i32 = World::CHUNK_SIZE + 2;
-        return self.hmap[slot * hSide * hSide + (lz + 1) * hSide + (lx + 1)];
+        let s : i32 = World::CHUNK_SIZE;
+        return self.hmap[slot * s * s + lz * s + lx] as i32;
     }
 
     /**
@@ -61,19 +61,18 @@ class TerrainGen : Generator {
     }
 
     /**
-     * Fill the padded heightmap for a chunk, clamped to a valid band.
+     * Fill the heightmap for a chunk, clamped to a valid band.
      * @param slot  the slot index
      * @param cx    the chunk x coordinate
      * @param cz    the chunk z coordinate
      */
     fn genHeightmap(mut self, slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
-        let hSide : i32 = s + 2;
-        let base : i32 = slot * hSide * hSide;
-        let lz : i32 = 0 - 1;
-        while (lz <= s) {
-            let lx : i32 = 0 - 1;
-            while (lx <= s) {
+        let base : i32 = slot * s * s;
+        let lz : i32 = 0;
+        while (lz < s) {
+            let lx : i32 = 0;
+            while (lx < s) {
                 let wx : f64 = (cx * s + lx) as f64;
                 let wz : f64 = (cz * s + lz) as f64;
                 let h : i32 = (terrainHeight(wx, wz)).floorToInt() as i32;
@@ -83,7 +82,7 @@ class TerrainGen : Generator {
                 if (h > World::MAX_HEIGHT - 1) {
                     h = World::MAX_HEIGHT - 1;
                 }
-                self.hmap[base + (lz + 1) * hSide + (lx + 1)] = h;
+                self.hmap[base + lz * s + lx] = h as i8;
                 lx = lx + 1;
             }
             lz = lz + 1;
@@ -92,7 +91,7 @@ class TerrainGen : Generator {
 
     /**
      * Clamped terrain height for an arbitrary world column (for tree origins
-     * outside the heightmap border). Matches genHeightmap.
+     * outside the chunk). Matches genHeightmap.
      * @param wx  the world x coordinate
      * @param wz  the world z coordinate
      * @return the clamped terrain height
@@ -147,7 +146,7 @@ class TerrainGen : Generator {
     }
 
     /**
-     * Fill the padded voxel field for a chunk: stone / filler / surface by depth,
+     * Fill the voxel field for a chunk: stone / filler / surface by depth,
      * water up to sea level, a thin cold-biome snow layer, air above; then trees.
      * @param slot  the slot index
      * @param cx    the chunk x coordinate
@@ -156,10 +155,10 @@ class TerrainGen : Generator {
     fn genVoxels(mut self, slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
         self.store.maxFY[slot] = 0;
-        let lz : i32 = 0 - 1;
-        while (lz <= s) {
-            let lx : i32 = 0 - 1;
-            while (lx <= s) {
+        let lz : i32 = 0;
+        while (lz < s) {
+            let lx : i32 = 0;
+            while (lx < s) {
                 let wx : i32 = cx * s + lx;
                 let wz : i32 = cz * s + lz;
                 let h : i32 = self.heightAt(slot, lx, lz);
@@ -283,7 +282,7 @@ class TerrainGen : Generator {
             while (dx <= 2) {
                 let lx : i32 = olx + dx;
                 let lz : i32 = olz + dz;
-                if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
+                if (lx >= 0 && lx < s && lz >= 0 && lz < s) {
                     self.snowCapColumn(slot, lx, lz, baseY, topSearch, cx0, cz0);
                 }
                 dx = dx + 1;

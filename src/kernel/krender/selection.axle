@@ -9,6 +9,7 @@
 
 use smalt::Mem;
 use smalt::Color;
+use crate::kernel::kmath::narrow::{ floatOf };
 use crate::kernel::krender::raster::{ FrameBuf, Camera, Lens, Projected };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::kentity::player::Player;
@@ -68,7 +69,7 @@ class Selection {
                     let idx : i32 = yy * w + xx;
                     // A hair in front of the surface it sits on; well in front of
                     // nothing means a back edge stays hidden.
-                    if (iz * 1.004 >= Mem::realOf(zbuf, idx)) {
+                    if (iz * 1.004 >= floatOf(zbuf, idx)) {
                         Mem::putWordOf(pixels, idx, color);
                     }
                 }

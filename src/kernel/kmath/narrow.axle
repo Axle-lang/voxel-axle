@@ -1,0 +1,73 @@
+// narrow — the two element widths smalt's `Mem` does not carry: a 16-bit
+// unsigned word and a 32-bit float.
+//
+// `Mem` reads bytes, 32-bit words and 64-bit reals, which is what a
+// framebuffer and a z-buffer were made of. But a table of fractions in [0, 1]
+// does not need fifty-two bits of mantissa, a depth does not need sixty-four
+// bits to lose a compare against its neighbour, and a bloom buffer holds a
+// colour channel. Storing those at eight bytes an element was most of the
+// game's memory that was not voxels.
+//
+// These read and write through typed pointers the way `Mem` itself does, and
+// convert at the edge: the arithmetic around them stays `f64`, only the
+// BUFFER shrinks. Every index is an element index, never a byte offset, for
+// the reason `Mem::wordOf` gives — an off-by-a-few in a byte offset reads a
+// value that is almost right, which is the hardest kind of wrong to see.
+
+/** Bytes per 16-bit element, for the allocation sizes. */
+pub const HALF_BYTES : i64 = 2;
+
+/** Bytes per 32-bit float, for the allocation sizes. */
+pub const FLOAT_BYTES : i64 = 4;
+
+/**
+ * The unsigned 16-bit element at `index`, widened without sign extension.
+ * @param base   the buffer
+ * @param index  the element index
+ * @return the value, 0..65535
+ */
+pub fn halfOf(base : i64, index : i64) : i32 {
+    unsafe {
+        let slot : ptr<u16> = (base + index * HALF_BYTES) as ptr<u16>;
+        return (*slot) as i32;
+    }
+}
+
+/**
+ * Store the low 16 bits of `v` at `index`.
+ * @param base   the buffer
+ * @param index  the element index
+ * @param v      the value, 0..65535
+ */
+pub fn putHalfOf(base : i64, index : i64, v : i32) : void {
+    unsafe {
+        let slot : ptr<u16> = (base + index * HALF_BYTES) as ptr<u16>;
+        *slot = v as u16;
+    }
+}
+
+/**
+ * The 32-bit float element at `index`, widened to `f64`.
+ * @param base   the buffer
+ * @param index  the element index
+ * @return the value
+ */
+pub fn floatOf(base : i64, index : i64) : f64 {
+    unsafe {
+        let slot : ptr<f32> = (base + index * FLOAT_BYTES) as ptr<f32>;
+        return (*slot) as f64;
+    }
+}
+
+/**
+ * Store `v` at `index`, narrowed to 32 bits.
+ * @param base   the buffer
+ * @param index  the element index
+ * @param v      the value
+ */
+pub fn putFloatOf(base : i64, index : i64, v : f64) : void {
+    unsafe {
+        let slot : ptr<f32> = (base + index * FLOAT_BYTES) as ptr<f32>;
+        *slot = v as f32;
+    }
+}

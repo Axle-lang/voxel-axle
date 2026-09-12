@@ -12,25 +12,26 @@
  */
 struct FaceMesh {
     pub(crate) fcount : i32[], // face count per slot
-    pub(crate) fx : i32[],
-    pub(crate) fy : i32[],
-    pub(crate) fz : i32[],
-    pub(crate) ftile : i32[],  // packs (dir << 8) | tile — see ChunkMesher.addFace
-    pub(crate) frun : i32[],   // cells this face spans along its merge axis; 1 = one
+    pub(crate) fx : i8[],      // the face's cell, CHUNK-LOCAL x/z (0..15) and world y:
+    pub(crate) fy : i8[],      // a byte each. The slot's origin is what makes it a
+    pub(crate) fz : i8[],      // world cell, and every reader has the slot to hand
+    pub(crate) ftile : i16[],  // packs (dir << 8) | tile — see ChunkMesher.addFace
+    pub(crate) frun : i8[],    // cells this face spans along its merge axis; 1 = one
                                // block. The greedy merge writes it, renderFace
                                // stretches the quad and tiles the texture by it.
     pub(crate) flight : i64,   // per-face SMOOTH light: 8 bytes/face, TWO per corner —
                                // (sky << 4) | blockR, then (blockG << 4) | blockB. Four
                                // nibbles, because block light has a colour and the sky
                                // does not (Minecraft-style smooth light, per channel)
-    pub(crate) fao : i64,      // per-face ambient occlusion: 4 bytes/face, 0..3 per corner
+    pub(crate) fao : i64,      // per-face ambient occlusion: ONE byte/face, two bits
+                               // per corner (0..3), corner k at bits 2k..2k+1
 }
 
 /** Per-slot torch posts (drawn as thin columns, not cubes): world x/y/z + count. */
 struct TorchField {
-    pub(crate) tx : i32[],     // torch world x
-    pub(crate) ty : i32[],     // torch world y
-    pub(crate) tz : i32[],     // torch world z
+    pub(crate) tx : i8[],      // torch cell, CHUNK-LOCAL x/z and world y — the
+    pub(crate) ty : i8[],      // slot's origin is the renderer's to add, as for
+    pub(crate) tz : i8[],      // the faces
     pub(crate) tcount : i32[], // torch count per slot
 }
 
@@ -39,5 +40,5 @@ struct ColumnRing {
     pub(crate) cxs : i32[],
     pub(crate) czs : i32[],
     pub(crate) loaded : i32[],
-    pub(crate) ctop : i32[],    // per-column highest collidable voxel + 1 (entity physics)
+    pub(crate) ctop : i16[],    // per-column highest collidable voxel + 1 (entity physics)
 }

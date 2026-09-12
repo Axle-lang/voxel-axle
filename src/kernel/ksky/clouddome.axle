@@ -39,6 +39,7 @@
 // would make the table depend on where you stood.
 
 use smalt::Mem;
+use crate::kernel::kmath::narrow::{ halfOf, putHalfOf, HALF_BYTES };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::kernel::klight::gamma::{ LinRgb };
 use crate::kernel::ksky::viewray::{ ViewRay };
@@ -216,9 +217,9 @@ struct CloudDome {
      */
     pub(crate) fn cellAt(self, idx : i64) : CloudCell {
         return CloudCell {
-            cov: Mem::realOf(self.cov, idx),
-            lit: Mem::realOf(self.lit, idx),
-            amb: Mem::realOf(self.amb, idx),
+            cov: tabGet(self.cov, idx),
+            lit: tabGet(self.lit, idx),
+            amb: tabGet(self.amb, idx),
         };
     }
 
@@ -270,8 +271,8 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
     let ci : i64 = (clampIdx(iv) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
     let cj : i64 = (clampIdx(iv + 1) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
     let ku : i64 = (clampIdx(iu + 1) - clampIdx(iu)) as i64;
-    if (Mem::realOf(cov, ci) <= 0.0 && Mem::realOf(cov, ci + ku) <= 0.0
-        && Mem::realOf(cov, cj) <= 0.0 && Mem::realOf(cov, cj + ku) <= 0.0) {
+    if (tabGet(cov, ci) <= 0.0 && tabGet(cov, ci + ku) <= 0.0
+        && tabGet(cov, cj) <= 0.0 && tabGet(cov, cj + ku) <= 0.0) {
         return CloudCell { cov: 0.0, lit: 0.0, amb: 0.0 };
     }
     let wu : CubicW = cubicW(fu - (iu as f64));
@@ -322,13 +323,73 @@ fn rowTaps(cov : i64, lit : i64, amb : i64, row : i32, iu : i32, w : CubicW) : C
     let c2 : i64 = base + (clampIdx(iu + 1) as i64);
     let c3 : i64 = base + (clampIdx(iu + 2) as i64);
     return CloudCell {
-        cov: Mem::realOf(cov, c0) * w.w0 + Mem::realOf(cov, c1) * w.w1
-           + Mem::realOf(cov, c2) * w.w2 + Mem::realOf(cov, c3) * w.w3,
-        lit: Mem::realOf(lit, c0) * w.w0 + Mem::realOf(lit, c1) * w.w1
-           + Mem::realOf(lit, c2) * w.w2 + Mem::realOf(lit, c3) * w.w3,
-        amb: Mem::realOf(amb, c0) * w.w0 + Mem::realOf(amb, c1) * w.w1
-           + Mem::realOf(amb, c2) * w.w2 + Mem::realOf(amb, c3) * w.w3,
+        cov: tabGet(cov, c0) * w.w0 + tabGet(cov, c1) * w.w1
+           + tabGet(cov, c2) * w.w2 + tabGet(cov, c3) * w.w3,
+        lit: tabGet(lit, c0) * w.w0 + tabGet(lit, c1) * w.w1
+           + tabGet(lit, c2) * w.w2 + tabGet(lit, c3) * w.w3,
+        amb: tabGet(amb, c0) * w.w0 + tabGet(amb, c1) * w.w1
+           + tabGet(amb, c2) * w.w2 + tabGet(amb, c3) * w.w3,
     };
+}
+
+/** What a stored 1.0 is, in a 16-bit cell. */
+const TAB_SCALE : f64 = 65535.0;
+
+/**
+ * One table value: a fraction in [0, 1], held as sixteen bits.
+ *
+ * Every quantity in the tables is premultiplied coverage, so it never leaves
+ * that range, and a step of one in sixty-five thousand is far below what a
+ * display byte can show. Eight-byte reals were four times the memory for
+ * precision nothing could see.
+ * @param base   the table
+ * @param index  the cell
+ * @return the fraction
+ */
+fn tabGet(base : i64, index : i64) : f64 {
+    return (halfOf(base, index) as f64) * (1.0 / TAB_SCALE);
+}
+
+/**
+ * Store a fraction, rounded to the nearest sixteenth-bit step and clamped
+ * into [0, 1].
+ * @param base   the table
+ * @param index  the cell
+ * @param v      the fraction
+ */
+fn tabPut(base : i64, index : i64, v : f64) : void {
+    if (v <= 0.0) {
+        putHalfOf(base, index, 0);
+        return;
+    }
+    if (v >= 1.0) {
+        putHalfOf(base, index, 65535);
+        return;
+    }
+    putHalfOf(base, index, (v * TAB_SCALE + 0.5).floorToInt() as i32);
+}
+
+/**
+ * Pull one cell of `show` a fraction `k` of the way toward `target`.
+ *
+ * A cell that has arrived is left alone, which is almost every cell almost
+ * always: the fade converges in under twenty frames and the table is then
+ * still until the next march completes. Writing it anyway dirtied a
+ * megabyte of cache every frame to store the value that was already there.
+ * @param show    the shown table
+ * @param target  the table being faded toward
+ * @param index   the cell
+ * @param k       the fraction of the remaining distance to cross
+ */
+fn chaseCell(show : i64, target : i64, index : i64, k : f64) : void {
+    let t : i32 = halfOf(target, index);
+    let c : i32 = halfOf(show, index);
+    if (t == c) {
+        return;
+    }
+    let cf : f64 = (c as f64) * (1.0 / TAB_SCALE);
+    let tf : f64 = (t as f64) * (1.0 / TAB_SCALE);
+    tabPut(show, index, cf + (tf - cf) * k);
 }
 
 /** The three buffers of one table. */
@@ -343,7 +404,7 @@ struct CloudTable {
  * @return three zeroed buffers of `SKY_N`² cells
  */
 fn newTable() : CloudTable {
-    let n : i64 = (SKY_N as i64) * (SKY_N as i64) * 8;
+    let n : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
     return CloudTable { cov: Mem::takeZeroed(n), lit: Mem::takeZeroed(n), amb: Mem::takeZeroed(n) };
 }
 
@@ -444,17 +505,13 @@ class CloudSky {
         for (i of 0..3) {
             let d : i32 = crew[i].join();
         }
-        let n : i64 = (SKY_N as i64) * (SKY_N as i64);
-        let i : i64 = 0;
-        while (i < n) {
-            Mem::putRealOf(self.target.cov, i, Mem::realOf(self.work.cov, i));
-            Mem::putRealOf(self.target.lit, i, Mem::realOf(self.work.lit, i));
-            Mem::putRealOf(self.target.amb, i, Mem::realOf(self.work.amb, i));
-            Mem::putRealOf(self.show.cov, i, Mem::realOf(self.work.cov, i));
-            Mem::putRealOf(self.show.lit, i, Mem::realOf(self.work.lit, i));
-            Mem::putRealOf(self.show.amb, i, Mem::realOf(self.work.amb, i));
-            i = i + 1;
-        }
+        let bytes : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
+        Mem::copy(self.target.cov, self.work.cov, bytes);
+        Mem::copy(self.target.lit, self.work.lit, bytes);
+        Mem::copy(self.target.amb, self.work.amb, bytes);
+        Mem::copy(self.show.cov, self.work.cov, bytes);
+        Mem::copy(self.show.lit, self.work.lit, bytes);
+        Mem::copy(self.show.amb, self.work.amb, bytes);
         self.filled = 1;
         self.slice = 0;
     }
@@ -471,12 +528,9 @@ class CloudSky {
         let i : i64 = (y0 as i64) * (SKY_N as i64);
         let end : i64 = (y1 as i64) * (SKY_N as i64);
         while (i < end) {
-            let c : f64 = Mem::realOf(self.show.cov, i);
-            Mem::putRealOf(self.show.cov, i, c + (Mem::realOf(self.target.cov, i) - c) * k);
-            let l : f64 = Mem::realOf(self.show.lit, i);
-            Mem::putRealOf(self.show.lit, i, l + (Mem::realOf(self.target.lit, i) - l) * k);
-            let a : f64 = Mem::realOf(self.show.amb, i);
-            Mem::putRealOf(self.show.amb, i, a + (Mem::realOf(self.target.amb, i) - a) * k);
+            chaseCell(self.show.cov, self.target.cov, i, k);
+            chaseCell(self.show.lit, self.target.lit, i, k);
+            chaseCell(self.show.amb, self.target.amb, i, k);
             i = i + 1;
         }
     }
@@ -614,9 +668,9 @@ class CloudSky {
      * @param c    its values
      */
     fn store(mut self, idx : i64, c : CloudCell) : void {
-        Mem::putRealOf(self.work.cov, idx, c.cov);
-        Mem::putRealOf(self.work.lit, idx, c.lit);
-        Mem::putRealOf(self.work.amb, idx, c.amb);
+        tabPut(self.work.cov, idx, c.cov);
+        tabPut(self.work.lit, idx, c.lit);
+        tabPut(self.work.amb, idx, c.amb);
     }
 
     /**
@@ -785,9 +839,9 @@ class CloudSky {
 
     /** Nothing along this direction — all three channels, so the resolve is clean. */
     fn clear(mut self, idx : i64) : void {
-        Mem::putRealOf(self.work.cov, idx, 0.0);
-        Mem::putRealOf(self.work.lit, idx, 0.0);
-        Mem::putRealOf(self.work.amb, idx, 0.0);
+        tabPut(self.work.cov, idx, 0.0);
+        tabPut(self.work.lit, idx, 0.0);
+        tabPut(self.work.amb, idx, 0.0);
     }
 
     /**

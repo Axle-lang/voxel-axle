@@ -189,16 +189,17 @@ class MobView {
                 tb = bright * 0.4;
             }
             let band : Band = Band { x0: 0, x1: fb.w };
-            rasterTriTex(fb, RasterTri {
-                a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
-                b: RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
-                c: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fogT, band);
-            rasterTriTex(fb, RasterTri {
-                a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
-                b: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                c: RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fogT, band);
+            // The queue's vertex is 32-bit; the projection and the light are
+            // narrowed here, once per corner.
+            let va : RasterVert = RasterVert { sx: sx0 as f32, sy: sy0 as f32, iz: iz0 as f32, u: 0.0 as f32, v: 1.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
+            let vb : RasterVert = RasterVert { sx: sx1 as f32, sy: sy1 as f32, iz: iz1 as f32, u: 1.0 as f32, v: 1.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
+            let vc : RasterVert = RasterVert { sx: sx2 as f32, sy: sy2 as f32, iz: iz2 as f32, u: 1.0 as f32, v: 0.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
+            let vd : RasterVert = RasterVert { sx: sx3 as f32, sy: sy3 as f32, iz: iz3 as f32, u: 0.0 as f32, v: 0.0 as f32, tr: tr as f32, tg: tg as f32, tb: tb as f32 };
+            let tile : i16 = mat.tile as i16;
+            rasterTriTex(fb, RasterTri { a: va, b: vb, c: vc, tile: tile, wrap: 0 as i8 },
+                scene.atlas, scene.gam, scene.fogT, band);
+            rasterTriTex(fb, RasterTri { a: va, b: vc, c: vd, tile: tile, wrap: 0 as i8 },
+                scene.atlas, scene.gam, scene.fogT, band);
         } else {
             let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
             rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);

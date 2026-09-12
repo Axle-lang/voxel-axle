@@ -35,14 +35,15 @@ use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::start::{Spawn, openYaw};
-use crate::game::controls::{ readIntent, applyLook, readHotbar, readGameMode };
+use crate::game::controls::{ readIntent, applyLook, readHotbar, readGameMode, Intent };
 use crate::game::stepaudio::{ StepTimers, stepAudio };
-use crate::game::cli::{ snapDeadline, startColumn, lookPin, dayTimeArg, hasFlag, windowSize, wantsPhysicsCheck };
+use crate::game::cli::{ snapDeadline, startColumn, lookPin, dayTimeArg, hasFlag, windowSize, walkBlocks, wantsPhysicsCheck };
 use crate::game::physcheck::runPhysicsCheck;
 use crate::game::lightcheck::runLightCheck;
 use crate::game::ray::{Picker, cellInPlayer};
 use crate::kernel::kio::sfx::{ AudioManager };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::kernel::kmath::narrow::{ FLOAT_BYTES };
 use crate::game::tick::TickManager;
 use crate::kernel::seams::{ LightMoment };
 use crate::kernel::krender::render::Renderer;
@@ -120,7 +121,7 @@ fn run() : i32 ! PlatformError {
     // taken again after each resize, because a reallocation moves it.
     let screen : Surface = new Surface(w, h);
     let pixels : i64 = screen.base();
-    let zbuf : i64 = Mem::take((w as i64) * (h as i64) * 8);
+    let zbuf : i64 = Mem::take((w as i64) * (h as i64) * FLOAT_BYTES);
     events.setRelativeMouse(true);
     // Set when the pointer is grabbed, so the frame that follows
     // discards its look delta: the grab warps the pointer to the middle
@@ -245,6 +246,10 @@ fn run() : i32 ! PlatformError {
     // with the loading.
     man.primeLight();
     let lightTask : Task<i32> = spawn lightLoop(man);
+    // A scripted walk (`--walk`): where it started, and how far it goes.
+    let walkFar : f64 = walkBlocks();
+    let walkX0 : f64 = player.pos.x;
+    let walkZ0 : f64 = player.pos.z;
     let attackCd : i32 = 0;
     let timers : StepTimers = StepTimers { foot: 0, ambient: 0 };
     let prevHp : i32 = player.hp; // to detect the player taking damage
@@ -321,7 +326,7 @@ fn run() : i32 ! PlatformError {
                 // taken from the old buffer is dead — which is why this
                 // is read again rather than kept.
                 pixels = screen.base();
-                zbuf = Mem::take((w as i64) * (h as i64) * 8);
+                zbuf = Mem::take((w as i64) * (h as i64) * FLOAT_BYTES);
                 renderer.setViewport(w, h);
                 lastHover = 0 - 2;   // framebuffer changed — force a redraw
             }
@@ -351,6 +356,13 @@ fn run() : i32 ! PlatformError {
             readHotbar(events, player);
             let (want, latch) = readIntent(events, sprintLatch);
             sprintLatch = latch;
+            if (walkFar > 0.0) {
+                let wdx : f64 = player.pos.x - walkX0;
+                let wdz : f64 = player.pos.z - walkZ0;
+                if (wdx * wdx + wdz * wdz < walkFar * walkFar) {
+                    want = Intent { fwd: 1.0, strafe: 0.0, sprint: true, up: false, down: false, moving: true };
+                }
+            }
 
             // Fixed-timestep simulation: as many fixed steps as the real
             // elapsed time demands (frame-rate independent). Physics, mob AI
