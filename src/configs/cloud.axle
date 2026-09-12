@@ -156,6 +156,22 @@ class Cloud {
     // cell by this same fraction — that is what keeps a change from ever
     // having an edge. 0.12 is nine tenths of the way in eighteen frames.
     static CHASE : f64 = 0.12;
+    // What the deck costs when nobody can see it.
+    //
+    // The dome is marched a slice at a time, every frame, whatever is on screen
+    // — and the march is the single most expensive thing the frame does that
+    // does not depend on the view. Standing in a hole looking at the floor, the
+    // sky paint finds no pixels at all and still the deck was being rebuilt at
+    // full rate behind it.
+    //
+    // So it is priced off what the last frame's sky paint actually found. Below
+    // `HIDDEN_SKY_PIXELS` of sky the deck marches one frame in
+    // `HIDDEN_SLICE_EVERY` instead of every one. Slowed rather than stopped, on
+    // purpose: a frozen deck is a deck that has to catch up visibly when you
+    // look up again, and an eighth of the rate still turns the whole table over
+    // in about four seconds.
+    static HIDDEN_SKY_PIXELS : i32 = 64;
+    static HIDDEN_SLICE_EVERY : i32 = 8;
     // Octaves of the 3-D field: the view samples get them all, the light
     // samples fewer, because a path integrates and the finest octave does not
     // survive the integral.

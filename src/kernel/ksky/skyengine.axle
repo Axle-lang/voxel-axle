@@ -51,6 +51,12 @@ class SkyEngine {
                            // array: a class reference cannot be stored, an array can
     paintPass : i32,       // the sky paint's handle into that pool
     paintNow : SkyPaintFrame[], // one slot: what the paint is to draw this frame
+    paintSeen : i32[],     // how much sky each band found, one slot per band. The
+                           // cloud march is priced off the total: a deck no pixel
+                           // of the window can reach is not worth marching at full
+                           // rate, and looking at the floor of a hole was paying
+                           // for all of it
+    skyPixels : i32,       // ...that total, from the frame just drawn
     marchUs : i64,         // microseconds the cloud march + fog build have taken, over the run
     drawUs : i64,          // ...and the sky paint
 
@@ -75,7 +81,14 @@ class SkyEngine {
         };
         self.pool = pool;
         self.paintNow = malloc<SkyPaintFrame>(1);
-        self.paintPass = pool[0].attach(new SkyPaint(self.paintNow));
+        self.paintSeen = malloc<i32>(SKY_BANDS);
+        for (i of 0..SKY_BANDS) {
+            self.paintSeen[i] = 0;
+        }
+        // Until the first paint has run, assume the sky is in full view: the
+        // deck has to be built before anything can decide it is not worth it.
+        self.skyPixels = 0x7FFFFFFF;
+        self.paintPass = pool[0].attach(new SkyPaint(self.paintNow, self.paintSeen));
         self.marchUs = 0;
         self.drawUs = 0;
     }
@@ -103,7 +116,7 @@ class SkyEngine {
             cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp,
             hw: lens.hw, hh: lens.hh, focal: lens.focal,
         };
-        self.cloudSky.march(cloudFieldAt(worldTime), ds, p.eye.y);
+        self.cloudSky.march(cloudFieldAt(worldTime), ds, p.eye.y, self.skyPixels);
         self.lastFog = self.fogT.build(self.dome, self.rays, self.cloudSky.dome(), fb.w, fb.h);
         self.marchUs = self.marchUs + (monotonicNanos() - t) / 1000;
     }
@@ -123,6 +136,11 @@ class SkyEngine {
         self.paintNow[0] = SkyPaintFrame { dome: self.dome, rays: self.rays, cloud: deck, fb: fb };
         self.pool[0].run(self.paintPass, SKY_BANDS);
         drawCelestial(ds, p, fb, lens, deck);
+        let seen : i32 = 0;
+        for (i of 0..SKY_BANDS) {
+            seen = seen + self.paintSeen[i];
+        }
+        self.skyPixels = seen;
         self.drawUs = self.drawUs + (monotonicNanos() - t) / 1000;
     }
 

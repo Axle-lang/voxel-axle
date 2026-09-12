@@ -64,6 +64,15 @@ const DIRECTIONAL_MIN : f64 = 6.0;
 const CLOUD_SHADOW_RANGE : f64 = 0.30;
 const SHADOW_MIN_RATIO : f64 = 4.0;
 
+/**
+ * Sky pixels the coherence check tells the deck it has in view.
+ *
+ * The march throttles itself when nothing on screen can reach the sky, and this
+ * check drives the deck with no screen at all. It is asserting what the fade
+ * does over a full cycle, so it has to be the un-throttled cycle.
+ */
+const FULL_SKY : i32 = 1000000;
+
 /** How deep the plugged-tunnel check sinks its shaft, and how far the branch runs. */
 const TUNNEL_DEPTH : i32 = 6;
 const TUNNEL_RUN : i32 = 5;
@@ -512,9 +521,9 @@ fn checkCloudCoherence() : i32 {
 
     // A: one full march. B: the same, a little later, higher, with the sun lower.
     let a : CloudSky = new CloudSky();
-    a.march(fA, dsA, 70.0);
+    a.march(fA, dsA, 70.0, FULL_SKY);
     let b : CloudSky = new CloudSky();
-    b.march(fB, dsB, 76.0);
+    b.march(fB, dsB, 76.0, FULL_SKY);
     let n : i64 = a.dome().cells();
     let snapA : i64 = Mem::take(n * 8);   // the check's own copy, at full width
     let i : i64 = 0;
@@ -527,7 +536,7 @@ fn checkCloudCoherence() : i32 {
     let moved : i32 = 0;
     let f : i32 = 0;
     while (f < a.cycleFrames()) {
-        a.march(fB, dsB, 76.0);
+        a.march(fB, dsB, 76.0, FULL_SKY);
         let d : CloudDome = a.dome();
         let j : i64 = 0;
         let diff : i32 = 0;
@@ -547,7 +556,7 @@ fn checkCloudCoherence() : i32 {
     let worstSpread : f64 = 0.0;
     f = 0;
     while (f < 60) {
-        a.march(fB, dsB, 76.0);
+        a.march(fB, dsB, 76.0, FULL_SKY);
         let d : CloudDome = a.dome();
         let bd : CloudDome = b.dome();
         let lo : f64 = 2.0;

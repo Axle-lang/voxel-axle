@@ -174,11 +174,13 @@ fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, body : SkyBody, 
  * @param fb     the render target (framebuffer + size)
  * @param y0     first screen row (inclusive)
  * @param y1     last screen row (exclusive)
+ * @return how many pixels of sky this band actually found
  */
-fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : FrameBuf, y0 : i32, y1 : i32) : void {
+fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : FrameBuf, y0 : i32, y1 : i32) : i32 {
     let pixels : i64 = fb.pixels;
     let zbuf : i64 = fb.zbuf;
     let w : i32 = fb.w;
+    let seen : i32 = 0;
     let py : i32 = y0;
     while (py < y1) {
         let vr : ViewRow = rays.row((py as f64) + 0.5);
@@ -199,11 +201,13 @@ fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : 
                     c = SkyColour { r: c.r * keep + cl.r, g: c.g * keep + cl.g, b: c.b * keep + cl.b };
                 }
                 Mem::putWordOf(pixels, row + px, packSky(c, px, py));
+                seen = seen + 1;
             }
             px = px + 1;
         }
         py = py + 1;
     }
+    return seen;
 }
 
 /** Row bands the sky is painted in. */
@@ -231,10 +235,20 @@ struct SkyPaintFrame {
  */
 pub(crate) class SkyPaint : Job {
     now : SkyPaintFrame[],  // one slot: what this frame paints
+    // How much sky each band found, one slot per band so no two workers write
+    // the same word and no atomic is needed. It is the only thing the frame
+    // learns about how much of the window the sky actually reaches — and the
+    // cloud march is priced off it, because a deck nobody can see is a deck not
+    // worth marching at full rate.
+    seen : i32[],
 
-    /** @param now  the one-slot frame the engine publishes into */
-    constructor(now : SkyPaintFrame[]) {
+    /**
+     * @param now   the one-slot frame the engine publishes into
+     * @param seen  the per-band tally the engine reads back, one slot per band
+     */
+    constructor(now : SkyPaintFrame[], seen : i32[]) {
         self.now = now;
+        self.seen = seen;
     }
 
     /**
@@ -245,7 +259,7 @@ pub(crate) class SkyPaint : Job {
     fn run(mut self, share : i32, shares : i32) : void {
         let f : SkyPaintFrame = self.now[0];
         let band : i32 = (f.fb.h + shares - 1) / shares;
-        drawSkyGradientRows(f.dome, f.rays, f.cloud, f.fb,
+        self.seen[share] = drawSkyGradientRows(f.dome, f.rays, f.cloud, f.fb,
             (band * share).min(f.fb.h), (band * (share + 1)).min(f.fb.h));
     }
 }

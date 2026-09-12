@@ -415,6 +415,8 @@ class CloudSky {
     show : CloudTable,    // what is read; chases `target`
     slice : i32,          // which share of `work` this frame refreshes
     filled : i32,         // 0 until the first pass, which is not amortised
+    skipped : i32,        // frames the deck has stood still for while nothing could
+                          // see it, counting up to Cloud::HIDDEN_SLICE_EVERY
     refY : f64,           // the eye altitude THIS CYCLE is being marched at
     refSx : f64,          // ...the body direction
     refSy : f64,
@@ -429,6 +431,7 @@ class CloudSky {
         self.show = newTable();
         self.slice = 0;
         self.filled = 0;
+        self.skipped = 0;
         self.refY = 0.0;
         self.refSx = 0.0;
         self.refSy = 1.0;
@@ -447,16 +450,31 @@ class CloudSky {
      * Move the deck on by one frame: take this frame's light, and either march
      * the whole table (the first time) or the next slice of it, chasing the last
      * completed march meanwhile.
-     * @param field  the cloud field, already drifted
-     * @param ds     the day/night state (which body, how strong, what colour)
-     * @param eyeY   the camera's altitude, which decides where the band is crossed
+     * The light is always taken — it is a handful of arithmetic and the ground's
+     * cloud shadow reads it. The MARCH is priced off how much sky the last frame
+     * actually painted: below `Cloud::HIDDEN_SKY_PIXELS` the deck steps one frame
+     * in `Cloud::HIDDEN_SLICE_EVERY` rather than every frame. It is the most
+     * expensive thing a frame does that has nothing to do with the view, and
+     * looking at the floor of a hole was paying all of it.
+     * @param field    the cloud field, already drifted
+     * @param ds       the day/night state (which body, how strong, what colour)
+     * @param eyeY     the camera's altitude, which decides where the band is crossed
+     * @param skyPixels  how much sky the last frame's paint found
      */
-    pub(crate) fn march(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
+    pub(crate) fn march(mut self, field : CloudField, ds : DayState, eyeY : f64,
+        skyPixels : i32) : void {
         self.takeLight(ds);
         if (self.filled == 0) {
             self.fill(field, ds, eyeY);
             return;
         }
+        if (skyPixels < Cloud::HIDDEN_SKY_PIXELS) {
+            self.skipped = self.skipped + 1;
+            if (self.skipped < Cloud::HIDDEN_SLICE_EVERY) {
+                return;
+            }
+        }
+        self.skipped = 0;
         if (self.slice == 0) {
             // The cycle just finished: what it marched becomes the target, and
             // the buffer it displaces is marched next, with fresh inputs.
