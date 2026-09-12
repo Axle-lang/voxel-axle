@@ -36,6 +36,7 @@ use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::biomecheck::runBiomeScan;
 use crate::game::cullcheck::runCullCheck;
+use crate::game::shadowcheck::runShadowCheck;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::controls::{ readIntent, applyLook, readHotbar, readGameMode, Intent };
 use crate::game::stepaudio::{ StepTimers, stepAudio };
@@ -104,6 +105,13 @@ fn main() : i32 {
     // frame at one angle — the kind nothing else in this repo would notice.
     if (hasFlag("--cull-check")) {
         return runCullCheck();
+    }
+    // `--shadow-check` stands a column of a known height in a flat clearing
+    // under a sun of a known direction and states what its shadow must do.
+    // Headless, because a cast shadow is the one thing in this renderer that
+    // every other check agrees with while the picture does not.
+    if (hasFlag("--shadow-check")) {
+        return runShadowCheck();
     }
     try {
         return run();

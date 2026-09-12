@@ -1,0 +1,549 @@
+// shadowcheck — the assertions about cast shadows that a screenshot argues about
+// and never settles.
+//
+// This repository has now shipped the same class of bug twice: a shadow that is
+// wrong in a way every automated measurement agrees with. `--light-check` passes
+// because it asks the MODEL a question — it calls `shadeLambert` directly and
+// never sees `dirStrength`, `skyAmbient` or the cloud lift. `--physics-check`
+// passes because a shadow moves nothing. The picture is the only thing that
+// disagrees, and a picture is an argument, not a number.
+//
+// So this asks the SHIPPED path, about a world it built on purpose. It stands a
+// stone column of a known height in a flat clearing under a sun of a known
+// direction, and then states the two things a cast shadow must do:
+//
+//   it must REACH THE GROUND WHERE THE GEOMETRY SAYS, starting at the foot of
+//   the thing casting it — a shadow detached from its object is the symptom
+//   that started this;
+//
+//   and the corner the renderer reads must not be brighter than the cells it is
+//   made of. A face corner averages four cells; if the average silently counts
+//   cells that are inside a block, the shadow is lifted exactly where the
+//   occluder is, which is how a shadow comes away from its own object.
+//
+// Then it prints what an eye would see: the display byte of lit ground against
+// shadowed ground, through the real tone curve. A shadow's depth is a number,
+// and tuning it by looking is how it drifted.
+//
+// `voxel --shadow-check` runs it and exits with the failure count.
+
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::game::world::terraingen::TerrainGen;
+use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
+use crate::kernel::kblock::blocks::{ isOpaque };
+use crate::kernel::klight::daymodel::{ DayState, SkyBodyLight, activeBody, computeDayState };
+use crate::kernel::klight::facelight::{ FaceLight };
+use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
+use crate::kernel::seams::{ CornerProbe, CornerSample, LightMoment };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+use crate::configs::time::{ Daylight };
+use crate::configs::world::{ World };
+
+/** The hour the check bakes at: a sun well up, but far enough off the zenith
+ *  that its shadow has a direction worth measuring. */
+const CHECK_HOUR : f64 = 0.42;
+
+/** How far out the probe searches the loaded ring for a flat open clearing. */
+const SHADOW_SCAN : i32 = 60;
+
+/** Half-width of the clearing the column needs, in blocks. */
+const CLEAR_HALF : i32 = 6;
+
+/** How tall a column the check stands up. */
+const COLUMN_H : i32 = 8;
+
+/**
+ * What fraction of the OPEN ground's sun a shadowed cell may still read.
+ *
+ * Relative, not absolute, and that is a finding rather than a convenience: open
+ * ground on this world at this hour reads 116 of 255, not 255, because the
+ * cloud deck's own transmittance is multiplied into the same byte. Judging a
+ * cast shadow against 255 would be judging it against a sky that is not there.
+ */
+const SHADOWED_SHARE : f64 = 0.45;
+
+/** Below this, the open ground is so dark the bake is not reaching it at all. */
+const OPEN_MIN : i32 = 40;
+
+/** How far out the corner sweep looks over natural terrain. */
+const CORNER_SCAN : i32 = 40;
+
+/** Blocks between one candidate patch and the next while searching. */
+const PATCH_STEP : i32 = 5;
+
+/**
+ * The most a patch may rise across itself and still be worth levelling.
+ *
+ * Generous, because levelling is filling: the cost of a steep patch is the
+ * blocks placed, not the result. What it actually rules out is a cliff, where
+ * filling would bury a face the assertions never meant to make.
+ */
+const PATCH_RELIEF : i32 = 10;
+
+/**
+ * How far a corner may read above the mean of the cells it is honestly made of,
+ * in units of 0..255.
+ *
+ * Not zero, because the mean is an integer division and the renderer's is too.
+ */
+const CORNER_SLACK : i32 = 2;
+
+/** How much of the direct term a fully cast-shadowed face may still call sun. */
+const SHADOW_SHARE_MAX : f64 = 0.05;
+
+/** Why a candidate patch was turned down, when it was. */
+const REJ_SEA : i32 = -1;
+const REJ_STANDING : i32 = -2;
+const REJ_STEEP : i32 = -3;
+
+/** A flat clearing: its centre column and the surface height they share. */
+struct Clearing {
+    x : i32,
+    z : i32,
+    y : i32,
+}
+
+/**
+ * Level a patch of ground into a flat, open platform, and answer where it is.
+ *
+ * BUILT rather than searched. The first version of this looked for terrain that
+ * was already flat over thirteen blocks and open to the sky, and found none in
+ * the whole ring — which is the right answer about this generator and the wrong
+ * way to get a test site. A shadow assertion needs geometry it can predict, so
+ * it makes the geometry.
+ *
+ * The patch is filled up to the highest column in it, which puts every block
+ * placed into open air above the terrain and leaves nothing overhanging.
+ * @param man  the world to build in
+ * @return the platform, or a y below zero when no candidate patch was found
+ */
+fn buildPlatform(man : ChunkManager) : Clearing {
+    let rejSea : i32 = 0;
+    let rejStand : i32 = 0;
+    let rejRelief : i32 = 0;
+    let z : i32 = 0 - SHADOW_SCAN;
+    while (z <= SHADOW_SCAN) {
+        let x : i32 = 0 - SHADOW_SCAN;
+        while (x <= SHADOW_SCAN) {
+            let top : i32 = surveyPatch(man, x, z);
+            if (top == REJ_SEA) {
+                rejSea = rejSea + 1;
+            } else if (top == REJ_STANDING) {
+                rejStand = rejStand + 1;
+            } else if (top == REJ_STEEP) {
+                rejRelief = rejRelief + 1;
+            } else {
+                levelPatch(man, x, z, top);
+                man.primeLight();
+                return Clearing { x: x, z: z, y: top };
+            }
+            x = x + PATCH_STEP;
+        }
+        z = z + PATCH_STEP;
+    }
+    Console::println("  rejected: ${rejSea} at or under the sea, ${rejStand} with"
+        + " something standing on them, ${rejRelief} too steep");
+    return Clearing { x: 0, z: 0, y: 0 - 1 };
+}
+
+/**
+ * Whether the patch around (x, z) can be levelled, and to what height.
+ *
+ * It must be land, it must not vary by more than `PATCH_RELIEF` — levelling a
+ * cliff would bury it rather than flatten it — and nothing may be standing on
+ * it, because a tree in the patch is an occluder the assertions did not put
+ * there.
+ * @param man  the world to survey
+ * @param x    the patch's centre column x
+ * @param z    the patch's centre column z
+ * @return the height to level to, or one of the REJ_ codes
+ */
+fn surveyPatch(man : ChunkManager, x : i32, z : i32) : i32 {
+    let lo : i32 = World::HEIGHT;
+    let hi : i32 = 0;
+    let dz : i32 = 0 - CLEAR_HALF;
+    while (dz <= CLEAR_HALF) {
+        let dx : i32 = 0 - CLEAR_HALF;
+        while (dx <= CLEAR_HALF) {
+            let h : i32 = man.collisionHeight(x + dx, z + dz) - 1;
+            if (h <= World::SEA_LEVEL) {
+                return REJ_SEA;
+            }
+            if (man.worldGet(ivec3(x + dx, h + 1, z + dz)) != Block::Air
+                || man.worldGet(ivec3(x + dx, h + 2, z + dz)) != Block::Air) {
+                return REJ_STANDING;
+            }
+            if (h < lo) {
+                lo = h;
+            }
+            if (h > hi) {
+                hi = h;
+            }
+            dx = dx + 1;
+        }
+        dz = dz + 1;
+    }
+    if (hi - lo > PATCH_RELIEF) {
+        return REJ_STEEP;
+    }
+    return hi;
+}
+
+/**
+ * Fill every column of the patch up to `top` with stone.
+ * @param man  the world to build in
+ * @param x    the patch's centre column x
+ * @param z    the patch's centre column z
+ * @param top  the height every column is brought to
+ */
+fn levelPatch(man : ChunkManager, x : i32, z : i32, top : i32) : void {
+    let dz : i32 = 0 - CLEAR_HALF;
+    while (dz <= CLEAR_HALF) {
+        let dx : i32 = 0 - CLEAR_HALF;
+        while (dx <= CLEAR_HALF) {
+            let y : i32 = man.collisionHeight(x + dx, z + dz);
+            while (y <= top) {
+                let cell : IVec3 = ivec3(x + dx, y, z + dz);
+                man.placeAt(cell, Block::Stone);
+                man.lightUpdate(cell);
+                y = y + 1;
+            }
+            dx = dx + 1;
+        }
+        dz = dz + 1;
+    }
+}
+
+/**
+ * Stand a column of stone on the clearing and let the light engine settle.
+ * @param man  the world to build in
+ * @param at   the clearing
+ */
+fn raiseColumn(man : ChunkManager, at : Clearing) : void {
+    let i : i32 = 1;
+    while (i <= COLUMN_H) {
+        let cell : IVec3 = ivec3(at.x, at.y + i, at.z);
+        man.placeAt(cell, Block::Stone);
+        man.lightUpdate(cell);
+        i = i + 1;
+    }
+    man.primeLight();
+}
+
+/**
+ * The direction the column's shadow runs on the ground: the sun's own bearing,
+ * reversed, as a unit vector in the ground plane.
+ * @param sun  the light direction (unit)
+ * @return the shadow's bearing, or zero when the sun is straight overhead
+ */
+fn shadowBearing(sun : Vec3) : Vec3 {
+    let len : f64 = (sun.x * sun.x + sun.z * sun.z).sqrt();
+    if (len < 0.0001) {
+        return vec3(0.0, 0.0, 0.0);
+    }
+    return vec3((0.0 - sun.x) / len, 0.0, (0.0 - sun.z) / len);
+}
+
+/**
+ * The shadow must start at the foot of what casts it and run as far as the
+ * geometry says.
+ *
+ * The far end is the column's height over the tangent of the sun's elevation;
+ * every ground cell between the base and there is under some part of the column
+ * and must read as shadowed. The FIRST step is the one that matters most: a
+ * shadow that begins a block or two out is the detached rectangle this check was
+ * written for.
+ * @param man  the world, already baked
+ * @param at   the clearing the column stands on
+ * @param sun   the light direction (unit)
+ * @param open  what the same ground read before the column was built
+ * @return the number of ground cells that should be shadowed and are not
+ */
+fn checkAttached(man : ChunkManager, at : Clearing, sun : Vec3, open : i32) : i32 {
+    let run : Vec3 = shadowBearing(sun);
+    if (run.x == 0.0 && run.z == 0.0) {
+        Console::println("SKIP attached: the sun is straight overhead");
+        return 0;
+    }
+    let flat : f64 = (sun.x * sun.x + sun.z * sun.z).sqrt();
+    let reach : f64 = (COLUMN_H as f64) * flat / sun.y;
+    if (reach > (CLEAR_HALF as f64)) {
+        reach = CLEAR_HALF as f64;
+    }
+    let bad : i32 = 0;
+    let dark : i32 = ((open as f64) * SHADOWED_SHARE).floorToInt() as i32;
+    let steps : i32 = reach.floorToInt() as i32;
+    let t : i32 = 1;
+    while (t <= steps) {
+        let wx : i32 = at.x + (run.x * (t as f64)).round() as i32;
+        let wz : i32 = at.z + (run.z * (t as f64)).round() as i32;
+        let vis : i32 = man.sunlitGet(ivec3(wx, at.y + 1, wz));
+        if (vis > dark) {
+            Console::println("FAIL attached: ${t} block(s) from the column's foot,"
+                + " ground at (${wx}, ${at.y + 1}, ${wz}) reads sun ${vis},"
+                + " against ${open} in the open beside it"
+                + " — the shadow does not reach its own object");
+            bad = bad + 1;
+        }
+        t = t + 1;
+    }
+    if (bad == 0) {
+        Console::println("  attached: ${steps} cells of shadow from the foot out,"
+            + " all under ${dark} against ${open} in the open");
+    }
+    return bad;
+}
+
+/**
+ * Nothing that is inside a block may lighten the corner of a face.
+ *
+ * A face corner is the mean of the four cells meeting at it. Three of those can
+ * be inside solid blocks, and a solid cell has no sun visibility to report — the
+ * bake never writes one, so it holds whatever the slot was cleared to, which is
+ * full sun. Counting it is how the shadow at the foot of an occluder is lifted
+ * back toward open ground.
+ *
+ * The mesher already knows this: it averages the baked light levels over the
+ * NON-OPAQUE cells only. This states the same rule for the other half of the
+ * same corner, which is the half that did not have it.
+ * @param man  the world, already baked
+ * @param at     the clearing, with the column standing on it
+ * @param where  what to call this sweep in the report
+ * @return the number of corners that read brighter than their honest cells
+ */
+fn checkCornerHonesty(man : ChunkManager, at : Clearing, where : string) : i32 {
+    let bad : i32 = 0;
+    let seen : i32 = 0;
+    let worst : i32 = 0;
+    let y : i32 = at.y + 1;
+    let dz : i32 = 0 - CLEAR_HALF;
+    while (dz <= CLEAR_HALF) {
+        let dx : i32 = 0 - CLEAR_HALF;
+        while (dx <= CLEAR_HALF) {
+            let base : IVec3 = ivec3(at.x + dx, y, at.z + dz);
+            if (man.worldGet(base) == Block::Air) {
+                let sx : i32 = 1;
+                while (sx >= 0 - 1) {
+                    let sz : i32 = 1;
+                    while (sz >= 0 - 1) {
+                        if (sx != 0 && sz != 0) {
+                            let probe : CornerProbe = CornerProbe {
+                                base: base, t1: ivec3(sx, 0, 0), t2: ivec3(0, 0, sz),
+                            };
+                            let want : i32 = honestMean(man, base, sx, sz);
+                            let got : i32 = man.cornerSample(probe).sun;
+                            seen = seen + 1;
+                            if (got - want > CORNER_SLACK) {
+                                if (got - want > worst) {
+                                    worst = got - want;
+                                }
+                                bad = bad + 1;
+                            }
+                        }
+                        sz = sz - 2;
+                    }
+                    sx = sx - 2;
+                }
+            }
+            dx = dx + 1;
+        }
+        dz = dz + 1;
+    }
+    if (bad > 0) {
+        Console::println("FAIL corners ${where}: ${bad} of ${seen} read up to ${worst} of 255"
+            + " brighter than the cells they are made of — solid cells are being"
+            + " counted as open sky");
+    } else {
+        Console::println("  corners ${where}: ${seen} agree with the cells they are made of");
+    }
+    return bad;
+}
+
+/**
+ * The same rule, over the terrain the generator actually made.
+ *
+ * The platform sweep proves the rule at one built occluder; this proves it
+ * where the player is. Every step in the ground, every trunk, every overhang is
+ * a corner with a solid cell in it, and there are tens of thousands of them —
+ * which is why the artefact reads as the whole world being slightly wrong
+ * rather than as one bad shadow.
+ * @param man  the world, already baked
+ * @return the number of corners that read brighter than their honest cells
+ */
+fn checkCornersOverTerrain(man : ChunkManager) : i32 {
+    let bad : i32 = 0;
+    let seen : i32 = 0;
+    let worst : i32 = 0;
+    let z : i32 = 0 - CORNER_SCAN;
+    while (z <= CORNER_SCAN) {
+        let x : i32 = 0 - CORNER_SCAN;
+        while (x <= CORNER_SCAN) {
+            let base : IVec3 = ivec3(x, man.collisionHeight(x, z), z);
+            if (man.worldGet(base) == Block::Air) {
+                let sx : i32 = 1;
+                while (sx >= -1) {
+                    let sz : i32 = 1;
+                    while (sz >= -1) {
+                        if (sx != 0 && sz != 0) {
+                            let probe : CornerProbe = CornerProbe {
+                                base: base, t1: ivec3(sx, 0, 0), t2: ivec3(0, 0, sz),
+                            };
+                            let want : i32 = honestMean(man, base, sx, sz);
+                            let got : i32 = man.cornerSample(probe).sun;
+                            seen = seen + 1;
+                            if (got - want > CORNER_SLACK) {
+                                if (got - want > worst) {
+                                    worst = got - want;
+                                }
+                                bad = bad + 1;
+                            }
+                        }
+                        sz = sz - 2;
+                    }
+                    sx = sx - 2;
+                }
+            }
+            x = x + 1;
+        }
+        z = z + 1;
+    }
+    let pct : f64 = 0.0;
+    if (seen > 0) {
+        pct = (bad as f64) * 100.0 / (seen as f64);
+    }
+    if (bad > 0) {
+        Console::println("FAIL corners over terrain: ${bad} of ${seen}"
+            + " (${(pct * 10.0).round() / 10.0}%) read up to ${worst} of 255 brighter than"
+            + " the cells they are made of");
+    } else {
+        Console::println("  corners over terrain: ${seen} agree with their cells");
+    }
+    return bad;
+}
+
+/**
+ * The mean a corner SHOULD report: its four cells, counting only the ones light
+ * can be in.
+ * @param man   the world to read
+ * @param base  the corner's own air cell
+ * @param sx    the step to the second cell along x
+ * @param sz    the step to the third cell along z
+ * @return the mean sun visibility over the non-opaque cells, 0..255
+ */
+fn honestMean(man : ChunkManager, base : IVec3, sx : i32, sz : i32) : i32 {
+    let sum : i32 = man.sunlitGet(base);
+    let cnt : i32 = 1;
+    let c1 : IVec3 = ivec3(base.x + sx, base.y, base.z);
+    let c2 : IVec3 = ivec3(base.x, base.y, base.z + sz);
+    let c3 : IVec3 = ivec3(base.x + sx, base.y, base.z + sz);
+    if (!isOpaque(man.worldGet(c1))) {
+        sum = sum + man.sunlitGet(c1);
+        cnt = cnt + 1;
+    }
+    if (!isOpaque(man.worldGet(c2))) {
+        sum = sum + man.sunlitGet(c2);
+        cnt = cnt + 1;
+    }
+    if (!isOpaque(man.worldGet(c3))) {
+        sum = sum + man.sunlitGet(c3);
+        cnt = cnt + 1;
+    }
+    return sum / cnt;
+}
+
+/**
+ * What the light model promises about itself, asked of the shipped path rather
+ * than of `shadeLambert` — which is what `--light-check` asks, and why it has
+ * never seen any of this.
+ * @param ds  the day state at the check's hour
+ * @return the number of promises that did not hold
+ */
+fn checkInvariants(ds : DayState) : i32 {
+    let bad : i32 = 0;
+    Console::println("  sky ambient ${ds.skyAmbient}, body strength ${ds.dirStrength}");
+    if (ds.skyAmbient > 1.0001) {
+        Console::println("FAIL ambient: the sky's own share is ${ds.skyAmbient}, over 1"
+            + " — every ambient in the world is lifted by that factor, forever");
+        bad = bad + 1;
+    }
+    let ground : FaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
+    let share : f64 = ground.directShare(Light::SHADOW_KEEP);
+    Console::println("  a fully shadowed ground face still calls ${share} of its light sun");
+    if (share > SHADOW_SHARE_MAX) {
+        Console::println("FAIL shadow colour: ${share} of the light on a face in full cast"
+            + " shadow is still taken as DIRECT, so it keeps the sun's warm tint"
+            + " — a cast shadow is lit by the sky");
+        bad = bad + 1;
+    }
+    return bad;
+}
+
+/**
+ * What an eye actually sees: the display byte of a lit ground face against the
+ * same face in cast shadow, through the real tone curve.
+ *
+ * A shadow's depth is a number. It drifted because it was only ever looked at.
+ * @param ds   the day state at the check's hour
+ * @param gam  the colour space to encode through
+ */
+fn reportDepth(ds : DayState, gam : Gamma) : void {
+    let ground : FaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
+    // A mid grass texel, so the number means something next to a screenshot.
+    let albedo : f64 = gam.decode(0x747474, 16);
+    let lit : i32 = gam.encode(albedo * ground.exposure(1.0));
+    let dark : i32 = gam.encode(albedo * ground.exposure(Light::SHADOW_KEEP));
+    let pct : f64 = 0.0;
+    if (lit > 0) {
+        pct = (dark as f64) * 100.0 / (lit as f64);
+    }
+    Console::println("  ground of 116: lit ${lit}, cast shadow ${dark}"
+        + "  (${(pct * 10.0).round() / 10.0}% of the sunlit byte)");
+}
+
+/**
+ * Build a world, stand a column in it, and state what its shadow must do.
+ * @return the failure count, 0 when green
+ */
+fn runShadowCheck() : i32 {
+    let man : ChunkManager = new ChunkManager();
+    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
+    while (man.ensureLoaded(0, 0) > 0) {
+    }
+    let at : Clearing = buildPlatform(man);
+    if (at.y < 0) {
+        Console::println("  no patch in the ring could be levelled — the check could not run");
+        man.stopLight();
+        Console::println("shadow failures: 1");
+        return 1;
+    }
+    Console::println("  platform (${at.x}, ${at.z}) levelled to height ${at.y}");
+
+    man.setMoment(LightMoment { dayTime: CHECK_HOUR, seconds: 0.0, camX: 0, camZ: 0 });
+    man.primeLight();
+    let body : SkyBodyLight = activeBody(CHECK_HOUR);
+    let sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
+    Console::println("  sun (${sun.x}, ${sun.y}, ${sun.z}) at hour ${CHECK_HOUR}");
+
+    let open : i32 = man.sunlitGet(ivec3(at.x, at.y + 1, at.z));
+    let fails : i32 = 0;
+    if (open < OPEN_MIN) {
+        Console::println("FAIL platform: open ground reads sun ${open} of 255 before"
+            + " anything was built on it — the bake is not reaching the surface");
+        fails = fails + 1;
+    }
+
+    raiseColumn(man, at);
+    fails += checkAttached(man, at, sun, open);
+    fails += checkCornerHonesty(man, at, "around the column");
+    fails += checkCornersOverTerrain(man);
+
+    let ds : DayState = computeDayState(CHECK_HOUR);
+    fails += checkInvariants(ds);
+    let tables : GammaTables = new GammaTables();
+    reportDepth(ds, tables.view());
+
+    man.stopLight();
+    Console::println("shadow failures: ${fails}");
+    return fails;
+}

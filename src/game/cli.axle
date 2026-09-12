@@ -19,6 +19,7 @@
 //   --light-check          run the headless coloured-light assertions and exit
 //   --biome-scan           count the biome of a wide grid of columns and exit
 //   --cull-check           run the headless chunk-visibility assertions and exit
+//   --shadow-check         run the headless cast-shadow assertions and exit
 //
 // A reader per flag, each answering with a value rather than setting
 // state, so `main` reads the command line once at the top and never
