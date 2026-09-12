@@ -23,20 +23,30 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 
 ---
 
-![Lighting engine — birch & cherry grove under sun glow, soft shadows and atmospheric sky](doc/lightengine.png)
+![Lighting engine — a cherry grove under the sun disc, soft shadows and a graded atmospheric sky](doc/lightengine.png)
 
 <div align="center"><em>The lighting engine: warm sunlit ground, soft shadows under the canopy, a sun glow with god-rays and a graded atmospheric sky — all on the CPU.</em></div>
 
 <table>
 <tr>
-<td width="33%"><img alt="Forest biome with oak trees" src="doc/gameplay.png"></td>
-<td width="33%"><img alt="Desert biome with a water pool and a mob" src="doc/gameplay2.png"></td>
-<td width="33%"><img alt="Hills meeting a beach and ocean, with chickens" src="doc/gameplay3.png"></td>
+<td width="33%"><img alt="Wooded hills rolling back into haze under a cloud deck" src="doc/gameplay.png"></td>
+<td width="33%"><img alt="A sand dune with cacti, a striped badlands mesa to one side and bare peaks to the other" src="doc/gameplay2.png"></td>
+<td width="33%"><img alt="A birch grove on the shore of a lake, with a chicken in the grass" src="doc/gameplay3.png"></td>
 </tr>
 <tr>
 <td align="center"><em>Forest</em></td>
-<td align="center"><em>Desert</em></td>
+<td align="center"><em>Desert &amp; badlands</em></td>
 <td align="center"><em>Coast</em></td>
+</tr>
+<tr>
+<td width="33%"><img alt="A grey stone mountain rising over pale open ground, under a broken cloud deck" src="doc/gameplay4.png"></td>
+<td width="33%"><img alt="Terraced hills where savanna grass gives way to plains" src="doc/gameplay5.png"></td>
+<td width="33%"><img alt="Snow-covered spruce stepping down a hillside into fog" src="doc/gameplay6.png"></td>
+</tr>
+<tr>
+<td align="center"><em>Mountains</em></td>
+<td align="center"><em>Savanna</em></td>
+<td align="center"><em>Snowy taiga</em></td>
 </tr>
 </table>
 
