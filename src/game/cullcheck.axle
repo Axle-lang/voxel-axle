@@ -1,0 +1,176 @@
+// cullcheck — the chunk the frustum test threw away and the frame wanted.
+//
+// Culling is the one optimisation whose failure is invisible in every automated
+// measurement it is judged by. A test that drops a chunk it should keep is
+// FASTER, its physics is unchanged, its lighting is unchanged, and the hole it
+// leaves only appears at one pitch, at one height, in a direction nobody
+// scripted. This project has now shipped that bug twice: once when the side
+// planes ignored the pitch, and once when a camera above the terrain looking
+// down had the ground behind it dropped for being behind.
+//
+// So the rule is checked rather than reasoned about. For a spread of eye
+// heights, pitches and yaws, every chunk of the ring is sampled on a grid of
+// points; a point that projects inside the frame proves the chunk is visible,
+// and the visibility test is then required to have kept it. Keeping a chunk
+// that shows nothing is allowed — that only costs time. Dropping one that shows
+// something is the failure, and it is the only thing reported.
+//
+// `voxel --cull-check` runs it and exits with the failure count.
+
+use crate::kernel::krender::chunkview::{ ViewCone, viewConeFor, chunkVisible };
+use crate::kernel::krender::raster::{ Lens, lensFor };
+use crate::kernel::kentity::player::Player;
+use crate::configs::screen::{ Screen };
+use crate::configs::motion::{ Motion };
+use crate::configs::render::{ Render };
+use crate::configs::world::{ World };
+
+/** Sample points along each of a chunk's three axes; the grid is their product. */
+const GRID_X : i32 = 5;
+const GRID_Y : i32 = 9;
+const GRID_Z : i32 = 5;
+
+/** Eye heights swept, from underground to well above any terrain. */
+const EYE_LOW : f64 = 4.0;
+const EYE_HIGH : f64 = 300.0;
+const EYE_STEPS : i32 = 12;
+
+/** Pitches swept, over the full look range, and yaws over the full turn. */
+const PITCH_STEPS : i32 = 13;
+const YAW_STEPS : i32 = 8;
+
+/** Chunk indices swept either side of the eye's own, covering the render ring. */
+const RING : i32 = 10;
+
+/** Failures printed before the report gives up on listing them. */
+const REPORT_MAX : i32 = 12;
+
+/**
+ * Whether this world point falls inside the frame, in front of the eye.
+ *
+ * The same projection the rasteriser uses, and deliberately so: what "visible"
+ * means here has to be what the renderer would draw, not a second opinion.
+ * @param p     the player, for the eye and the camera basis
+ * @param lens  the frame's projection
+ * @param wx    world x of the point
+ * @param wy    world y
+ * @param wz    world z
+ * @return true when the point projects into the frame
+ */
+fn pointOnScreen(p : Player, lens : Lens, wx : f64, wy : f64, wz : f64) : bool {
+    let dx : f64 = wx - p.eye.x;
+    let dy : f64 = wy - p.eye.y;
+    let dz : f64 = wz - p.eye.z;
+    let depth : f64 = (dx * (0.0 - p.siny) + dz * p.cosy) * p.cosp + dy * p.sinp;
+    if (depth <= Screen::NEAR_PLANE) {
+        return false;
+    }
+    let right : f64 = dx * p.cosy + dz * p.siny;
+    let up : f64 = dx * p.siny * p.sinp + dy * p.cosp - dz * p.cosy * p.sinp;
+    let sx : f64 = lens.hw + right * lens.focal / depth;
+    let sy : f64 = lens.hh - up * lens.focal / depth;
+    return sx >= 0.0 && sx < lens.hw * 2.0 && sy >= 0.0 && sy < lens.hh * 2.0;
+}
+
+/**
+ * Whether any sampled point of this chunk's column projects into the frame.
+ * @param p     the player, for the eye and the camera basis
+ * @param lens  the frame's projection
+ * @param cx    chunk x index
+ * @param cz    chunk z index
+ * @return true when the chunk shows something
+ */
+fn chunkOnScreen(p : Player, lens : Lens, cx : i32, cz : i32) : bool {
+    let s : f64 = World::CHUNK_SIZE as f64;
+    let x0 : f64 = (cx as f64) * s;
+    let z0 : f64 = (cz as f64) * s;
+    // The draw distance is a policy, not a mistake: the renderer commits to
+    // fog beyond it and the far test is entitled to drop the chunk. What the
+    // assertion is about is the four side planes and the near clip, so a chunk
+    // the far test owns is not one this can have an opinion on.
+    let mx : f64 = x0 + s * 0.5 - p.eye.x;
+    let mz : f64 = z0 + s * 0.5 - p.eye.z;
+    let far : f64 = Render::DRAW_DIST + s;
+    if (mx * mx + mz * mz > far * far) {
+        return false;
+    }
+    for (i of 0..GRID_X) {
+        let wx : f64 = x0 + s * (i as f64) / ((GRID_X - 1) as f64);
+        for (j of 0..GRID_Y) {
+            let wy : f64 = (World::HEIGHT as f64) * (j as f64) / ((GRID_Y - 1) as f64);
+            for (k of 0..GRID_Z) {
+                let wz : f64 = z0 + s * (k as f64) / ((GRID_Z - 1) as f64);
+                if (pointOnScreen(p, lens, wx, wy, wz)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Sweep the camera over heights, pitches and yaws; report every chunk the
+ * visibility test dropped while some part of it was on screen.
+ * @return the failure count, 0 when green
+ */
+fn runCullCheck() : i32 {
+    let lens : Lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
+    let s : f64 = World::CHUNK_SIZE as f64;
+    let p : Player = new Player(s * 0.5, 0.0, s * 0.5);
+    let fails : i32 = 0;
+    let kept : i32 = 0;
+    let seen : i32 = 0;
+    let tested : i32 = 0;
+    for (e of 0..EYE_STEPS) {
+        let eyeY : f64 = EYE_LOW + (EYE_HIGH - EYE_LOW) * (e as f64) / ((EYE_STEPS - 1) as f64);
+        p.pos.y = eyeY;
+        for (a of 0..PITCH_STEPS) {
+            let pitch : f64 = 0.0 - Motion::PITCH_MAX
+                + 2.0 * Motion::PITCH_MAX * (a as f64) / ((PITCH_STEPS - 1) as f64);
+            for (y of 0..YAW_STEPS) {
+                let yaw : f64 = 6.28318530717959 * (y as f64) / (YAW_STEPS as f64);
+                p.aimAt(yaw, pitch);
+                p.refresh();
+                let cone : ViewCone = viewConeFor(p, lens);
+                let cz : i32 = 0 - RING;
+                while (cz <= RING) {
+                    let cx : i32 = 0 - RING;
+                    while (cx <= RING) {
+                        tested = tested + 1;
+                        let want : bool = chunkOnScreen(p, lens, cx, cz);
+                        let got : bool = chunkVisible(cone, cx, cz);
+                        if (want) {
+                            seen = seen + 1;
+                        }
+                        if (got) {
+                            kept = kept + 1;
+                        }
+                        if (want && !got) {
+                            fails = fails + 1;
+                            if (fails <= REPORT_MAX) {
+                                Console::println(
+                                    "FAIL chunk (${cx}, ${cz}) is on screen and was culled"
+                                    + " — eye y ${eyeY}, pitch ${pitch}, yaw ${yaw}"
+                                );
+                            }
+                        }
+                        cx = cx + 1;
+                    }
+                    cz = cz + 1;
+                }
+            }
+        }
+    }
+    if (fails > REPORT_MAX) {
+        Console::println("  … and ${fails - REPORT_MAX} more");
+    }
+    let over : f64 = 0.0;
+    if (seen > 0) {
+        over = (kept as f64) / (seen as f64);
+    }
+    Console::println("  ${tested} chunk views, ${seen} showed something, ${kept} were kept"
+        + "  (${(over * 100.0).round() / 100.0}× the minimum)");
+    Console::println("cull failures: ${fails}");
+    return fails;
+}

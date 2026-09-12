@@ -35,6 +35,7 @@ use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
 use crate::game::biomecheck::runBiomeScan;
+use crate::game::cullcheck::runCullCheck;
 use crate::game::start::{Spawn, openYaw};
 use crate::game::controls::{ readIntent, applyLook, readHotbar, readGameMode, Intent };
 use crate::game::stepaudio::{ StepTimers, stepAudio };
@@ -96,6 +97,13 @@ fn main() : i32 {
     // how a world ends up mostly one thing.
     if (hasFlag("--biome-scan")) {
         return runBiomeScan();
+    }
+    // `--cull-check` sweeps the camera over heights, pitches and yaws and
+    // reports any chunk the frustum test dropped while part of it was on
+    // screen. Headless, because the failure it looks for is a hole in one
+    // frame at one angle — the kind nothing else in this repo would notice.
+    if (hasFlag("--cull-check")) {
+        return runCullCheck();
     }
     try {
         return run();
