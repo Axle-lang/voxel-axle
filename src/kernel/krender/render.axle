@@ -21,6 +21,7 @@
 // step by hand and cannot be a config field.
 
 use smalt::Mem;
+use smalt::{ Job, WorkerPool };
 use std::time::monotonicNanos;
 use smalt::Color;
 use crate::kernel::krender::bloom::Bloom;
@@ -57,8 +58,50 @@ use crate::configs::world::{ World };
  */
 const BUILD_WORKERS : i32 = 6;
 
-/** Screen column bands the fill splits into; mirrored by its `Task` array. */
+/** Screen column bands the fill splits into. */
 const RASTER_BANDS : i32 = 12;
+
+/**
+ * The banded fill, as a pass the worker pool can run.
+ *
+ * It reaches its two inputs through ARRAYS, and that is the whole reason it can
+ * exist: a pass is attached to the pool once and run every frame after, but
+ * Axle will not let a long-lived object remember a borrowed reference, so a
+ * per-frame input cannot simply be handed to it. A one-slot array can be held
+ * by both the Renderer and the pass, and what the Renderer writes into it
+ * before a pass the pass reads during one.
+ */
+class BandFill : Job {
+    crew : ChunkRenderer[],  // the queues to fill from, aliased from the Renderer
+    frame : FrameBuf[],      // one slot: the target this frame, written before the pass
+
+    /**
+     * @param crew   the raster crew, aliased
+     * @param frame  the one-slot render target the Renderer publishes into
+     */
+    constructor(crew : ChunkRenderer[], frame : FrameBuf[]) {
+        self.crew = crew;
+        self.frame = frame;
+    }
+
+    /**
+     * Fill this share's column band from every worker's queue.
+     *
+     * The bands are disjoint columns, so no two shares touch the same z-buffer
+     * word and none of them needs a lock.
+     * @param share   which band
+     * @param shares  how many bands the frame was cut into
+     */
+    fn run(mut self, share : i32, shares : i32) : void {
+        let fb : FrameBuf = self.frame[0];
+        let bw : i32 = (fb.w + shares - 1) / shares;
+        let x0 : i32 = (bw * share).min(fb.w);
+        let x1 : i32 = (bw * (share + 1)).min(fb.w);
+        for (i of 0..BUILD_WORKERS) {
+            self.crew[i as i64].rasterizeBand(fb, x0, x1);
+        }
+    }
+}
 
 /**
  * The frame conductor: composes the focused render components (texture atlas,
@@ -89,6 +132,15 @@ class Renderer {
     bloom : Bloom,   // soft-glow post-process (owns its half-res buffers + jobs)
     mobs : MobView,  // mob box-model renderer (owns its own projection scratch)
     sel : Selection, // targeted-block selection wireframe (owns its own scratch)
+    /**
+     * The crew the parallel passes run on, started once instead of once a
+     * frame. A fan-out of twelve costs ten microseconds here against four
+     * hundred and ninety for twelve fresh threads, and the difference is paid
+     * by THIS thread, in the middle of the frame.
+     */
+    pool : WorkerPool[],
+    fillPass : i32,     // the banded fill's handle into the pool
+    frame : FrameBuf[], // one slot: this frame's target, published to the passes
 
     /**
      * Build a Renderer: set the projection width from config and construct the
@@ -103,10 +155,28 @@ class Renderer {
         for (i of 0..BUILD_WORKERS) {
             self.crew[i as i64] = new ChunkRenderer();
         }
-        self.sky = new SkyEngine();
         self.bloom = new Bloom();
         self.mobs = new MobView();
         self.sel = new Selection();
+        // One fewer than the widest fan-out: the calling thread takes share 0.
+        self.pool = malloc<WorkerPool>(1);
+        self.pool[0] = new WorkerPool(RASTER_BANDS - 1);
+        self.frame = malloc<FrameBuf>(1);
+        self.frame[0] = FrameBuf { pixels: 0, zbuf: 0, w: 0, h: 0 };
+        self.fillPass = self.pool[0].attach(new BandFill(self.crew, self.frame));
+        // Built last: it attaches its own pass to the pool above.
+        self.sky = new SkyEngine(self.pool);
+    }
+
+    /**
+     * Stop the render crew and wait for it.
+     *
+     * Called before the framebuffer it fills is released, for the reason every
+     * join in this program exists: a worker still writing into memory that has
+     * been given back is the one bug none of the checks can catch.
+     */
+    pub(crate) fn close(mut self) : void {
+        self.pool[0].close();
     }
 
     /**
@@ -180,31 +250,9 @@ class Renderer {
         }
 
         let tFill : i64 = monotonicNanos();
-        let w : i32 = fb.w;
-        let bw : i32 = (w + RASTER_BANDS - 1) / RASTER_BANDS;
-        let fillers : Task<i32>[11];
-        for (i of 0..11) {
-            let x0 : i32 = (bw * (i + 1)).min(w);
-            let x1 : i32 = (bw * (i + 2)).min(w);
-            fillers[i] = spawn fillBandJob(self, fb, x0, x1);
-        }
-        self.fillBand(fb, 0, bw.min(w));
-        for (i of 0..11) {
-            let d : i32 = fillers[i].join();
-        }
+        self.frame[0] = fb;
+        self.pool[0].run(self.fillPass, RASTER_BANDS);
         self.crew[0].fillUs = self.crew[0].fillUs + (monotonicNanos() - tFill) / 1000;
-    }
-
-    /**
-     * Fill one screen column band from every worker's queue.
-     * @param fb   the render target
-     * @param bx0  first column (inclusive)
-     * @param bx1  last column (exclusive)
-     */
-    pub(file) fn fillBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
-        for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64].rasterizeBand(fb, bx0, bx1);
-        }
     }
 
     /** Triangles the world pass queued in the last frame. */
@@ -473,8 +521,3 @@ class Renderer {
     }
 }
 
-/** Worker job: fill one screen column band from every worker's queue. */
-fn fillBandJob(rr : Renderer, fb : FrameBuf, bx0 : i32, bx1 : i32) : i32 {
-    rr.fillBand(fb, bx0, bx1);
-    return 0;
-}

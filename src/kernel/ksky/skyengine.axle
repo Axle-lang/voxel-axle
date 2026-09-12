@@ -27,9 +27,10 @@
 // the gradient but read the same table, so a cloud crossing the sun hides it;
 // and the whole paint happens AFTER the world, into the pixels it left empty.
 
+use smalt::WorkerPool;
 use std::time::monotonicNanos;
 use crate::kernel::ksky::atmosphere::{ FogTable, FogTables, SkyDome, ViewRays, skyDomeFor };
-use crate::kernel::ksky::backdrop::{ drawSkyGradient, drawCelestial };
+use crate::kernel::ksky::backdrop::{ SkyPaint, SkyPaintFrame, SKY_BANDS, drawCelestial };
 use crate::kernel::ksky::cloud::{ cloudFieldAt };
 use crate::kernel::ksky::clouddome::{ CloudDome, CloudSky };
 use crate::kernel::klight::daymodel::{ DayState };
@@ -46,11 +47,19 @@ class SkyEngine {
     dome : SkyDome,        // this frame's colour field
     rays : ViewRays,       // …and how a pixel becomes a direction in it
     lastFog : FogTable,    // the view of the fog tables this frame was built with
+    pool : WorkerPool[],   // the render crew, aliased from the Renderer in a one-slot
+                           // array: a class reference cannot be stored, an array can
+    paintPass : i32,       // the sky paint's handle into that pool
+    paintNow : SkyPaintFrame[], // one slot: what the paint is to draw this frame
     marchUs : i64,         // microseconds the cloud march + fog build have taken, over the run
     drawUs : i64,          // ...and the sky paint
 
-    /** Compose the pieces; nothing is sized until the first `update`. */
-    constructor() {
+    /**
+     * Compose the pieces; nothing is sized until the first `update`.
+     * @param pool  the render crew, aliased in a one-slot array, that the sky
+     *              paint runs its row bands on
+     */
+    constructor(pool : WorkerPool[]) {
         self.cloudSky = new CloudSky();
         self.fogT = new FogTables();
         self.dome = SkyDome {
@@ -64,6 +73,9 @@ class SkyEngine {
             cols: 1, rows: 1, r: 0, g: 0, b: 0, curve: 0,
             xscale: 0.0, yscale: 0.0, dscale: 0.0,
         };
+        self.pool = pool;
+        self.paintNow = malloc<SkyPaintFrame>(1);
+        self.paintPass = pool[0].attach(new SkyPaint(self.paintNow));
         self.marchUs = 0;
         self.drawUs = 0;
     }
@@ -108,7 +120,8 @@ class SkyEngine {
     pub(crate) fn draw(mut self, ds : DayState, p : Player, fb : FrameBuf, lens : Lens) : void {
         let t : i64 = monotonicNanos();
         let deck : CloudDome = self.cloudSky.dome();
-        drawSkyGradient(self.dome, self.rays, deck, fb);
+        self.paintNow[0] = SkyPaintFrame { dome: self.dome, rays: self.rays, cloud: deck, fb: fb };
+        self.pool[0].run(self.paintPass, SKY_BANDS);
         drawCelestial(ds, p, fb, lens, deck);
         self.drawUs = self.drawUs + (monotonicNanos() - t) / 1000;
     }

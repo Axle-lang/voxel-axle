@@ -12,6 +12,7 @@
 // the threaded gradient job, so no mutable day-state is shared across threads.
 
 use smalt::Mem;
+use smalt::{ Job };
 use crate::kernel::kmath::narrow::{ floatOf };
 use smalt::Color;
 use crate::kernel::klight::daymodel::{ DayState };
@@ -205,28 +206,47 @@ fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : 
     }
 }
 
-/** Row bands the sky is painted in; mirrored by the `Task` array below. */
-const SKY_BANDS : i32 = 8;
+/** Row bands the sky is painted in. */
+pub(crate) const SKY_BANDS : i32 = 8;
 
 /**
- * Paint the atmospheric sky into every pixel the world left empty, split across
- * eight row bands (disjoint output rows, race-free). Runs AFTER the world, mobs
- * and torches, reading the z-buffer they wrote, so only true sky pixels are
- * ever computed.
- * @param dome   the sky's colour field this frame
- * @param rays   how a screen pixel becomes a world direction
- * @param cloud  the marched cloud deck
- * @param fb     the render target (framebuffer + z-buffer + size)
+ * Everything one band of the sky paint needs, in one value.
+ *
+ * A pass on the worker pool is attached once and run every frame after, and
+ * Axle will not let a long-lived object remember a borrowed reference — so what
+ * changes per frame travels as a value struct, through a one-slot array that
+ * both the engine and the pass hold.
  */
-fn drawSkyGradient(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : FrameBuf) : void {
-    let band : i32 = (fb.h + SKY_BANDS - 1) / SKY_BANDS;
-    let crew : Task<i32>[7];
-    for (i of 0..7) {
-        crew[i] = spawn skyGradientJob(dome, rays, cloud, fb, band * i, (band * (i + 1)).min(fb.h));
+struct SkyPaintFrame {
+    dome : SkyDome,
+    rays : ViewRays,
+    cloud : CloudDome,
+    fb : FrameBuf,
+}
+
+/**
+ * Paint the atmospheric sky into every pixel the world left empty, in row bands
+ * (disjoint output rows, race-free). Runs AFTER the world, mobs and torches,
+ * reading the z-buffer they wrote, so only true sky pixels are ever computed.
+ */
+pub(crate) class SkyPaint : Job {
+    now : SkyPaintFrame[],  // one slot: what this frame paints
+
+    /** @param now  the one-slot frame the engine publishes into */
+    constructor(now : SkyPaintFrame[]) {
+        self.now = now;
     }
-    drawSkyGradientRows(dome, rays, cloud, fb, band * 7, fb.h);
-    for (i of 0..7) {
-        let d : i32 = crew[i].join();
+
+    /**
+     * Paint this share's rows.
+     * @param share   which band
+     * @param shares  how many bands the frame was cut into
+     */
+    fn run(mut self, share : i32, shares : i32) : void {
+        let f : SkyPaintFrame = self.now[0];
+        let band : i32 = (f.fb.h + shares - 1) / shares;
+        drawSkyGradientRows(f.dome, f.rays, f.cloud, f.fb,
+            (band * share).min(f.fb.h), (band * (share + 1)).min(f.fb.h));
     }
 }
 
@@ -251,12 +271,3 @@ fn drawCelestial(ds : DayState, p : Player, fb : FrameBuf, lens : Lens, cloud : 
     }
 }
 
-/**
- * Worker job: atmospheric sky for one row band (see drawSkyGradient). The
- * DayState arrives by value, so the thread has its own copy — nothing shared.
- * @return 0 (Task result unused)
- */
-fn skyGradientJob(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : FrameBuf, y0 : i32, y1 : i32) : i32 {
-    drawSkyGradientRows(dome, rays, cloud, fb, y0, y1);
-    return 0;
-}

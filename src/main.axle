@@ -599,6 +599,12 @@ fn run() : i32 ! PlatformError {
     // a mixer reading a handle that has been given back.
     sfx.close();
 
+    // The render crew before the buffers it fills, for the same reason the
+    // light thread is joined before the volumes it writes: a worker still
+    // running against memory that has been given back is the one failure
+    // nothing here would report.
+    renderer.close();
+
     // Closed in the reverse order of construction. The framebuffer goes
     // after the last present and before the window, because the blit
     // reads its pixels: a surface released while a present were still in
