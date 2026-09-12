@@ -22,7 +22,7 @@ use crate::configs::audio::{ Audio };
 use crate::configs::mobs::{ MobKind, Mobs };
 use crate::configs::motion::{ Motion };
 use std::numeric::math;
-use crate::kernel::kmath::mathx::{ clampF64, wrapAngle, PI, TAU };
+use crate::kernel::kmath::mathx::{ clampF64, wrapAngle, TAU };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 
 /**

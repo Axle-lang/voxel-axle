@@ -23,7 +23,7 @@
 
 use std::sys::sleep;
 use smalt::Mem;
-use crate::kernel::kblock::blocks::{ isSolid, isCollidable, hasCollisionBox, boxOf, BlockBox };
+use crate::kernel::kblock::blocks::{ isSolid, isCollidable, boxOf, BlockBox };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };

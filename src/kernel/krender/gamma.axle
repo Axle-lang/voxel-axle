@@ -2,10 +2,10 @@
 //
 // The atlas is authored in sRGB, and sRGB is a display encoding, not an
 // amount of light: a 0x80 texel does not carry half the light of 0xFF,
-// it carries about a fifth. Multiplying those bytes by a light factor —
-// which is what this renderer did — therefore darkens by the wrong
-// amount everywhere, and the error is worst exactly where the shadows
-// are, which is why they collapsed into mud.
+// it carries about a fifth. Multiplying those bytes by a light factor
+// therefore darkens by the wrong amount everywhere, and the error is
+// worst exactly where the shadows are, which is where it shows: they
+// collapse into mud.
 //
 // So the world pass DECODES each texel to linear light on the way in,
 // multiplies and adds there, and ENCODES the result back on the way

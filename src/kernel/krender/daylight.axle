@@ -1,0 +1,78 @@
+// daylight — the day/night colour kernel: where the sun is, how much of it
+// there is, and what colour the sky has gone.
+//
+// It owns the per-frame `DayState` snapshot every pass reads (the sky draws,
+// the world raster, the mob pass) and the fixed brightness curve the light
+// sampler indexes by baked light level. The sun-direction shading itself
+// lives on the `DayState` value, as its `SkyLighting.shade`.
+
+use smalt::Mem;
+use crate::kernel::krender::sky::{ DayState, computeDayState };
+use crate::configs::light::{ Light };
+use crate::configs::time::{ Daylight };
+
+/**
+ * The day/night colour kernel: owns the sun direction, daylight factor and
+ * sky/fog colour (refreshed each frame from the clock) plus the fixed brightness
+ * curve the light sampler reads. `update` recomputes the cached `DayState` (the
+ * value snapshot handed to the sky draws, the world raster and the mob pass);
+ * `state` / `curve` expose it. The sun-direction shading itself lives on the
+ * `DayState` value (its `SkyLighting.shade`).
+ */
+class DayLighting {
+    cur : DayState, // this frame's sun / daylight / sky colour snapshot
+    lcurve : i64,   // 16 f64s: lightFalloff^(15-level), the brightness curve
+
+    /** Seed a noon day-state and build the brightness curve lookup. */
+    constructor() {
+        self.cur = DayState {
+            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
+            daylight: 1.0,
+            skyColR: Daylight::DAY_SKY_R, skyColG: Daylight::DAY_SKY_G, skyColB: Daylight::DAY_SKY_B,
+        };
+        // Brightness curve lookup: lcurve[level] = `Light::FALLOFF`^(15-level).
+        self.lcurve = Mem::take(16 * 8);
+        let li : i32 = 0;
+        while (li < 16) {
+            let pc : f64 = 1.0;
+            let kc : i32 = 0;
+            while (kc < 15 - li) {
+                pc = pc * Light::FALLOFF;
+                kc = kc + 1;
+            }
+            Mem::putRealOf(self.lcurve, li, pc);
+            li = li + 1;
+        }
+    }
+
+    /**
+     * Refresh the cached day/night state from dayTime (0..1) for this frame: the
+     * sun direction (face shading), the daylight factor (scales sky light) and
+     * the sky/fog colour. The math lives in `sky::computeDayState`; the fresh
+     * value is cached AND returned so the caller can hand the same snapshot to
+     * the sky draws (and across the gradient job's thread).
+     * @param dayTime  time of day in [0, 1)
+     * @return the day/night state for this frame
+     */
+    pub(crate) fn update(mut self, dayTime : f64) : DayState {
+        self.cur = computeDayState(dayTime);
+        return self.cur;
+    }
+
+    /**
+     * This frame's cached day/night state (sun / daylight / sky colour).
+     * @return the current day/night state
+     */
+    pub(crate) fn state(self) : DayState {
+        return self.cur;
+    }
+
+    /**
+     * The brightness-curve lookup (`Light::FALLOFF`^(15-level)) the light sampler and
+     * the mob ambient read.
+     * @return base address of the 16-entry f64 curve
+     */
+    pub(crate) fn curve(self) : i64 {
+        return self.lcurve;
+    }
+}

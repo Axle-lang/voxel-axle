@@ -17,7 +17,7 @@ use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightEmission, albedoFor };
-use crate::kernel::seams::{ BlockLightField, SkyLightField, SunLightField, BounceLightField, LightSample, CornerProbe, CornerSample };
+use crate::kernel::seams::{ LightSample, CornerProbe, CornerSample };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
 use crate::configs::time::{ Daylight };

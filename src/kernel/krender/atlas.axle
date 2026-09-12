@@ -1,0 +1,71 @@
+// atlas — the texture atlas the world and the mobs sample, as a mip chain.
+//
+// One class, and it owns one thing: the anisotropic mip chain built from the
+// loaded atlas, plus the per-level offset / size tables the sampler indexes
+// with. Consumers take a `MipAtlas` snapshot through the `MipSource` seam
+// rather than reaching at the raw pointers.
+
+use smalt::Mem;
+use crate::kernel::krender::raster::{
+    buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, MipAtlas, MipSource,
+};
+use crate::kernel::krender::gamma::{ Gamma };
+use crate::configs::atlas::{ Atlas };
+
+/**
+ * The texture-atlas kernel: owns the anisotropic mip chain built from the loaded
+ * atlas and hands out a `MipAtlas` view through the `MipSource` seam. The
+ * Renderer holds one; `setAtlas` / `atlasBase` delegate here, and both the world
+ * raster and the mob pass sample through `mip()` instead of reaching at the raw
+ * mip pointers.
+ */
+class TextureAtlas : MipSource {
+    mips : i64,   // mip chain of the atlas (0 until the first setBase)
+    mipOff : i64, // i32[mipLevels]: each mip level's texel offset (for aniso)
+    mipSz : i64,  // i32[mipLevels]: each mip level's tile side length
+
+    /** Allocate + fill the per-mip-level offset / size tables for the sampler. */
+    constructor() {
+        self.mips = 0;
+        self.mipOff = Mem::take((Atlas::MIP_LEVELS as i64) * 4);
+        self.mipSz = Mem::take((Atlas::MIP_LEVELS as i64) * 4);
+        let ml : i32 = 0;
+        while (ml < Atlas::MIP_LEVELS) {
+            Mem::putWordOf(self.mipOff, ml, mipLevelOffset(ml));
+            Mem::putWordOf(self.mipSz, ml, mipLevelSize(ml));
+            ml = ml + 1;
+        }
+    }
+
+    /**
+     * Set the atlas base pointer and (re)build its mip chain. The level-0 mip is
+     * a byte-for-byte copy of the loaded atlas, so `base()` doubles as the raw
+     * tile-texel source.
+     * @param base  base address of the loaded atlas texels
+     * @param gam   the colour space the coarser levels are averaged through
+     */
+    pub(crate) fn setBase(mut self, base : i64, gam : Gamma) : void {
+        if (self.mips == 0) {
+            self.mips = Mem::take((mipChainTexels() as i64) * 4);
+        }
+        buildMipChain(base, self.mips, gam);
+    }
+
+    /**
+     * Base pointer to the full-resolution atlas texels (mip level 0). Callers
+     * that need raw tile texels (e.g. the HUD hotbar icons) read it here instead
+     * of keeping the original atlas buffer alive.
+     * @return base address of the level-0 atlas texels
+     */
+    pub(crate) fn base(self) : i64 {
+        return self.mips;
+    }
+
+    /**
+     * The mip-chain view the rasteriser samples (buffer + per-level tables).
+     * @return the atlas mip snapshot
+     */
+    fn mip(self) : MipAtlas {
+        return MipAtlas { mips: self.mips, mipOff: self.mipOff, mipSz: self.mipSz };
+    }
+}

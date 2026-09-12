@@ -1,0 +1,906 @@
+// chunkview — the world-face raster: one worker's share of the streamed
+// chunks, projected, lit, clipped and queued, then filled in parallel bands.
+//
+// The sibling of `mobview`, for terrain. Each `ChunkRenderer` is one
+// independent worker: it walks a stride of the chunk ring, projects every
+// baked face of the slots it owns, computes the per-CORNER light (smooth
+// light, ambient occlusion, the soft cast shadow and the coloured bounce,
+// through `cornerlight`), near-clips in camera space and appends triangles to
+// its own queue. Nothing is shared between workers, so nothing needs a lock.
+//
+// The queue is then filled by screen-column bands: every band owns its pixels,
+// so no two threads touch the same z-buffer word, and each band walks every
+// worker's queue. The split is deliberate — the build is one job and the fill
+// is another, and measured, the build is the expensive two thirds.
+
+use smalt::Mem;
+use crate::kernel::krender::raster::{
+    rasterTriTex, sunExposure,
+    RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected,
+    VertAttribs, ScreenScratch,
+};
+use crate::kernel::krender::gamma::{ Gamma, LinRgb };
+use crate::kernel::krender::cornerlight::{ CornerLight };
+use crate::kernel::krender::sky::{ DayState };
+use crate::kernel::seams::{ CornerProbe, CornerSample };
+use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
+use crate::kernel::kentity::player::Player;
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::kernel::kblock::blocks::{ fluidLevel, isWater, isSource };
+use crate::configs::blocks::{ Block };
+use crate::configs::face::{ FaceDir };
+use crate::configs::light::{ Light };
+use crate::configs::render::{ Render };
+use crate::configs::time::{ Daylight };
+use crate::configs::water::{ Water };
+use crate::configs::world::{ World };
+
+/**
+ * Reconstruct a FaceDir from its packed discriminant (0..5). The mesher packs
+ * the direction into each face's `ftile` slot (see ChunkManager.addFace) to
+ * avoid a parallel direction array; this turns it back into the enum so the
+ * renderer matches on it by name.
+ * @param d  the direction discriminant, 0..5
+ * @return the matching FaceDir
+ */
+fn faceDirFrom(d : i32) : FaceDir {
+    return match d {
+        0 => FaceDir::PosX,
+        1 => FaceDir::NegX,
+        2 => FaceDir::Top,
+        3 => FaceDir::Bottom,
+        4 => FaceDir::PosZ,
+        _ => FaceDir::NegZ,
+    };
+}
+
+/**
+ * A chunk is worth drawing only if any part of it is in front of the camera and
+ * within render distance. We test the chunk centre against the view forward with
+ * a margin of the chunk's half-diagonal, so a whole chunk behind the player is
+ * skipped without touching its thousands of faces — the biggest per-frame win.
+ * A free function so both the world-face pass (ChunkRenderer) and the torch pass
+ * (Renderer) share the one visibility rule.
+ * @param p   player providing the eye position and orientation
+ * @param cx  chunk x index
+ * @param cz  chunk z index
+ * @return true if the chunk should be drawn
+ */
+fn chunkVisible(p : Player, cx : i32, cz : i32) : bool {
+    let s : f64 = World::CHUNK_SIZE as f64;
+    let wx : f64 = (cx as f64) * s + s * 0.5;
+    let wz : f64 = (cz as f64) * s + s * 0.5;
+    let dx : f64 = wx - p.eye.x;
+    let dz : f64 = wz - p.eye.z;
+    let dist2 : f64 = dx * dx + dz * dz;
+    let far : f64 = Render::DRAW_DIST + s;
+    if (dist2 > far * far) {
+        return false;
+    }
+    // forward = (-siny, cosy); keep chunks whose centre is ahead or within a
+    // half-diagonal (~0.71·chunk) behind the eye.
+    let ahead : f64 = dx * (0.0 - p.siny) + dz * p.cosy;
+    return ahead > 0.0 - s;
+}
+
+/**
+ * ONE world-face raster worker. It owns the projection / near-clip scratch, the
+ * per-direction face corner + UV tables and its own triangle queue: the frame
+ * builds six of these over disjoint strides of the chunk ring, then fills every
+ * queue in disjoint parallel column bands.
+ *
+ * The per-corner light is read through the `LightSample` seam — one
+ * `cornerSample` per corner, carrying sun, sky access and bounce — while the
+ * baked mesh FIELDS (fx/fy/fz/ftile/flight/fao) and the water geometry
+ * (worldGet / blockBoxHeight) still come off the concrete ChunkManager.
+ */
+class ChunkRenderer {
+    coff : i32[],
+    uvu : i32[],
+    uvv : i32[],
+    cs : ScreenScratch,   // screen-space scratch (pixel x/y + inverse depth)
+    ca : VertAttribs,     // camera-space input verts (pos + uv + Gouraud colour) …
+    cb : VertAttribs,     // … and the near-clipped output verts
+    triBuf : RasterTri[], // world-face triangle queue: the world pass projects/
+                          // lights/clips into here once, then worker threads
+                          // rasterise it in parallel column bands (tiled render)
+    triN : i32,           // number of queued triangles this frame
+    atlas : MipAtlas,     // ── per-frame render context (set in drawWorld) ──
+    gam : Gamma,          // sRGB ↔ linear tables (owned by GammaTables)
+    fog : Rgb,            // distance-fog colour (this frame's sky colour)
+    day : DayState,       // sun / daylight snapshot (per-corner light + glint)
+    lcurve : i64,         // brightness curve (owned by DayLighting)
+    /**
+     * Triangles queued in the last frame, and the microseconds the banded
+     * FILL took of the world pass.
+     *
+     * Two numbers because the world pass is two very different jobs, and
+     * which of them costs is not guessable: the queue build projects,
+     * near-clips and lights every face on ONE thread, then the fill
+     * spreads over twelve. Measured, the build is roughly two thirds —
+     * which is the opposite of where a "the software rasteriser is slow"
+     * intuition sends you.
+     */
+    pub(crate) queuedTris : i32 = 0,
+
+    /** Microseconds spent in the banded fill, accumulated over the run. */
+    pub(crate) fillUs : i64 = 0,
+
+    /**
+     * Allocate the triangle queue, the projection / clipping scratch buffers and
+     * the face corner tables, and seed the (overwritten-per-frame) context.
+     */
+    constructor() {
+        self.triBuf = malloc<RasterTri>(Render::TRI_QUEUE_CAP);
+        self.triN = 0;
+        self.coff = malloc<i32>(72);
+        self.uvu = malloc<i32>(24);
+        self.uvv = malloc<i32>(24);
+        // Screen-space scratch sized for a near-clipped polygon (≤ 5 verts).
+        self.cs = ScreenScratch { sx: Mem::take(8 * 8), sy: Mem::take(8 * 8), iz: Mem::take(8 * 8) };
+        // Camera-space input (ca) and clipped output (cb) vertex buffers: x, y,
+        // z (depth), the u, v texture coordinates and the r, g, b Gouraud colour
+        // per vertex — the same 16 disjoint allocBytes buffers, grouped.
+        self.ca = VertAttribs {
+            x: Mem::take(8 * 8), y: Mem::take(8 * 8), z: Mem::take(8 * 8),
+            u: Mem::take(8 * 8), v: Mem::take(8 * 8),
+            r: Mem::take(8 * 8), g: Mem::take(8 * 8), b: Mem::take(8 * 8),
+        };
+        self.cb = VertAttribs {
+            x: Mem::take(8 * 8), y: Mem::take(8 * 8), z: Mem::take(8 * 8),
+            u: Mem::take(8 * 8), v: Mem::take(8 * 8),
+            r: Mem::take(8 * 8), g: Mem::take(8 * 8), b: Mem::take(8 * 8),
+        };
+        self.atlas = MipAtlas { mips: 0, mipOff: 0, mipSz: 0 };
+        self.gam = Gamma { toLin: 0, toByte: 0, scale: 0.0 };
+        self.fog = Rgb { r: Daylight::DAY_SKY_R, g: Daylight::DAY_SKY_G, b: Daylight::DAY_SKY_B };
+        self.day = DayState {
+            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
+            daylight: 1.0,
+            skyColR: Daylight::DAY_SKY_R, skyColG: Daylight::DAY_SKY_G, skyColB: Daylight::DAY_SKY_B,
+        };
+        self.lcurve = 0;
+        self.fillTable();
+    }
+
+    /**
+     * Store one face corner's block-space offset and tile UV into the
+     * corner / UV tables.
+     * @param dir  face direction index (0..5)
+     * @param k    corner index within the face (0..3)
+     * @param ox   x offset of the corner in block space
+     * @param oy   y offset of the corner in block space
+     * @param oz   z offset of the corner in block space
+     * @param u    tile u coordinate for the corner
+     * @param v    tile v coordinate for the corner
+     */
+    fn setCorner(mut self, dir : i32, k : i32, ox : i32, oy : i32, oz : i32, u : i32, v : i32) : void {
+        let b : i32 = (dir * 4 + k) * 3;
+        self.coff[b] = ox;
+        self.coff[b + 1] = oy;
+        self.coff[b + 2] = oz;
+        let q : i32 = dir * 4 + k;
+        self.uvu[q] = u;
+        self.uvv[q] = v;
+    }
+
+    /**
+     * Fill the per-direction face corner / UV tables for all 6 cube faces.
+     */
+    fn fillTable(mut self) : void {
+        self.setCorner(0, 0, 1, 0, 0, 0, 1);
+        self.setCorner(0, 1, 1, 0, 1, 1, 1);
+        self.setCorner(0, 2, 1, 1, 1, 1, 0);
+        self.setCorner(0, 3, 1, 1, 0, 0, 0);
+        self.setCorner(1, 0, 0, 0, 0, 0, 1);
+        self.setCorner(1, 1, 0, 1, 0, 0, 0);
+        self.setCorner(1, 2, 0, 1, 1, 1, 0);
+        self.setCorner(1, 3, 0, 0, 1, 1, 1);
+        self.setCorner(2, 0, 0, 1, 0, 0, 0);
+        self.setCorner(2, 1, 1, 1, 0, 1, 0);
+        self.setCorner(2, 2, 1, 1, 1, 1, 1);
+        self.setCorner(2, 3, 0, 1, 1, 0, 1);
+        self.setCorner(3, 0, 0, 0, 0, 0, 0);
+        self.setCorner(3, 1, 0, 0, 1, 0, 1);
+        self.setCorner(3, 2, 1, 0, 1, 1, 1);
+        self.setCorner(3, 3, 1, 0, 0, 1, 0);
+        self.setCorner(4, 0, 0, 0, 1, 0, 1);
+        self.setCorner(4, 1, 1, 0, 1, 1, 1);
+        self.setCorner(4, 2, 1, 1, 1, 1, 0);
+        self.setCorner(4, 3, 0, 1, 1, 0, 0);
+        self.setCorner(5, 0, 0, 0, 0, 0, 1);
+        self.setCorner(5, 1, 0, 1, 0, 0, 0);
+        self.setCorner(5, 2, 1, 1, 0, 1, 0);
+        self.setCorner(5, 3, 1, 0, 0, 1, 1);
+    }
+
+    // ── Projection & near-plane clipping ──
+
+    /**
+     * Transform a world point into camera space (post yaw + pitch) through the
+     * shared Camera and store it into the `ca*` input buffers at slot k. No
+     * perspective divide yet — that happens after near-plane clipping.
+     * @param cam  the camera (eye + orientation + projection width)
+     * @param w    the world-space point
+     * @param k    scratch slot index to store the result in
+     */
+    fn toCam(self, cam : Camera, w : Vec3, k : i32) : void {
+        let c : Vec3 = cam.toCamera(w);
+        Mem::putRealOf(self.ca.x, k, c.x);
+        Mem::putRealOf(self.ca.y, k, c.y);
+        Mem::putRealOf(self.ca.z, k, c.z);
+    }
+
+    /**
+     * Write the linear blend of input vertices j and i at parameter t
+     * (the near-plane crossing) into output slot o.
+     * @param j  first input vertex slot
+     * @param i  second input vertex slot
+     * @param t  blend parameter (0 at j, 1 at i)
+     * @param o  output vertex slot
+     */
+    fn emitLerp(self, j : i32, i : i32, t : f64, o : i32) : void {
+        Mem::putRealOf(self.cb.x, o, Mem::realOf(self.ca.x, j) + (Mem::realOf(self.ca.x, i) - Mem::realOf(self.ca.x, j)) * t);
+        Mem::putRealOf(self.cb.y, o, Mem::realOf(self.ca.y, j) + (Mem::realOf(self.ca.y, i) - Mem::realOf(self.ca.y, j)) * t);
+        Mem::putRealOf(self.cb.z, o, Mem::realOf(self.ca.z, j) + (Mem::realOf(self.ca.z, i) - Mem::realOf(self.ca.z, j)) * t);
+        Mem::putRealOf(self.cb.u, o, Mem::realOf(self.ca.u, j) + (Mem::realOf(self.ca.u, i) - Mem::realOf(self.ca.u, j)) * t);
+        Mem::putRealOf(self.cb.v, o, Mem::realOf(self.ca.v, j) + (Mem::realOf(self.ca.v, i) - Mem::realOf(self.ca.v, j)) * t);
+        Mem::putRealOf(self.cb.r, o, Mem::realOf(self.ca.r, j) + (Mem::realOf(self.ca.r, i) - Mem::realOf(self.ca.r, j)) * t);
+        Mem::putRealOf(self.cb.g, o, Mem::realOf(self.ca.g, j) + (Mem::realOf(self.ca.g, i) - Mem::realOf(self.ca.g, j)) * t);
+        Mem::putRealOf(self.cb.b, o, Mem::realOf(self.ca.b, j) + (Mem::realOf(self.ca.b, i) - Mem::realOf(self.ca.b, j)) * t);
+    }
+
+    /**
+     * Copy input vertex i to output slot o.
+     * @param i  input vertex slot
+     * @param o  output vertex slot
+     */
+    fn copyVert(self, i : i32, o : i32) : void {
+        Mem::putRealOf(self.cb.x, o, Mem::realOf(self.ca.x, i));
+        Mem::putRealOf(self.cb.y, o, Mem::realOf(self.ca.y, i));
+        Mem::putRealOf(self.cb.z, o, Mem::realOf(self.ca.z, i));
+        Mem::putRealOf(self.cb.u, o, Mem::realOf(self.ca.u, i));
+        Mem::putRealOf(self.cb.v, o, Mem::realOf(self.ca.v, i));
+        Mem::putRealOf(self.cb.r, o, Mem::realOf(self.ca.r, i));
+        Mem::putRealOf(self.cb.g, o, Mem::realOf(self.ca.g, i));
+        Mem::putRealOf(self.cb.b, o, Mem::realOf(self.ca.b, i));
+    }
+
+    /**
+     * Which corner the fan triangulates from.
+     *
+     * A quad is drawn as two triangles, so one of its two diagonals becomes a
+     * seam: the light is exact along it and interpolated across everything
+     * else. Fanning always from corner 0 puts that seam in the same place
+     * regardless of where the light actually varies, and on a quad with one
+     * dark corner — the inside of every step, ledge and tree trunk — the wrong
+     * choice smears the darkness diagonally across the face instead of letting
+     * it wrap the corner.
+     *
+     * The seam belongs on the diagonal joining the DARKER pair, which is the
+     * quad-flip rule from the smooth-lighting literature written as a fan
+     * origin. Only a quad that survived the near clip whole can be flipped;
+     * anything else is already a fan of its own shape.
+     * @param n  vertices in the clipped polygon
+     * @return the corner index to fan from (0 or 1)
+     */
+    fn fanOrigin(self, n : i32) : i32 {
+        if (n != 4) {
+            return 0;
+        }
+        let d02 : f64 = self.cornerLum(0) + self.cornerLum(2);
+        let d13 : f64 = self.cornerLum(1) + self.cornerLum(3);
+        if (d02 > d13) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * The baked Gouraud brightness at one clipped corner, as a plain sum of its
+     * channels — only the ORDER of two of these ever matters.
+     * @param i  index into the clipped-polygon scratch
+     * @return the corner's brightness
+     */
+    fn cornerLum(self, i : i32) : f64 {
+        return Mem::realOf(self.cb.r, i) + Mem::realOf(self.cb.g, i) + Mem::realOf(self.cb.b, i);
+    }
+
+    /**
+     * Vertex `i` of the clipped polygon, gathered into one `RasterVert`.
+     *
+     * The clip and projection stages write eight parallel scratch arrays
+     * (screen x/y, inverse depth, UV, and the baked Gouraud colour); the
+     * rasteriser wants them as one value. Fan-triangulating a polygon
+     * reads the same corner three times over, so the gather lives here
+     * instead of being spelled out per triangle corner.
+     *
+     * @param i  index into the clipped-polygon scratch
+     * @return the corner as the rasteriser's vertex
+     */
+    fn clippedVert(self, i : i32) : RasterVert {
+        return RasterVert {
+            sx: Mem::realOf(self.cs.sx, i),
+            sy: Mem::realOf(self.cs.sy, i),
+            iz: Mem::realOf(self.cs.iz, i),
+            u: Mem::realOf(self.cb.u, i),
+            v: Mem::realOf(self.cb.v, i),
+            tr: Mem::realOf(self.cb.r, i),
+            tg: Mem::realOf(self.cb.g, i),
+            tb: Mem::realOf(self.cb.b, i),
+        };
+    }
+
+    /**
+     * Clip the `nIn`-vertex camera-space polygon in `ca*` against the
+     * near plane (depth ≥ `Screen::NEAR_PLANE`) into `cb*` (Sutherland–Hodgman),
+     * interpolating position + UV at each crossing. Replacing the old
+     * "drop the whole face if any corner is too close" rule is what
+     * removes the holes / texture smear when the camera hugs a block.
+     * @param nIn  number of input vertices in the `ca*` buffers
+     * @return number of output vertices written to the `cb*` buffers
+     */
+    fn clipNear(self, nIn : i32) : i32 {
+        let outN : i32 = 0;
+        let j : i32 = nIn - 1;
+        let i : i32 = 0;
+        while (i < nIn) {
+            let zi : f64 = Mem::realOf(self.ca.z, i);
+            let zj : f64 = Mem::realOf(self.ca.z, j);
+            let inI : bool = zi >= Screen::NEAR_PLANE;
+            let inJ : bool = zj >= Screen::NEAR_PLANE;
+            if (inI != inJ) {
+                let t : f64 = (Screen::NEAR_PLANE - zj) / (zi - zj);
+                self.emitLerp(j, i, t, outN);
+                outN = outN + 1;
+            }
+            if (inI) {
+                self.copyVert(i, outN);
+                outN = outN + 1;
+            }
+            j = i;
+            i = i + 1;
+        }
+        return outN;
+    }
+
+    /**
+     * Classify one column at a corner for the surface averager:
+     *   2.0  → a source, or water with water directly above (a column) — stays
+     *          full so lakes are flat and waterfalls solid;
+     *   0..1 → a free flowing surface, height = level/8;
+     *   -1.0 → air — counts as height 0, so a flowing edge / drop ramps down;
+     *   -2.0 → solid — ignored.
+     * @param man  the chunk manager
+     * @param wx   world x
+     * @param y    world y (the face's layer)
+     * @param wz   world z
+     * @return the classification value described above
+     */
+    fn cornerSample(self, man : ChunkManager, wx : i32, y : i32, wz : i32) : f64 {
+        let id : Block = man.worldGet(ivec3(wx, y, wz));
+        if (id == Block::Air) {
+            return 0.0 - 1.0;
+        }
+        if (!isWater(id)) {
+            return 0.0 - 2.0;
+        }
+        if (isSource(id) || isWater(man.worldGet(ivec3(wx, y + 1, wz)))) {
+            return 2.0;
+        }
+        let lvl : i32 = fluidLevel(id);
+        return (lvl as f64) / 8.0;
+    }
+
+    /**
+     * Sloped-surface height at a top corner shared by up to four water columns,
+     * Minecraft-style. A source or falling column keeps the corner full (lakes
+     * stay flat, waterfalls stay solid). Otherwise it averages the flowing
+     * surfaces AND counts adjacent air as 0, so a free water edge — and the lip
+     * of a drop — ramps down in a rounded slope instead of a hard step, keeping
+     * the surface connected to the fall with no void.
+     * @param man  the chunk manager
+     * @param cx   corner world x (a block boundary)
+     * @param y    world y (the face's layer)
+     * @param cz   corner world z (a block boundary)
+     * @return the corner height fraction (0..1)
+     */
+    fn waterCornerY(self, man : ChunkManager, cx : i32, y : i32, cz : i32) : f64 {
+        let s0 : f64 = self.cornerSample(man, cx - 1, y, cz - 1);
+        let s1 : f64 = self.cornerSample(man, cx, y, cz - 1);
+        let s2 : f64 = self.cornerSample(man, cx - 1, y, cz);
+        let s3 : f64 = self.cornerSample(man, cx, y, cz);
+        if (s0 > 1.5 || s1 > 1.5 || s2 > 1.5 || s3 > 1.5) {
+            return 1.0;   // a source / column corner stays full height
+        }
+        // Air contributes Water::EDGE_HEIGHT (not a hard 0), so a flowing
+        // edge keeps a bit of body and only eases down — a gentle lip rather
+        // than a steep "skateboard ramp" right at the border.
+        let sum : f64 = 0.0;
+        let cnt : i32 = 0;
+        if (s0 >= 0.0) {
+            sum = sum + s0;
+            cnt = cnt + 1;
+        } else if (s0 > 0.0 - 1.5) {
+            sum = sum + Water::EDGE_HEIGHT;
+            cnt = cnt + 1;
+        }
+        if (s1 >= 0.0) {
+            sum = sum + s1;
+            cnt = cnt + 1;
+        } else if (s1 > 0.0 - 1.5) {
+            sum = sum + Water::EDGE_HEIGHT;
+            cnt = cnt + 1;
+        }
+        if (s2 >= 0.0) {
+            sum = sum + s2;
+            cnt = cnt + 1;
+        } else if (s2 > 0.0 - 1.5) {
+            sum = sum + Water::EDGE_HEIGHT;
+            cnt = cnt + 1;
+        }
+        if (s3 >= 0.0) {
+            sum = sum + s3;
+            cnt = cnt + 1;
+        } else if (s3 > 0.0 - 1.5) {
+            sum = sum + Water::EDGE_HEIGHT;
+            cnt = cnt + 1;
+        }
+        if (cnt == 0) {
+            return 1.0;
+        }
+        return sum / (cnt as f64);
+    }
+
+    // ── Per-face baked-light reads through the split light seams ──
+
+    /**
+     * Where one corner of a face samples the light volumes: its own air cell,
+     * and the two in-plane steps to the other three cells meeting there.
+     *
+     * The corner's cell is the face's probe cell advanced to the far end of the
+     * merged run when the corner sits at that end — a greedy quad is up to
+     * `MESH_MAX_RUN` cells long, and its far corner has to read the light where
+     * it actually is. The tangents are the corner's own ±1 block offsets, taken
+     * on the two axes that are not the face normal.
+     * @param cell     the face's air probe cell (its origin corner)
+     * @param off      the corner's block offset within the face (0 or 1 per axis)
+     * @param naxis    the face normal axis (0 = X, 1 = Y, 2 = Z)
+     * @param advX     cells to the far end of the run along X (0 if the run is not)
+     * @param advZ     cells to the far end of the run along Z (0 if the run is not)
+     * @return the corner's probe
+     */
+    fn cornerProbe(self, cell : IVec3, off : IVec3, naxis : i32, advX : i32, advZ : i32) : CornerProbe {
+        let sgx : i32 = off.x * 2 - 1;
+        let sgy : i32 = off.y * 2 - 1;
+        let sgz : i32 = off.z * 2 - 1;
+        let base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
+        match naxis {
+            0 => {
+                return CornerProbe { base: base, t1: ivec3(0, sgy, 0), t2: ivec3(0, 0, sgz) };
+            }
+            1 => {
+                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, 0, sgz) };
+            }
+            _ => {
+                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, sgy, 0) };
+            }
+        }
+    }
+
+    /**
+     * The ambient-sky occlusion factor of a corner sample: the baked
+     * hemispherical sky access (ray-traced AO) mapped into [`Light::AO_SKY_MIN`, 1], so
+     * valleys / recesses / canopy darken the ambient sky light.
+     * @param s  the corner's light sample
+     * @return the sky-AO factor in [`Light::AO_SKY_MIN`, 1]
+     */
+    fn skyAOFactor(self, s : CornerSample) : f64 {
+        let skyAcc : f64 = (s.sky as f64) * 0.00392157;
+        return Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * skyAcc;
+    }
+
+    /**
+     * The one-bounce coloured indirect tint of a corner sample, unpacked to a
+     * 0..2 RGB multiplier triple.
+     * @param s  the corner's light sample
+     * @return the bounce tint as (r, g, b) multipliers
+     */
+    fn bounceTint(self, s : CornerSample) : Vec3 {
+        return vec3(
+            (((s.bounce >> 16) & 0xFF) as f64) * 0.0078125,
+            (((s.bounce >> 8) & 0xFF) as f64) * 0.0078125,
+            ((s.bounce & 0xFF) as f64) * 0.0078125);
+    }
+
+    // ── World faces (water surface heights, face baking) ──
+
+    /**
+     * Project, cull, shade and rasterize one baked world face into the triangle
+     * queue.
+     * @param man     chunk manager holding the baked face arrays
+     * @param idx     index of the face to draw
+     * @param cam     the camera (eye + orientation + projection width)
+     * @param phase   animation time phase (scrolls flowing-water textures)
+     */
+    fn renderFace(mut self, man : ChunkManager, idx : i32, cam : Camera, phase : f64) : void {
+        let x : i32 = man.faces.fx[idx];
+        let y : i32 = man.faces.fy[idx];
+        let z : i32 = man.faces.fz[idx];
+        // Unpack the direction and atlas tile from the packed ftile slot.
+        let packed : i32 = man.faces.ftile[idx];
+        let dir : FaceDir = faceDirFrom(packed / 256);
+        let isWaterFace : bool = (packed % 256) == Tile::WATER;
+        // Partial, floor-resting blocks (thin snow, slabs later) render at their
+        // real box height (top + side tops lowered to y + boxH), like a short
+        // water surface. blockBoxHeight is the single authority (1.0 = full cube).
+        let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
+        let isPartialFace : bool = boxH < 1.0;
+        // Cells this face spans, from the mesher's greedy merge. The quad is
+        // stretched along one axis and the tile repeats over it — which the
+        // sampler already does for scrolled water, so `wrap` is all it takes.
+        //
+        // Which axis needs no table: for every direction the corner's `u` is
+        // exactly the corner's offset along a HORIZONTAL axis — X for the top,
+        // the bottom and the Z-facing walls, Z for the X-facing ones. So the
+        // run multiplies the offset and the `u` together, and the two cannot
+        // disagree.
+        let run : i32 = man.faces.frun[idx];
+        let runF : f64 = run as f64;
+        let runX : f64 = 1.0;
+        let runZ : f64 = 1.0;
+        if (dir == FaceDir::PosX || dir == FaceDir::NegX) {
+            runZ = runF;
+        } else {
+            runX = runF;
+        }
+        let nx : f64 = 0.0;
+        let ny : f64 = 0.0;
+        let nz : f64 = 0.0;
+        match dir {
+            FaceDir::PosX => {
+                nx = 1.0;
+            }
+            FaceDir::NegX => {
+                nx = 0.0 - 1.0;
+            }
+            FaceDir::Top => {
+                ny = 1.0;
+            }
+            FaceDir::Bottom => {
+                ny = 0.0 - 1.0;
+            }
+            FaceDir::PosZ => {
+                nz = 1.0;
+            }
+            _ => {
+                nz = 0.0 - 1.0;
+            }
+        }
+
+        // The centre of the MERGED quad, so back-face culling and the distance
+        // cut both measure the thing that is actually drawn.
+        let fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
+        let fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
+        let fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
+        let vx : f64 = cam.eye.x - fcx;
+        let vy : f64 = cam.eye.y - fcy;
+        let vz : f64 = cam.eye.z - fcz;
+        // Water surfaces AND the top of a partial block (thin snow, a slab) draw
+        // double-sided so the surface stays visible from below; every other face
+        // back-face culls. Without this the raised partial top back-face culls
+        // the instant the eye drops below its plane (y + boxH) and the top
+        // "disappears as you descend" — worse the deeper the block (higher plane).
+        let facing : f64 = vx * nx + vy * ny + vz * nz;
+        let topPartial : bool = isPartialFace && ny > 0.0;
+        if (!isWaterFace && !topPartial && facing <= 0.0) {
+            return;
+        }
+        if (vx * vx + vz * vz > Render::DRAW_DIST * Render::DRAW_DIST) {
+            return;
+        }
+
+        // Flow animation: flowing water scrolls its texture along the flow
+        // direction (toward lower level). Still lakes have no gradient, so they
+        // don't scroll.
+        let flowU : f64 = 0.0;
+        let flowV : f64 = 0.0;
+        if (isWaterFace) {
+            let lpx : i32 = fluidLevel(man.worldGet(ivec3(x + 1, y, z)));
+            let lnx : i32 = fluidLevel(man.worldGet(ivec3(x - 1, y, z)));
+            let lpz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z + 1)));
+            let lnz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z - 1)));
+            let tscroll : f64 = phase * Water::FLOW_SPEED;
+            flowU = ((lpx - lnx) as f64) * tscroll;
+            flowV = ((lpz - lnz) as f64) * tscroll;
+        }
+
+        // Face-direction (Lambert) shading + the directional sun shadow, shared
+        // by all 4 corners (computed once before the per-corner light below).
+        let bright : f64 = self.day.shade(vec3(nx, ny, nz));
+        if (isWaterFace && facing <= 0.0) {
+            bright = bright * 0.62;   // underside / far face of water, dimmer
+        }
+        // Directional sun shadow: if the air cell this face looks into is in the
+        // sun's cast shadow, drop toward ambient (keeping Render::SHADOW_KEEP of
+        // the direct term). sunlitGet defaults to 1 for non-sky cells, so caves /
+        // roofed faces are untouched without a separate sky-light gate.
+        // The shadow-probe cell is just the neighbour in the face-normal
+        // direction; dir already carries that, so match on it instead of
+        // re-deriving the offset from the float normal three times.
+        let sbx : i32 = x;
+        let sby : i32 = y;
+        let sbz : i32 = z;
+        match dir {
+            FaceDir::PosX => { sbx = x + 1; }
+            FaceDir::NegX => { sbx = x - 1; }
+            FaceDir::Top => { sby = y + 1; }
+            FaceDir::Bottom => { sby = y - 1; }
+            FaceDir::PosZ => { sbz = z + 1; }
+            _ => { sbz = z - 1; }
+        }
+        let shadowCell : IVec3 = ivec3(sbx, sby, sbz);
+        // `bright` is now the pure Lambert (sun-direction) term; the cast shadow
+        // is applied PER CORNER below (smooth, face-independent), not flattened
+        // over the whole face here — that's what removes the block staircase.
+
+        // Load the 4 corners into camera space + their tile UVs, and bake each
+        // corner's light colour (smooth light + AO + per-corner soft shadow) into
+        // the car/cag/cab inputs so clipNear interpolates colour like it does UV.
+        // A water face's top corners are dropped to a Minecraft-style sloped
+        // surface: each corner takes the average height of the water columns
+        // meeting at it, so adjacent levels join in a continuous ramp with no
+        // vertical "façade" gaps between layers.
+        let di : i32 = dir as i32;
+        let naxis : i32 = di / 2;   // normal axis: 0=X, 1=Y, 2=Z
+        // The merged run's far end, in cells, on whichever axis it runs along:
+        // where a corner sitting at that end reads its light.
+        let runAdvX : i32 = 0;
+        let runAdvZ : i32 = 0;
+        if (naxis == 0) {
+            runAdvZ = run - 1;
+        } else {
+            runAdvX = run - 1;
+        }
+        let q : i32 = di * 4;
+        let k : i32 = 0;
+        while (k < 4) {
+            let b : i32 = (di * 4 + k) * 3;
+            let oxv : i32 = self.coff[b];
+            let oyv : i32 = self.coff[b + 1];
+            let ozv : i32 = self.coff[b + 2];
+            let cornerY : f64 = (y as f64) + (oyv as f64);
+            if (isWaterFace && oyv > 0) {
+                cornerY = (y as f64) + self.waterCornerY(man, x + oxv, y, z + ozv);
+            } else if (isPartialFace && oyv > 0) {
+                cornerY = (y as f64) + boxH;
+            }
+            self.toCam(
+                cam,
+                vec3((x as f64) + (oxv as f64) * runX, cornerY, (z as f64) + (ozv as f64) * runZ),
+                k
+            );
+            Mem::putRealOf(self.ca.u, k, (self.uvu[q + k] as f64) * runF + flowU);
+            Mem::putRealOf(self.ca.v, k, (self.uvv[q + k] as f64) + flowV);
+            // Every smooth term is read AT THIS CORNER, through one probe: the
+            // corner's own air cell and the two in-plane steps to the other
+            // three cells meeting there. On a merged quad that cell is the far
+            // end of the run, not the face's origin — a term sampled at the
+            // origin would be spread over eight blocks of surface.
+            let smp : CornerSample = man.cornerSample(
+                self.cornerProbe(shadowCell, ivec3(oxv, oyv, ozv), naxis, runAdvX, runAdvZ));
+
+            let visK : f64 = (smp.sun as f64) * 0.00392157;
+            let keepK : f64 = Render::SHADOW_KEEP + (1.0 - Render::SHADOW_KEEP) * visK;
+            let brightK : f64 = sunExposure(bright, keepK);
+
+            // Per-corner smooth light: sky/block nibbles averaged at bake time,
+            // through the exponential curve (sky dimmed by daylight), times the
+            // per-corner shaded brightness and the AO factor.
+            let lb : i32 = Mem::byteAt(man.faces.flight, (idx * 4 + k) as i64);
+            let skyLk : i32 = (lb >> 4) & 0xF;
+            let blkLk : i32 = lb & 0xF;
+            let aok : i32 = Mem::byteAt(man.faces.fao, (idx * 4 + k) as i64);
+            let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
+            let lit : CornerLight = CornerLight {
+                sky: Mem::realOf(self.lcurve, skyLk) * self.day.daylight * self.skyAOFactor(smp),
+                block: Mem::realOf(self.lcurve, blkLk),
+                bright: brightK,
+                ao: aoFac,
+            };
+
+            // Warm sun / cool shade by how directly THIS corner is sunlit, ×
+            // the one-bounce tint. It rides on the sky term alone, so a
+            // torch-lit cave keeps its own colour without a share to weigh.
+            let directK : f64 = 0.0;
+            if (brightK > Render::AMBIENT) {
+                directK = (brightK - Render::AMBIENT) / (1.0 - Render::AMBIENT);
+            }
+            let wsunK : f64 = directK * self.day.daylight;
+            let bnc : Vec3 = self.bounceTint(smp);
+            let cc : LinRgb = lit.colour(LinRgb {
+                r: (Light::SHADE_TINT_R + (Light::SUN_TINT_R - Light::SHADE_TINT_R) * wsunK) * bnc.x,
+                g: (Light::SHADE_TINT_G + (Light::SUN_TINT_G - Light::SHADE_TINT_G) * wsunK) * bnc.y,
+                b: (Light::SHADE_TINT_B + (Light::SUN_TINT_B - Light::SHADE_TINT_B) * wsunK) * bnc.z,
+            });
+
+            if (isWaterFace) {
+                // View vector from this corner to the eye.
+                let vx : f64 = cam.eye.x - ((x + oxv) as f64);
+                let vy : f64 = cam.eye.y - cornerY;
+                let vz : f64 = cam.eye.z - ((z + ozv) as f64);
+                let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
+                if (vl < 0.0001) {
+                    vl = 0.0001;
+                }
+                vx = vx / vl;
+                vy = vy / vl;
+                vz = vz / vl;
+                // Sun glint: half-vector specular, cos^32, gated by sun visibility
+                // and daylight. A strong warm multiplier that bloom turns to gold.
+                let hx : f64 = vx + self.day.sunX;
+                let hy : f64 = vy + self.day.sunY;
+                let hz : f64 = vz + self.day.sunZ;
+                let hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
+                if (hl < 0.0001) {
+                    hl = 0.0001;
+                }
+                let ndh : f64 = (nx * hx + ny * hy + nz * hz) / hl;
+                if (ndh < 0.0) {
+                    ndh = 0.0;
+                }
+                let s2 : f64 = ndh * ndh;
+                let s4 : f64 = s2 * s2;
+                let s8 : f64 = s4 * s4;
+                let s16 : f64 = s8 * s8;
+                let spec : f64 = s16 * s16 * visK * self.day.daylight * Water::SPEC_STRENGTH;
+                // Fresnel: brighter at grazing view angles (sky-reflection sheen).
+                let ndv : f64 = nx * vx + ny * vy + nz * vz;
+                if (ndv < 0.0) {
+                    ndv = 0.0;
+                }
+                let om : f64 = 1.0 - ndv;
+                let om2 : f64 = om * om;
+                let fres : f64 = Water::F0 + (1.0 - Water::F0) * om2 * om2 * om;
+                let fboost : f64 = 1.0 + fres * Water::FRESNEL_STRENGTH;
+                cc.r = cc.r * fboost * (1.0 + spec * 1.10);
+                cc.g = cc.g * fboost * (1.0 + spec * 1.00);
+                cc.b = cc.b * fboost * (1.0 + spec * 0.72);
+            }
+            Mem::putRealOf(self.ca.r, k, cc.r);
+            Mem::putRealOf(self.ca.g, k, cc.g);
+            Mem::putRealOf(self.ca.b, k, cc.b);
+            k = k + 1;
+        }
+
+        // Clip against the near plane, then project the surviving polygon.
+        let n : i32 = self.clipNear(4);
+        if (n < 3) {
+            return;
+        }
+        let tile : i32 = packed % 256;
+        // Mip selection + filtering is now per pixel in the rasteriser
+        // (anisotropic), so no per-face mip is computed here.
+        // Per-corner light colour was baked into car/cag/cab and carried through
+        // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
+        let v : i32 = 0;
+        while (v < n) {
+            let sp : Projected = cam.screenOf(vec3(Mem::realOf(self.cb.x, v), Mem::realOf(self.cb.y, v), Mem::realOf(self.cb.z, v)));
+            Mem::putRealOf(self.cs.sx, v, sp.sx);
+            Mem::putRealOf(self.cs.sy, v, sp.sy);
+            Mem::putRealOf(self.cs.iz, v, sp.iz);
+            v = v + 1;
+        }
+
+        // Fan-triangulate the clipped polygon from vertex 0 and QUEUE each
+        // triangle (with its Gouraud per-vertex colours) — the parallel band
+        // rasteriser fills them later. The heavy per-face lighting above is thus
+        // done once, not once per worker.
+        // A merged quad tiles its texture, which is the same wrap the scrolled
+        // water surface asks for.
+        let wf : i32 = 0;
+        if (isWaterFace || run > 1) {
+            wf = 1;
+        }
+        let o : i32 = self.fanOrigin(n);
+        let t : i32 = 1;
+        while (t < n - 1) {
+            if (self.triN < Render::TRI_QUEUE_CAP) {
+                self.triBuf[self.triN] = RasterTri {
+                    a: self.clippedVert(o),
+                    b: self.clippedVert((o + t) % n),
+                    c: self.clippedVert((o + t + 1) % n),
+                    tile: tile,
+                    wrap: wf
+                };
+                self.triN = self.triN + 1;
+            }
+            t = t + 1;
+        }
+    }
+
+    /**
+     * Snapshot the per-frame render context onto this component.
+     *
+     * Copied onto every worker rather than threaded through each call:
+     * the band rasteriser and the projection both read it a hundred
+     * thousand times a frame, and it does not change within one.
+     * @param atlas   the texture atlas mip chain view
+     * @param gam     the colour space the texels are lit in
+     * @param fog     the distance-fog colour (this frame's sky colour)
+     * @param day     the day/night state (sun / daylight for corner shading)
+     * @param lcurve  the brightness-curve lookup
+     */
+    pub(crate) fn setFrame(mut self, atlas : MipAtlas, gam : Gamma, fog : Rgb, day : DayState, lcurve : i64) : void {
+        self.atlas = atlas;
+        self.gam = gam;
+        self.fog = fog;
+        self.day = day;
+        self.lcurve = lcurve;
+        self.triN = 0;
+    }
+
+    /**
+     * Project / light / clip the faces of every `stride`-th loaded chunk
+     * from `first` into THIS component's triangle queue.
+     *
+     * The share is taken by striding the slot ring rather than by cutting
+     * it into contiguous runs: chunks differ enormously in how many faces
+     * they carry — a hillside against open sky — and adjacent slots are
+     * the ones most likely to be alike, so contiguous shares are the ones
+     * that come out lopsided.
+     *
+     * Each worker owns its own queue and its own clipping scratch, so
+     * nothing here is shared and nothing needs a lock.
+     * @param man     chunk manager holding the loaded chunks and baked faces
+     * @param p       player providing the eye position (for chunk culling)
+     * @param cam     the camera (eye + orientation + projection width)
+     * @param phase   animation time phase (scrolls flowing-water textures)
+     * @param first   the first slot this worker takes
+     * @param stride  how many workers there are
+     */
+    pub(crate) fn buildSlots(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64,
+        first : i32, stride : i32) : void {
+        let slots : i32 = World::SPAN * World::SPAN;
+        let slot : i32 = first;
+        while (slot < slots) {
+            if (man.cols.loaded[slot] == 1 && chunkVisible(p, man.cols.cxs[slot], man.cols.czs[slot])) {
+                let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+                let n : i32 = man.faces.fcount[slot];
+                let fi : i32 = 0;
+                while (fi < n) {
+                    self.renderFace(man, base + fi, cam, phase);
+                    fi = fi + 1;
+                }
+            }
+            slot = slot + stride;
+        }
+        self.queuedTris = self.triN;
+    }
+
+    /**
+     * Rasterise the queued world triangles whose pixels fall in the column band
+     * [bx0, bx1). Each band is disjoint, so threads never touch the same z-buffer
+     * pixel. Called by the main thread and by `fillBandJob`. Reads this
+     * frame's atlas + fog off the component (set in drawWorld).
+     * @param fb   the render target (framebuffer + z-buffer + size)
+     * @param bx0  inclusive left screen column of this band
+     * @param bx1  exclusive right screen column of this band
+     */
+    pub(crate) fn rasterizeBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
+        let i : i32 = 0;
+        let band : Band = Band { x0: bx0, x1: bx1 };
+        while (i < self.triN) {
+            let tri : RasterTri = self.triBuf[i];
+            rasterTriTex(fb, tri, self.atlas, self.gam, self.fog, band);
+            i = i + 1;
+        }
+    }
+}
+
+/** Worker job: project / clip / light one worker's share of the chunks. */
+fn buildSlotsJob(r : ChunkRenderer, man : ChunkManager, p : Player, cam : Camera, phase : f64,
+    first : i32, stride : i32) : i32 {
+    r.buildSlots(man, p, cam, phase, first, stride);
+    return 0;
+}

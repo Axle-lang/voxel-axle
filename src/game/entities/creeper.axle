@@ -5,7 +5,7 @@
 // here (not on the calm base Mob) — only the creeper charges.
 
 use std::numeric::math;
-use crate::kernel::kentity::mob::{ Mob, MobState, Hostile, Explodes };
+use crate::kernel::kentity::mob::{ Mob, MobState, Hostile };
 use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::seams::{ VoxelQuery, VoxelEdit };
 use crate::kernel::kworld::blocksim::BlockSim;

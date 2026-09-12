@@ -23,7 +23,7 @@
 // lives in `game::ray`, the HUD in `krender::hud`.
 
 use smalt::{
-    AssetFile, BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, FramePacer, Mem,
+    BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, FramePacer, Mem,
     mixerLoop, MouseButton, Platform, PlatformError, Scancode, Surface, Window, WindowDesc,
 };
 use std::sys::process::{argc, argAt};
@@ -57,7 +57,6 @@ use crate::configs::screen::{ Screen };
 use crate::configs::time::{ Daylight };
 use crate::configs::water::{ Water };
 use crate::configs::world::{ World };
-use std::numeric::math;
 
 /**
  * Reads two keys as a -1/0/+1 movement axis.

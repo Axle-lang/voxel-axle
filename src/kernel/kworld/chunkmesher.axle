@@ -11,7 +11,6 @@
 
 use smalt::Mem;
 use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, boxOf };
-use smalt::Mem;
 
 /**
  * Cells a greedy run may span.
@@ -26,7 +25,6 @@ const MESH_MAX_RUN : i32 = 8;
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::manager::ChunkManager;
-use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };

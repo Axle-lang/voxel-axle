@@ -240,9 +240,9 @@ fn clearFrame(fb : FrameBuf, bg : i32) : void {
 /**
  * Average one channel across four texels (a 2×2 box, for mip downscaling),
  * IN LINEAR LIGHT: the four bytes are decoded, averaged as light, and encoded
- * back. Averaging the bytes themselves — which is what this did — darkens
- * every level of the chain, because the midpoint of two sRGB codes is far
- * below the midpoint of the light they stand for.
+ * back. Averaging the bytes themselves darkens every level of the chain,
+ * because the midpoint of two sRGB codes is far below the midpoint of the
+ * light they stand for.
  * @param gam    the colour space to decode / encode through.
  * @param a      first texel.
  * @param b      second texel.
@@ -509,9 +509,9 @@ fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : 
  * per-pixel screen-space UV derivatives come from the triangle's constant
  * gradients of (u/z, v/z, 1/z). Each channel is scaled by its own per-vertex
  * multiplier (Gouraud light colour) — in LINEAR light: the filtered texel is
- * decoded, lit, then tone-mapped back to a display byte. The distance fog
- * stays where it always was, on the encoded bytes, so far terrain still meets
- * the sky (drawn in sRGB by its own pass) at exactly the same colour.
+ * decoded, lit, then tone-mapped back to a display byte. The distance fog runs
+ * on the encoded bytes, so far terrain meets the sky — drawn in sRGB by its own
+ * pass — at exactly the same colour.
  * @param fb     the render target (framebuffer + z-buffer + size)
  * @param tri    the triangle: 3 RasterVerts + atlas tile index + wrap flag
  * @param atlas  the texture atlas mip chain (buffer + offset / size tables)
