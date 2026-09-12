@@ -96,7 +96,7 @@ class TerrainGen : Generator {
      * @param wz  the world z coordinate
      * @return the clamped terrain height
      */
-    fn colHeightWorld(self, wx : i32, wz : i32) : i32 {
+    pub(crate) fn colHeightWorld(self, wx : i32, wz : i32) : i32 {
         let h : i32 = (terrainHeight(wx as f64, wz as f64)).floorToInt() as i32;
         if (h < 2) {
             h = 2;
@@ -108,7 +108,7 @@ class TerrainGen : Generator {
     }
 
     /** True for the cold, snowy biomes whose trees + ground should carry snow. */
-    fn coldBiome(self, b : BiomeId) : bool {
+    pub(crate) fn coldBiome(self, b : BiomeId) : bool {
         return b == BiomeId::Snowy || b == BiomeId::Taiga || b == BiomeId::Mountain;
     }
 

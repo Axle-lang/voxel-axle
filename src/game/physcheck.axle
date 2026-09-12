@@ -24,7 +24,10 @@ use crate::kernel::kworld::manager::ChunkManager;
 use crate::game::world::terraingen::TerrainGen;
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::kernel::kworld::noise::{ temperature, humidity, snowDepth };
 use crate::kernel::kblock::blocks::{ hasCollisionBox };
+use crate::game::world::biomes::{ biomeAt };
+use crate::configs::biomes::{ BiomeId };
 use smalt::{Mem, SlotIndex};
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
@@ -43,6 +46,9 @@ const YAW_PLUS_Z : f64 = 0.0;
 
 /** How far out the probe searches the loaded ring for a test site. */
 const SCAN : i32 = 80;
+
+/** How many chunks out the hunt for a snowy ring centre may go. */
+const SNOW_HUNT : i32 = 64;
 
 /**
  * Walk a fresh body from (x, y, z) for `WALK_TICKS` and answer how far
@@ -71,19 +77,67 @@ fn walk(man : ChunkManager, x : f64, y : f64, z : f64, yaw : f64, alongX : bool)
 }
 
 /**
+ * The chunk of the nearest column the generator will put snow on.
+ *
+ * The snow assertions need snow in the ring, and the origin is not
+ * entitled to any: the cold biomes are a small share of the land, so
+ * loading the ring at (0, 0) and hoping is how three assertions quietly
+ * became a SKIP. This asks the climate the same questions `genVoxels`
+ * asks — cold biome, above the sea, a snow depth that rounds to a layer
+ * rather than a full block — and answers where the first yes is.
+ *
+ * The columns are read straight from the noise, so nothing is loaded to
+ * find the place to load.
+ * @param gen  the generator, for its own notion of a cold biome
+ * @return the chunk coordinates to centre the ring on
+ */
+fn snowyChunk(gen : TerrainGen) : (i32, i32) {
+    let d : i32 = 0;
+    while (d <= SNOW_HUNT) {
+        let cz : i32 = 0 - d;
+        while (cz <= d) {
+            let cx : i32 = 0 - d;
+            while (cx <= d) {
+                if (cz.abs() == d || cx.abs() == d) {
+                    let wx : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+                    let wz : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+                    let h : i32 = gen.colHeightWorld(wx, wz);
+                    let b : BiomeId = biomeAt(
+                        temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), h
+                    );
+                    let frac : f64 = snowDepth(wx as f64, wz as f64);
+                    if (gen.coldBiome(b) && h > World::SEA_LEVEL && frac > 0.0 && frac < 0.95) {
+                        return (cx, cz);
+                    }
+                }
+                cx = cx + 1;
+            }
+            cz = cz + 1;
+        }
+        d = d + 1;
+    }
+    return (0, 0);
+}
+
+/**
  * Run every physics assertion; answer the number that failed.
  * @return the failure count, 0 when green
  */
 fn runPhysicsCheck() : i32 {
     let fails : i32 = 0;
     let man : ChunkManager = new ChunkManager();
-    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
-    while (man.ensureLoaded(0, 0) > 0) {
+    let gen : TerrainGen = new TerrainGen(man.store, World::SPAN * World::SPAN);
+    let (cx, cz) = snowyChunk(gen);
+    man.attachGenerator(gen);
+    let ax : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+    let az : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+    Console::println("ring centred on chunk (${cx}, ${cz}), column (${ax}, ${az})");
+    while (man.ensureLoaded(cx, cz) > 0) {
     }
 
-    fails += checkSnowEdge(man, true);
-    fails += checkSnowEdge(man, false);
-    fails += checkStoredBox(man);
+    fails += checkSnowEdge(man, ax, az, true);
+    fails += checkSnowEdge(man, ax, az, false);
+    fails += checkStoredBox(man, ax, az);
     surveyFaces(man);
 
     man.stopLight();
@@ -99,18 +153,20 @@ fn runPhysicsCheck() : i32 {
  * partial block beside it and at most three clear cells overhead, which
  * is the geometry the old step gate refused.
  * @param man     the world to search and walk on
+ * @param ax      the ring's centre column x
+ * @param az      the ring's centre column z
  * @param alongX  whether to test the +X neighbour rather than the +Z one
  * @return 1 when the body was stopped, 0 when it climbed
  */
-fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
+fn checkSnowEdge(man : ChunkManager, ax : i32, az : i32, alongX : bool) : i32 {
     let axis : string = "+Z";
     if (alongX) {
         axis = "+X";
     }
-    let z : i32 = 0 - SCAN;
-    while (z <= SCAN) {
-        let x : i32 = 0 - SCAN;
-        while (x <= SCAN) {
+    let z : i32 = az - SCAN;
+    while (z <= az + SCAN) {
+        let x : i32 = ax - SCAN;
+        while (x <= ax + SCAN) {
             let h : i32 = man.columnHeight(x, z);
             let nx : i32 = x;
             let nz : i32 = z;
@@ -152,7 +208,7 @@ fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
         }
         z = z + 1;
     }
-    Console::println("SKIP ${axis}: no low-headroom partial-block edge in the spawn ring");
+    Console::println("SKIP ${axis}: no low-headroom partial-block edge in the loaded ring");
     return 0;
 }
 
@@ -166,15 +222,17 @@ fn checkSnowEdge(man : ChunkManager, alongX : bool) : i32 {
  * and everything downstream reads it, so the three can be compared, and a
  * chain that drifts says so here instead of on screen.
  * @param man  the world to search
+ * @param ax   the ring's centre column x
+ * @param az   the ring's centre column z
  * @return the failure count
  */
-fn checkStoredBox(man : ChunkManager) : i32 {
+fn checkStoredBox(man : ChunkManager, ax : i32, az : i32) : i32 {
     let seen : i32 = 0;
     let fails : i32 = 0;
-    let z : i32 = 0 - SCAN;
-    while (z <= SCAN && seen < 24) {
-        let x : i32 = 0 - SCAN;
-        while (x <= SCAN && seen < 24) {
+    let z : i32 = az - SCAN;
+    while (z <= az + SCAN && seen < 24) {
+        let x : i32 = ax - SCAN;
+        while (x <= ax + SCAN && seen < 24) {
             let h : i32 = man.columnHeight(x, z);
             let cell : IVec3 = ivec3(x, h, z);
             if (h > 0 && man.worldGet(cell) == Block::SnowLayer) {
@@ -203,7 +261,7 @@ fn checkStoredBox(man : ChunkManager) : i32 {
         z = z + 1;
     }
     if (seen == 0) {
-        Console::println("SKIP stored box: no snow layer in the spawn ring");
+        Console::println("SKIP stored box: no snow layer in the loaded ring");
         return 0;
     }
     Console::println("  stored box: ${seen} layers agree with their level");
