@@ -17,7 +17,7 @@ use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightEmission, albedoFor };
-use crate::kernel::seams::{ BlockLightField, SkyLightField, SunLightField, BounceLightField };
+use crate::kernel::seams::{ BlockLightField, SkyLightField, SunLightField, BounceLightField, LightSample, CornerProbe, CornerSample };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
 use crate::configs::time::{ Daylight };
@@ -133,7 +133,7 @@ trait LightBaker {
  * face corner. The manager keeps only thin delegators + the mesh flush, so the
  * whole lighting system finally has a focused, self-contained home.
  */
-class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightField, LightBaker {
+class LightEngine : LightSample, LightBaker {
     store : VoxStore,             // shared voxel field (aliased from the manager)
     lights : LightStore,          // per-voxel light volumes + flood stacks (owned here)
     loaded : i32[],               // per-slot loaded flag (aliased)
@@ -827,19 +827,61 @@ class LightEngine : BlockLightField, SkyLightField, SunLightField, BounceLightFi
     }
 
     /**
-     * Soft sun visibility averaged over the 4 air cells meeting at a face corner,
-     * so the cast shadow interpolates smoothly across faces. Returns 0..255.
-     * @param base  the corner's own air cell
-     * @param t1    first in-plane tangent offset
-     * @param t2    second in-plane tangent offset
-     * @return the averaged soft sun visibility 0..255
+     * All three baked light volumes at ONE cell, resolved once.
+     *
+     * The walk from a world cell to a chunk slot to a voxel index is the
+     * expensive part — three bytes at the end of it are not — so the three
+     * volumes are read together rather than a seam at a time.
+     * @param cell  the world voxel
+     * @return its sun visibility, sky access and packed bounce tint
      */
-    fn sunSoftCorner(self, base : IVec3, t1 : IVec3, t2 : IVec3) : i32 {
-        let a : i32 = self.sunlitGet(base);
-        let b : i32 = self.sunlitGet(ivec3(base.x + t1.x, base.y + t1.y, base.z + t1.z));
-        let c : i32 = self.sunlitGet(ivec3(base.x + t2.x, base.y + t2.y, base.z + t2.z));
-        let d : i32 = self.sunlitGet(ivec3(base.x + t1.x + t2.x, base.y + t1.y + t2.y, base.z + t1.z + t2.z));
-        return (a + b + c + d) / 4;
+    fn cellSample(self, cell : IVec3) : CornerSample {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+        }
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+        }
+        let off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return CornerSample {
+            sun: Mem::byteAt(self.lights.vols.sunlit, off),
+            sky: Mem::byteAt(self.lights.vols.skyaccess, off),
+            bounce: (Mem::byteAt(self.lights.vols.bnR, off) << 16)
+                | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
+                | Mem::byteAt(self.lights.vols.bnB, off),
+        };
+    }
+
+    /**
+     * The same three volumes averaged over the 4 air cells meeting at a face
+     * corner, which is what makes smooth lighting smooth: a term taken once per
+     * FACE is constant over the whole quad, and a greedy quad is up to
+     * `MESH_MAX_RUN` cells of surface — that is the tiling the shading showed.
+     * The bounce tint averages per channel; packed, its channels would bleed
+     * into each other.
+     * @param probe  the corner's cell and its two in-plane tangent steps
+     * @return the averaged sample at that corner
+     */
+    fn cornerSample(self, probe : CornerProbe) : CornerSample {
+        let b : IVec3 = probe.base;
+        let t1 : IVec3 = probe.t1;
+        let t2 : IVec3 = probe.t2;
+        let s0 : CornerSample = self.cellSample(b);
+        let s1 : CornerSample = self.cellSample(ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z));
+        let s2 : CornerSample = self.cellSample(ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z));
+        let s3 : CornerSample = self.cellSample(ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z));
+        let r : i32 = (((s0.bounce >> 16) & 0xFF) + ((s1.bounce >> 16) & 0xFF) + ((s2.bounce >> 16) & 0xFF) + ((s3.bounce >> 16) & 0xFF)) / 4;
+        let g : i32 = (((s0.bounce >> 8) & 0xFF) + ((s1.bounce >> 8) & 0xFF) + ((s2.bounce >> 8) & 0xFF) + ((s3.bounce >> 8) & 0xFF)) / 4;
+        let bl : i32 = ((s0.bounce & 0xFF) + (s1.bounce & 0xFF) + (s2.bounce & 0xFF) + (s3.bounce & 0xFF)) / 4;
+        return CornerSample {
+            sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
+            sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
+            bounce: r * 65536 + g * 256 + bl,
+        };
     }
 
     /**

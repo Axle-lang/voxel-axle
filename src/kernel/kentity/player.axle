@@ -158,6 +158,19 @@ class Player : Entity, Looks, Survives, Inventory {
     }
 
     /**
+     * Point the aim at an ABSOLUTE yaw / pitch, where `look` takes a delta from
+     * wherever the mouse left it. What a scripted capture needs: two runs can
+     * only be compared as images if they are framed identically, and a mouse
+     * that twitched once during the grab frames them differently.
+     * @param yaw    the absolute yaw, in radians
+     * @param pitch  the absolute pitch, in radians (clamped to the look range)
+     */
+    pub(crate) fn aimAt(mut self, yaw : f64, pitch : f64) : void {
+        self.yaw = yaw;
+        self.pitch = clampF64(pitch, 0.0 - Motion::PITCH_MAX, Motion::PITCH_MAX);
+    }
+
+    /**
      * Damage that also restarts the regeneration delay.
      * @param d  points of damage to apply
      */

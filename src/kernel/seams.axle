@@ -94,6 +94,21 @@ trait VoxelEdit : VoxelWriter, LightMutator, ChunkStreamer, DayCycle, LightThrea
 
 // ─── Baked light-sample capabilities (read by the renderer per face corner) ──
 
+/**
+ * Where a face corner samples a light volume: its own air cell and the two
+ * in-plane tangent steps to the other three cells meeting there.
+ *
+ * Every smooth-lighting term is read this way — the four cells around the
+ * corner, averaged — because a value taken at one cell and spread over the
+ * quad is what makes a surface look tiled. The renderer builds one of these
+ * per corner and hands the same one to each seam.
+ */
+struct CornerProbe {
+    pub(crate) base : IVec3,
+    pub(crate) t1 : IVec3,
+    pub(crate) t2 : IVec3,
+}
+
 /** Emissive block-light level at a cell. */
 trait BlockLightField {
     fn blGetW(self, cell : IVec3) : i32;
@@ -105,10 +120,9 @@ trait SkyLightField {
     fn skyaccessGet(self, cell : IVec3) : i32;
 }
 
-/** Direct-sun visibility, with a soft-shadow corner tap for smooth edges. */
+/** Direct-sun visibility at a cell. */
 trait SunLightField {
     fn sunlitGet(self, cell : IVec3) : i32;
-    fn sunSoftCorner(self, base : IVec3, t1 : IVec3, t2 : IVec3) : i32;
 }
 
 /** One-bounce coloured light bleed at a cell. */
@@ -116,8 +130,24 @@ trait BounceLightField {
     fn bounceGet(self, cell : IVec3) : i32;
 }
 
+/**
+ * The three volumes a face corner reads, averaged over its four cells: soft sun
+ * visibility and sky access (0..255 each) and the packed bounce tint.
+ *
+ * They travel together because they are READ together. Sampling them one seam
+ * at a time meant walking from a world cell to a chunk slot to a voxel index
+ * three times over for the same four cells, and the walk costs more than the
+ * three bytes it ends at.
+ */
+struct CornerSample {
+    pub(crate) sun : i32,
+    pub(crate) sky : i32,
+    pub(crate) bounce : i32,
+}
+
 /** Bundle: every baked light term the face shader samples. */
 trait LightSample : BlockLightField, SkyLightField, SunLightField, BounceLightField {
+    fn cornerSample(self, probe : CornerProbe) : CornerSample;
 }
 
 // ─── Actor render-view capabilities (provided by kentity, read by krender) ───

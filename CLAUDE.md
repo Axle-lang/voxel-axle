@@ -97,7 +97,11 @@ axle --version        # 0.12.1+ required
 axle run              # from the project root
 axle run -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
 axle run -- --at 294456 109296   # start at a named column, reproducibly
+axle run -- --snap --at 294456 109296 --look 225 -8   # the same framed image, twice
 ```
+
+Two captures are only comparable if `--look` pins the view: without it the
+spawn picks the yaw and the mouse grab moves it.
 
 The start column is random per run and printed on stdout. If you are
 comparing two runs, pass `--at` or you are comparing two worlds.

@@ -17,7 +17,8 @@ use smalt::Mem;
 use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
 use crate::kernel::krender::sky::{ DayState };
-use crate::kernel::krender::raster::{rasterTriTex, rasterTri, shadeLambert, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected};
+use crate::kernel::krender::raster::{rasterTriTex, rasterTri, shadeLambert, sunExposure, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected};
+use crate::kernel::krender::gamma::{ Gamma };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kentity::mobs::MobManager;
@@ -29,13 +30,15 @@ use crate::configs::mobs::{ MobKind };
 use crate::configs::screen::{ Screen };
 
 /**
- * The per-frame context for the mob pass: the atlas mip chain, the distance-fog
- * colour, the day/night state (sun direction + daylight for shading) and the
- * projection half-width. Bundled so each draw helper takes one `scene` instead
- * of threading four loose values through every call.
+ * The per-frame context for the mob pass: the atlas mip chain, the colour space
+ * the faces are lit in, the distance-fog colour, the day/night state (sun
+ * direction + daylight for shading) and the projection half-width. Bundled so
+ * each draw helper takes one `scene` instead of threading five loose values
+ * through every call.
  */
 struct MobScene {
     atlas : MipAtlas,
+    gam : Gamma,
     fog : Rgb,
     ds : DayState,
     hw : f64,
@@ -101,16 +104,17 @@ class MobView {
     }
 
     /**
-     * Mob Lambert term for a face normal, lifted by ambient — same shape as the
-     * world shadeN but kept local so mobview has no back-reference to Renderer.
+     * Mob Lambert term for a face normal, lifted by ambient and exposed by the
+     * same sun the world faces get — a mob has no shadow map, so it sees the
+     * whole of it. Kept local so mobview has no back-reference to Renderer.
      * @param nx  normal x
      * @param ny  normal y
      * @param nz  normal z
      * @param ds  the day/night state (sun direction)
-     * @return brightness factor in [ambient, 1]
+     * @return the mob face's light factor
      */
     fn shadeMob(self, nx : f64, ny : f64, nz : f64, ds : DayState) : f64 {
-        return shadeLambert(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ));
+        return sunExposure(shadeLambert(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ)), 1.0);
     }
 
     /**
@@ -174,14 +178,14 @@ class MobView {
                 a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 b: RasterVert { sx: sx1, sy: sy1, iz: iz1, u: 1.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 c: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.fog, band);
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fog, band);
             rasterTriTex(fb, RasterTri {
                 a: RasterVert { sx: sx0, sy: sy0, iz: iz0, u: 0.0, v: 1.0, tr: tr, tg: tg, tb: tb },
                 b: RasterVert { sx: sx2, sy: sy2, iz: iz2, u: 1.0, v: 0.0, tr: tr, tg: tg, tb: tb },
                 c: RasterVert { sx: sx3, sy: sy3, iz: iz3, u: 0.0, v: 0.0, tr: tr, tg: tg, tb: tb },
-                tile: mat.tile, wrap: 0 }, scene.atlas, scene.fog, band);
+                tile: mat.tile, wrap: 0 }, scene.atlas, scene.gam, scene.fog, band);
         } else {
-            let col : i32 = Color::scaleBy(tintIf(mat.hurt, mat.color), bright);
+            let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
             rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
             rasterTri(fb, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
         }

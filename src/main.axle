@@ -177,6 +177,13 @@ fn run() : i32 ! PlatformError {
     sp.find(man, startX, startZ);
     let player : Player = new Player((sp.sx as f64) + 0.5, sp.h as f64, (sp.sz as f64) + 0.5);
     player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
+    // A pinned view overrides the clearing the spawn picked, and holds against
+    // the mouse for the whole run; a pinned hour starts the day clock elsewhere.
+    let (lookPinned, lookYaw, lookPitch) = lookPin();
+    let dayStart : f64 = dayTimeArg();
+    if (lookPinned) {
+        player.aimAt(lookYaw, lookPitch);
+    }
     player.refresh();
     while (man.ensureLoaded(chunkOf(player.pos.x), chunkOf(player.pos.z)) > 0) {
     }
@@ -353,7 +360,9 @@ fn run() : i32 ! PlatformError {
                 mdy = 0;
                 swallowLook = false;
             }
-            player.look(0.0 - (mdx as f64) * Motion::MOUSE_SENS, 0.0 - (mdy as f64) * Motion::MOUSE_SENS);
+            if (!lookPinned) {
+                player.look(0.0 - (mdx as f64) * Motion::MOUSE_SENS, 0.0 - (mdy as f64) * Motion::MOUSE_SENS);
+            }
 
             let fwd : f64 = axis(events, Keys::forward(), Keys::back());
             let strafe : f64 = axis(events, Keys::right(), Keys::left());
@@ -538,7 +547,7 @@ fn run() : i32 ! PlatformError {
             let underwater : bool = player.isUnderwater();
             let phase : f64 = (sched.tick as f64) * Water::RIPPLE_SPEED;
             // Day clock: advances with the fixed-step tick, wrapped to [0, 1).
-            let dayTime : f64 = Daylight::START + (sched.tick as f64) / (Daylight::LENGTH_TICKS as f64);
+            let dayTime : f64 = dayStart + (sched.tick as f64) / (Daylight::LENGTH_TICKS as f64);
             dayTime = dayTime - (dayTime.floorToInt() as f64);
             // Publish the time of day for the dedicated light thread (it bakes
             // the sun shadows + sky access continuously off the render path); the
@@ -676,6 +685,63 @@ fn snapDeadline() : i64 {
         i = i + 1;
     }
     return 0;
+}
+
+/**
+ * The view a scripted capture is framed with, as (pinned, yaw, pitch) in
+ * radians.
+ *
+ * `--look <yaw°> <pitch°>` pins it: the spawn's own yaw is overridden and the
+ * mouse is ignored for the rest of the run, which is the only way two captures
+ * can be compared as images. Yaw 0 faces +Z and grows counter-clockwise;
+ * pitch is positive upward. Without the flag the spawn picks the view and the
+ * mouse drives it, as it always did.
+ * @return whether the view is pinned, and the yaw / pitch it is pinned to
+ */
+fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
+    let toRad : f64 = 3.14159265358979 / 180.0;
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--look" && i + 2 < argc()) {
+                return (true, argAt(i + 1).toF64() * toRad, argAt(i + 2).toF64() * toRad);
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--look wants two angles in degrees; leaving the view free");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return (false, 0.0, 0.0);
+}
+
+/**
+ * The time of day the run starts at, in 0..1 over a full day.
+ *
+ * `--daytime <t>` names one — 0.42 is mid-morning, 0.75 sunset, 0.9 night —
+ * so a capture can be taken at the hour that shows what it is about, instead
+ * of waiting four real minutes for the sky to come round. Anything else keeps
+ * `Daylight::START`.
+ * @return the day phase to start the clock at
+ */
+fn dayTimeArg() : f64 {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--daytime" && i + 1 < argc()) {
+                return argAt(i + 1).toF64();
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--daytime wants a number in 0..1; starting where the config says");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return Daylight::START;
 }
 
 /**

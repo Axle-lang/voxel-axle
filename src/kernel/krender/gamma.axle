@@ -1,0 +1,205 @@
+// gamma — the colour space the world pass does its arithmetic in.
+//
+// The atlas is authored in sRGB, and sRGB is a display encoding, not an
+// amount of light: a 0x80 texel does not carry half the light of 0xFF,
+// it carries about a fifth. Multiplying those bytes by a light factor —
+// which is what this renderer did — therefore darkens by the wrong
+// amount everywhere, and the error is worst exactly where the shadows
+// are, which is why they collapsed into mud.
+//
+// So the world pass DECODES each texel to linear light on the way in,
+// multiplies and adds there, and ENCODES the result back on the way
+// out. Both directions are tables: 256 f64 in, `Render::TONE_STEPS`
+// bytes out, so the hot loop pays a load rather than a `pow`. The mip
+// downsample averages through the same pair, which is what stops
+// distant textures from darkening as they shrink.
+//
+// The way out also carries the tone map. Light ADDS — a torch on a
+// sunlit wall exceeds full white — and a hard clamp turns every such
+// place into a flat white blob. Below `Render::TONE_KNEE` the curve is
+// exactly the identity, so a fully lit surface still comes out as the
+// byte the texture was painted with; above it the excess rolls off
+// toward white, and the curve's slope matches at the join.
+
+use smalt::Mem;
+use smalt::Color;
+use crate::configs::render::{ Render };
+
+/** Entries in the decode table: one per source byte. */
+const DECODE_STEPS : i32 = 256;
+
+/** The sRGB transfer function: linear-segment slope and its two cutoffs … */
+const SRGB_SLOPE : f64 = 12.92;
+const SRGB_LIN_CUT : f64 = 0.0031308;
+const SRGB_BYTE_CUT : f64 = 0.04045;
+
+/** … and the offset and exponent of its power segment. */
+const SRGB_OFFSET : f64 = 0.055;
+const SRGB_GAMMA : f64 = 2.4;
+
+/**
+ * sRGB → linear light.
+ * @param s  the encoded value in 0..1
+ * @return the light it stands for, in 0..1
+ */
+fn srgbToLinear(s : f64) : f64 {
+    if (s <= SRGB_BYTE_CUT) {
+        return s / SRGB_SLOPE;
+    }
+    return ((s + SRGB_OFFSET) / (1.0 + SRGB_OFFSET)).pow(SRGB_GAMMA);
+}
+
+/**
+ * Linear light → sRGB.
+ * @param x  the light amount (clamped into 0..1)
+ * @return the encoded value in 0..1
+ */
+fn linearToSrgb(x : f64) : f64 {
+    if (x <= 0.0) {
+        return 0.0;
+    }
+    if (x >= 1.0) {
+        return 1.0;
+    }
+    if (x <= SRGB_LIN_CUT) {
+        return x * SRGB_SLOPE;
+    }
+    return (1.0 + SRGB_OFFSET) * x.pow(1.0 / SRGB_GAMMA) - SRGB_OFFSET;
+}
+
+/**
+ * The highlight shoulder: identity up to `Render::TONE_KNEE`, then a roll-off
+ * that approaches 1 without ever clipping. The two pieces meet with the same
+ * value AND the same slope, so nothing bands at the knee.
+ * @param x  the linear light amount (may exceed 1)
+ * @return the tone-mapped amount, in 0..1
+ */
+fn toneMap(x : f64) : f64 {
+    if (x <= Render::TONE_KNEE) {
+        return x;
+    }
+    let head : f64 = 1.0 - Render::TONE_KNEE;
+    let over : f64 = x - Render::TONE_KNEE;
+    return Render::TONE_KNEE + head * over / (over + head);
+}
+
+/** A colour held as three linear light amounts (a filtered texture sample). */
+struct LinRgb {
+    pub(crate) r : f64,
+    pub(crate) g : f64,
+    pub(crate) b : f64,
+}
+
+/**
+ * The colour-space view the rasteriser samples and writes through: the decode
+ * table, the tone-mapped encode table, and the encode table's index scale. A
+ * value snapshot of `GammaTables`, copied onto the workers like the mip chain.
+ */
+struct Gamma {
+    pub(crate) toLin : i64,
+    pub(crate) toByte : i64,
+    pub(crate) scale : f64,
+
+    /**
+     * Decode one channel of a packed sRGB colour to linear light.
+     * @param c      the packed colour
+     * @param shift  the channel's bit shift (16 = red, 8 = green, 0 = blue)
+     * @return the channel's light amount
+     */
+    pub(crate) fn decode(self, c : i32, shift : i32) : f64 {
+        return Mem::realOf(self.toLin, (((c >> shift) & 0xFF) as i64));
+    }
+
+    /**
+     * Decode all three channels of a packed sRGB colour.
+     * @param c  the packed colour
+     * @return the colour as linear light
+     */
+    pub(crate) fn decodeRgb(self, c : i32) : LinRgb {
+        return LinRgb { r: self.decode(c, 16), g: self.decode(c, 8), b: self.decode(c, 0) };
+    }
+
+    /**
+     * Tone-map a linear channel and encode it back to a display byte. Values
+     * below zero and above `Render::TONE_MAX` clamp to the table's ends.
+     * @param x  the channel's light amount
+     * @return the display byte, 0..255
+     */
+    pub(crate) fn encode(self, x : f64) : i32 {
+        let i : i32 = (x * self.scale).floorToInt() as i32;
+        if (i < 0) {
+            i = 0;
+        }
+        let top : i32 = Render::TONE_STEPS - 1;
+        if (i > top) {
+            i = top;
+        }
+        return Mem::byteAt(self.toByte, i as i64);
+    }
+
+    /**
+     * Encode a whole linear colour back to a packed display colour.
+     * @param c  the colour as linear light
+     * @return the packed display colour
+     */
+    pub(crate) fn encodeRgb(self, c : LinRgb) : i32 {
+        return Color::packBytes(self.encode(c.r), self.encode(c.g), self.encode(c.b));
+    }
+
+    /**
+     * Scale a packed sRGB colour by a light factor — the flat-shaded sibling of
+     * what the textured raster does per pixel, so a mob's flat faces and its
+     * textured ones are lit by the same arithmetic.
+     * @param c  the packed colour
+     * @param k  the light factor
+     * @return the packed, lit colour
+     */
+    pub(crate) fn shade(self, c : i32, k : f64) : i32 {
+        return Color::packBytes(
+            self.encode(self.decode(c, 16) * k),
+            self.encode(self.decode(c, 8) * k),
+            self.encode(self.decode(c, 0) * k)
+        );
+    }
+}
+
+/**
+ * Owns the two conversion tables. Built once at startup — a `pow` per entry,
+ * never per pixel — and handed to the render passes as a `Gamma` value.
+ */
+class GammaTables {
+    toLin : i64,  // f64[256]: display byte → linear light
+    toByte : i64, // byte[Render::TONE_STEPS]: linear light → tone-mapped byte
+
+    /** Fill both tables. */
+    constructor() {
+        self.toLin = Mem::take((DECODE_STEPS as i64) * 8);
+        let i : i32 = 0;
+        while (i < DECODE_STEPS) {
+            Mem::putRealOf(self.toLin, i as i64, srgbToLinear((i as f64) / 255.0));
+            i = i + 1;
+        }
+
+        self.toByte = Mem::take(Render::TONE_STEPS as i64);
+        let step : f64 = Render::TONE_MAX / (Render::TONE_STEPS as f64);
+        let j : i32 = 0;
+        while (j < Render::TONE_STEPS) {
+            let lin : f64 = ((j as f64) + 0.5) * step;
+            let out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
+            Mem::putByte(self.toByte, j as i64, out.floorToInt() as i32);
+            j = j + 1;
+        }
+    }
+
+    /**
+     * The snapshot the render passes carry.
+     * @return the colour-space view
+     */
+    pub(crate) fn view(self) : Gamma {
+        return Gamma {
+            toLin: self.toLin,
+            toByte: self.toByte,
+            scale: (Render::TONE_STEPS as f64) / Render::TONE_MAX,
+        };
+    }
+}

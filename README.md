@@ -351,6 +351,8 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 - The loop runs a **fixed timestep** (`World::TICK_HZ`, default 60): the simulation advances by real elapsed time (catching up after a slow frame), so movement is frame-rate independent, and the pacer caps the CPU instead of relying on v-sync. Both halves are smalt's `FramePacer` — `tick(clock)` sleeps to the frame boundary and measures, `steps()` drains that same measurement into whole simulation steps, so the two cannot drift into separate timelines.
 - `--snap [ms]` plays for that long, writes `voxel.bmp` beside the binary and quits — a capture for a report, or for a script, without anyone standing over the machine at the right moment.
 - The start column is random per run and printed; `--at <x> <z>` replays one. The world itself is still one fixed seed — see **Build & run** for why that is a bigger change than it looks.
+- `--look <yaw°> <pitch°>` pins the view for the whole run: the spawn's own yaw is overridden and the mouse is ignored. Two captures can only be compared as images if they are framed identically, and the grab hands the first frames whatever motion the mouse happened to have.
+- `--daytime <0..1>` starts the day clock at that hour (0.42 mid-morning, 0.75 sunset, 0.9 night), so a capture can be taken at the hour that shows what it is about instead of waiting four real minutes for the sky to come round.
 - smalt's own limits, and what each would take to lift, are in [`vendor/smalt/LIMITATIONS.md`](vendor/smalt/LIMITATIONS.md).
 - `axle.toml`'s lib path is machine-specific; DLL + `atlas.raw` deployment next to the binary is manual.
 

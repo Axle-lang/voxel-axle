@@ -12,28 +12,37 @@ class Light {
     // (Minecraft-style): each level down multiplies brightness by `Light::FALLOFF`, so
     // light dies fast with distance — and since the flood loses one level per block
     // travelled, a longer/zig-zag path goes much darker. `Light::MIN` is the darkness
-    // floor; `Light::TORCH_WARM` tints block-lit faces warm against cool sky light.
-    static MIN : f64 = 0.05;
+    // floor.
+    static MIN : f64 = 0.02;
     static FALLOFF : f64 = 0.80;
-    static TORCH_WARM : f64 = 0.16;
+
+    // The colour a block light emits, per channel. Block light is ADDED to sky
+    // light in linear space, so this is a real emission colour and not the tint
+    // it replaced (a warm skew pushed onto the total after the fact, which could
+    // only lie about a light that had already been merged away by a `max`).
+    // One flame colour for every source until per-block emission lands.
+    static TORCH_R : f64 = 1.00;
+    static TORCH_G : f64 = 0.83;
+    static TORCH_B : f64 = 0.58;
 
     // Ambient occlusion strength for smooth lighting: how much a fully-occluded
     // face corner (AO level 0) is darkened. 0 = no AO, 1 = corner goes black at the
     // deepest seams. The bake stores 0..3 per corner; the renderer maps it to
-    // 1 - `Light::AO_STRENGTH`·(3-ao)/3.
-    static AO_STRENGTH : f64 = 0.55;
+    // 1 - `Light::AO_STRENGTH`·(3-ao)/3. It scales LINEAR light, so it takes a
+    // larger number than it did to darken a seam by the same amount on screen.
+    static AO_STRENGTH : f64 = 0.75;
 
     // Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
     // surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
     // skylight. The renderer blends between these by how directly a corner faces the
     // sun (and by daylight, so night stays neutral-blue moonlight). Multipliers
     // around 1.0 per channel.
-    static SUN_TINT_R : f64 = 1.10;   // warm gold for full sun …
-    static SUN_TINT_G : f64 = 1.02;
-    static SUN_TINT_B : f64 = 0.82;
-    static SHADE_TINT_R : f64 = 0.88; // … cool blue for shade / ambient
-    static SHADE_TINT_G : f64 = 0.94;
-    static SHADE_TINT_B : f64 = 1.12;
+    static SUN_TINT_R : f64 = 1.16;   // warm gold for full sun …
+    static SUN_TINT_G : f64 = 1.04;
+    static SUN_TINT_B : f64 = 0.78;
+    static SHADE_TINT_R : f64 = 0.74; // … cool blue for shade / ambient
+    static SHADE_TINT_G : f64 = 0.86;
+    static SHADE_TINT_B : f64 = 1.32;
 
     // Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
     // cell casts `Light::SKY_AO_SAMPLES` rays over the upper hemisphere (up to `Light::SKY_AO_REACH`
@@ -44,7 +53,7 @@ class Light {
     static SKY_AO_SAMPLES : i32 = 10;
     static SKY_AO_REACH : f64 = 14.0;
     static SKY_AO_CHUNKS_PER_TICK : i32 = 3;
-    static AO_SKY_MIN : f64 = 0.45;
+    static AO_SKY_MIN : f64 = 0.18;
 
     // One-bounce coloured indirect light (GI tint): the sky-AO rays that hit a
     // surface sample its albedo, so ambient bleeds the nearby colour (green under

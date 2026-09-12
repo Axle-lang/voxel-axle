@@ -29,7 +29,7 @@ use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::ChunkMesher;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample };
+use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -555,14 +555,14 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         return self.leng.sunlitGet(cell);
     }
 
-    /** Soft sun visibility averaged over the 4 air cells at a face corner. */
-    fn sunSoftCorner(self, base : IVec3, t1 : IVec3, t2 : IVec3) : i32 {
-        return self.leng.sunSoftCorner(base, t1, t2);
-    }
-
     /** Packed one-bounce coloured tint (0xRRGGBB) at a world voxel. */
     fn bounceGet(self, cell : IVec3) : i32 {
         return self.leng.bounceGet(cell);
+    }
+
+    /** Sun, sky access and bounce averaged over the 4 air cells at a face corner. */
+    fn cornerSample(self, probe : CornerProbe) : CornerSample {
+        return self.leng.cornerSample(probe);
     }
 
     /** One pass of the whole lighting system (sun shadows + sky-AO / bounce). */

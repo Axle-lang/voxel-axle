@@ -22,11 +22,13 @@ use crate::kernel::krender::sky::{ DayState, computeDayState, drawSkyGradient, d
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
 use crate::kernel::krender::raster::{
-    rasterTriTex, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize,
+    rasterTriTex, clearFrame, buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, sunExposure,
     RasterVert, RasterTri, FrameBuf, MipAtlas, MipSource, Rgb, Band, Camera, Projected,
     PostEffect, VertAttribs, ScreenScratch,
 };
-use crate::kernel::seams::{ SkyLightField, SunLightField, BounceLightField };
+use crate::kernel::krender::gamma::{ Gamma, GammaTables, LinRgb };
+use crate::kernel::krender::cornerlight::{ CornerLight };
+use crate::kernel::seams::{ SkyLightField, SunLightField, BounceLightField, CornerProbe, CornerSample };
 use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kworld::manager::ChunkManager;
@@ -351,12 +353,13 @@ class TextureAtlas : MipSource {
      * a byte-for-byte copy of the loaded atlas, so `base()` doubles as the raw
      * tile-texel source.
      * @param base  base address of the loaded atlas texels
+     * @param gam   the colour space the coarser levels are averaged through
      */
-    pub(file) fn setBase(mut self, base : i64) : void {
+    pub(file) fn setBase(mut self, base : i64, gam : Gamma) : void {
         if (self.mips == 0) {
             self.mips = Mem::take((mipChainTexels() as i64) * 4);
         }
-        buildMipChain(base, self.mips);
+        buildMipChain(base, self.mips, gam);
     }
 
     /**
@@ -468,6 +471,7 @@ class ChunkRenderer {
                           // rasterise it in parallel column bands (tiled render)
     triN : i32,           // number of queued triangles this frame
     atlas : MipAtlas,     // ── per-frame render context (set in drawWorld) ──
+    gam : Gamma,          // sRGB ↔ linear tables (owned by GammaTables)
     fog : Rgb,            // distance-fog colour (this frame's sky colour)
     day : DayState,       // sun / daylight snapshot (per-corner light + glint)
     lcurve : i64,         // brightness curve (owned by DayLighting)
@@ -513,6 +517,7 @@ class ChunkRenderer {
             r: Mem::take(8 * 8), g: Mem::take(8 * 8), b: Mem::take(8 * 8),
         };
         self.atlas = MipAtlas { mips: 0, mipOff: 0, mipSz: 0 };
+        self.gam = Gamma { toLin: 0, toByte: 0, scale: 0.0 };
         self.fog = Rgb { r: Daylight::DAY_SKY_R, g: Daylight::DAY_SKY_G, b: Daylight::DAY_SKY_B };
         self.day = DayState {
             sunX: 0.0, sunY: 1.0, sunZ: 0.0,
@@ -775,46 +780,62 @@ class ChunkRenderer {
     // ── Per-face baked-light reads through the split light seams ──
 
     /**
-     * The ambient-sky occlusion factor at the face's probe cell: the baked
+     * Where one corner of a face samples the light volumes: its own air cell,
+     * and the two in-plane steps to the other three cells meeting there.
+     *
+     * The corner's cell is the face's probe cell advanced to the far end of the
+     * merged run when the corner sits at that end — a greedy quad is up to
+     * `MESH_MAX_RUN` cells long, and its far corner has to read the light where
+     * it actually is. The tangents are the corner's own ±1 block offsets, taken
+     * on the two axes that are not the face normal.
+     * @param cell     the face's air probe cell (its origin corner)
+     * @param off      the corner's block offset within the face (0 or 1 per axis)
+     * @param naxis    the face normal axis (0 = X, 1 = Y, 2 = Z)
+     * @param advX     cells to the far end of the run along X (0 if the run is not)
+     * @param advZ     cells to the far end of the run along Z (0 if the run is not)
+     * @return the corner's probe
+     */
+    fn cornerProbe(self, cell : IVec3, off : IVec3, naxis : i32, advX : i32, advZ : i32) : CornerProbe {
+        let sgx : i32 = off.x * 2 - 1;
+        let sgy : i32 = off.y * 2 - 1;
+        let sgz : i32 = off.z * 2 - 1;
+        let base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
+        match naxis {
+            0 => {
+                return CornerProbe { base: base, t1: ivec3(0, sgy, 0), t2: ivec3(0, 0, sgz) };
+            }
+            1 => {
+                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, 0, sgz) };
+            }
+            _ => {
+                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, sgy, 0) };
+            }
+        }
+    }
+
+    /**
+     * The ambient-sky occlusion factor of a corner sample: the baked
      * hemispherical sky access (ray-traced AO) mapped into [`Light::AO_SKY_MIN`, 1], so
-     * valleys / recesses / canopy darken the ambient sky light. One SkyLightField
-     * tap per face.
-     * @param sky   the sky-light seam (skyaccessGet)
-     * @param cell  the probe cell (air neighbour in the face-normal direction)
+     * valleys / recesses / canopy darken the ambient sky light.
+     * @param s  the corner's light sample
      * @return the sky-AO factor in [`Light::AO_SKY_MIN`, 1]
      */
-    fn skyAOFactor(self, sky : dyn SkyLightField, cell : IVec3) : f64 {
-        let skyAcc : f64 = (sky.skyaccessGet(cell) as f64) * 0.00392157;
+    fn skyAOFactor(self, s : CornerSample) : f64 {
+        let skyAcc : f64 = (s.sky as f64) * 0.00392157;
         return Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * skyAcc;
     }
 
     /**
-     * The one-bounce coloured indirect tint at the face's probe cell, unpacked to
-     * a 0..2 RGB multiplier triple. One BounceLightField tap per face.
-     * @param bounce  the bounce-light seam (bounceGet)
-     * @param cell    the probe cell
+     * The one-bounce coloured indirect tint of a corner sample, unpacked to a
+     * 0..2 RGB multiplier triple.
+     * @param s  the corner's light sample
      * @return the bounce tint as (r, g, b) multipliers
      */
-    fn bounceTint(self, bounce : dyn BounceLightField, cell : IVec3) : Vec3 {
-        let bnc : i32 = bounce.bounceGet(cell);
+    fn bounceTint(self, s : CornerSample) : Vec3 {
         return vec3(
-            (((bnc >> 16) & 0xFF) as f64) * 0.0078125,
-            (((bnc >> 8) & 0xFF) as f64) * 0.0078125,
-            ((bnc & 0xFF) as f64) * 0.0078125);
-    }
-
-    /**
-     * Soft sun visibility at one face corner: the averaged soft sun-visibility
-     * over the four air cells meeting at the corner (symmetric → continuous
-     * across faces, no block staircase), in 0..1. One SunLightField tap.
-     * @param sun   the sun-light seam (sunSoftCorner)
-     * @param cell  the face's air probe cell
-     * @param t1    first in-plane tangent offset
-     * @param t2    second in-plane tangent offset
-     * @return the soft sun-visibility fraction in [0, 1]
-     */
-    fn cornerSunVis(self, sun : dyn SunLightField, cell : IVec3, t1 : IVec3, t2 : IVec3) : f64 {
-        return (sun.sunSoftCorner(cell, t1, t2) as f64) * 0.00392157;
+            (((s.bounce >> 16) & 0xFF) as f64) * 0.0078125,
+            (((s.bounce >> 8) & 0xFF) as f64) * 0.0078125,
+            ((s.bounce & 0xFF) as f64) * 0.0078125);
     }
 
     // ── World faces (water surface heights, face baking) ──
@@ -948,14 +969,6 @@ class ChunkRenderer {
         // is applied PER CORNER below (smooth, face-independent), not flattened
         // over the whole face here — that's what removes the block staircase.
 
-        // Hemispherical sky access (baked ray-traced AO) + the one-bounce
-        // coloured indirect tint, both read once per face through the light seams.
-        let skyAOFac : f64 = self.skyAOFactor(man, shadowCell);
-        let bncTint : Vec3 = self.bounceTint(man, shadowCell);
-        let bncR : f64 = bncTint.x;
-        let bncG : f64 = bncTint.y;
-        let bncB : f64 = bncTint.z;
-
         // Load the 4 corners into camera space + their tile UVs, and bake each
         // corner's light colour (smooth light + AO + per-corner soft shadow) into
         // the car/cag/cab inputs so clipNear interpolates colour like it does UV.
@@ -965,6 +978,15 @@ class ChunkRenderer {
         // vertical "façade" gaps between layers.
         let di : i32 = dir as i32;
         let naxis : i32 = di / 2;   // normal axis: 0=X, 1=Y, 2=Z
+        // The merged run's far end, in cells, on whichever axis it runs along:
+        // where a corner sitting at that end reads its light.
+        let runAdvX : i32 = 0;
+        let runAdvZ : i32 = 0;
+        if (naxis == 0) {
+            runAdvZ = run - 1;
+        } else {
+            runAdvX = run - 1;
+        }
         let q : i32 = di * 4;
         let k : i32 = 0;
         while (k < 4) {
@@ -985,75 +1007,51 @@ class ChunkRenderer {
             );
             Mem::putRealOf(self.ca.u, k, (self.uvu[q + k] as f64) * runF + flowU);
             Mem::putRealOf(self.ca.v, k, (self.uvv[q + k] as f64) + flowV);
-            // Per-corner SOFT CAST SHADOW: average the soft sun-visibility over
-            // the 4 air cells meeting at this corner (symmetric → continuous
-            // across faces, no block staircase), then keep that fraction of the
-            // direct sun term. The two in-plane tangent offsets come from the
-            // corner's block offset and the face normal axis.
-            let sgx : i32 = oxv * 2 - 1;
-            let sgy : i32 = oyv * 2 - 1;
-            let sgz : i32 = ozv * 2 - 1;
-            let t1x : i32 = 0;
-            let t1y : i32 = 0;
-            let t1z : i32 = 0;
-            let t2x : i32 = 0;
-            let t2y : i32 = 0;
-            let t2z : i32 = 0;
-            match naxis {
-                0 => {
-                    t1y = sgy;
-                    t2z = sgz;
-                }
-                1 => {
-                    t1x = sgx;
-                    t2z = sgz;
-                }
-                _ => {
-                    t1x = sgx;
-                    t2y = sgy;
-                }
-            }
+            // Every smooth term is read AT THIS CORNER, through one probe: the
+            // corner's own air cell and the two in-plane steps to the other
+            // three cells meeting there. On a merged quad the corner cell is
+            // the far end of the run, not the origin — sampling the origin for
+            // all four corners is what smeared a shadow across eight blocks of
+            // surface and left the ambient occlusion constant over the quad.
+            let smp : CornerSample = man.cornerSample(
+                self.cornerProbe(shadowCell, ivec3(oxv, oyv, ozv), naxis, runAdvX, runAdvZ));
 
-            let visK : f64 = self.cornerSunVis(man, shadowCell, ivec3(t1x, t1y, t1z), ivec3(t2x, t2y, t2z));
+            let visK : f64 = (smp.sun as f64) * 0.00392157;
             let keepK : f64 = Render::SHADOW_KEEP + (1.0 - Render::SHADOW_KEEP) * visK;
-            let brightK : f64 = Render::AMBIENT + keepK * (bright - Render::AMBIENT);
+            let brightK : f64 = sunExposure(bright, keepK);
 
             // Per-corner smooth light: sky/block nibbles averaged at bake time,
             // through the exponential curve (sky dimmed by daylight), times the
-            // per-corner shaded brightness and the AO factor; block light warm.
+            // per-corner shaded brightness and the AO factor.
             let lb : i32 = Mem::byteAt(man.faces.flight, (idx * 4 + k) as i64);
             let skyLk : i32 = (lb >> 4) & 0xF;
             let blkLk : i32 = lb & 0xF;
             let aok : i32 = Mem::byteAt(man.faces.fao, (idx * 4 + k) as i64);
             let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
-            let skyFk : f64 = Mem::realOf(self.lcurve, skyLk) * self.day.daylight * skyAOFac;
-            let blkFk : f64 = Mem::realOf(self.lcurve, blkLk);
-            let cfk : f64 = skyFk;
-            if (blkFk > cfk) {
-                cfk = blkFk;
-            }
-            let lfac : f64 = Light::MIN + (1.0 - Light::MIN) * cfk;
-            let cbase : f64 = brightK * lfac * aoFac;
-            let wf : f64 = (blkLk as f64) * 0.0667 * Light::TORCH_WARM;
+            let lit : CornerLight = CornerLight {
+                sky: Mem::realOf(self.lcurve, skyLk) * self.day.daylight * self.skyAOFactor(smp),
+                block: Mem::realOf(self.lcurve, blkLk),
+                bright: brightK,
+                ao: aoFac,
+            };
 
             // Warm sun / cool shade by how directly THIS corner is sunlit, ×
-            // the one-bounce tint, applied in proportion to the sky-light share
-            // (so torch-lit caves stay warm).
+            // the one-bounce tint. It rides on the sky term alone, so a
+            // torch-lit cave keeps its own colour without a share to weigh.
             let directK : f64 = 0.0;
             if (brightK > Render::AMBIENT) {
                 directK = (brightK - Render::AMBIENT) / (1.0 - Render::AMBIENT);
             }
             let wsunK : f64 = directK * self.day.daylight;
-            let tintRk : f64 = (Light::SHADE_TINT_R + (Light::SUN_TINT_R - Light::SHADE_TINT_R) * wsunK) * bncR;
-            let tintGk : f64 = (Light::SHADE_TINT_G + (Light::SUN_TINT_G - Light::SHADE_TINT_G) * wsunK) * bncG;
-            let tintBk : f64 = (Light::SHADE_TINT_B + (Light::SUN_TINT_B - Light::SHADE_TINT_B) * wsunK) * bncB;
-            let skyShare : f64 = skyFk / (skyFk + blkFk + 0.0001);
-            let tR : f64 = 1.0 + (tintRk - 1.0) * skyShare;
-            let tG : f64 = 1.0 + (tintGk - 1.0) * skyShare;
-            let tB : f64 = 1.0 + (tintBk - 1.0) * skyShare;
-            let crk : f64 = cbase * (1.0 + wf) * tR;
-            let cgk : f64 = cbase * tG;
-            let cbk : f64 = cbase * (1.0 - wf) * tB;
+            let bnc : Vec3 = self.bounceTint(smp);
+            let cc : LinRgb = lit.colour(LinRgb {
+                r: (Light::SHADE_TINT_R + (Light::SUN_TINT_R - Light::SHADE_TINT_R) * wsunK) * bnc.x,
+                g: (Light::SHADE_TINT_G + (Light::SUN_TINT_G - Light::SHADE_TINT_G) * wsunK) * bnc.y,
+                b: (Light::SHADE_TINT_B + (Light::SUN_TINT_B - Light::SHADE_TINT_B) * wsunK) * bnc.z,
+            });
+            let crk : f64 = cc.r;
+            let cgk : f64 = cc.g;
+            let cbk : f64 = cc.b;
 
             if (isWaterFace) {
                 // View vector from this corner to the eye.
@@ -1173,12 +1171,14 @@ class ChunkRenderer {
      * the band rasteriser and the projection both read it a hundred
      * thousand times a frame, and it does not change within one.
      * @param atlas   the texture atlas mip chain view
+     * @param gam     the colour space the texels are lit in
      * @param fog     the distance-fog colour (this frame's sky colour)
      * @param day     the day/night state (sun / daylight for corner shading)
      * @param lcurve  the brightness-curve lookup
      */
-    pub(file) fn setFrame(mut self, atlas : MipAtlas, fog : Rgb, day : DayState, lcurve : i64) : void {
+    pub(file) fn setFrame(mut self, atlas : MipAtlas, gam : Gamma, fog : Rgb, day : DayState, lcurve : i64) : void {
         self.atlas = atlas;
+        self.gam = gam;
         self.fog = fog;
         self.day = day;
         self.lcurve = lcurve;
@@ -1237,7 +1237,7 @@ class ChunkRenderer {
         let band : Band = Band { x0: bx0, x1: bx1 };
         while (i < self.triN) {
             let tri : RasterTri = self.triBuf[i];
-            rasterTriTex(fb, tri, self.atlas, self.fog, band);
+            rasterTriTex(fb, tri, self.atlas, self.gam, self.fog, band);
             i = i + 1;
         }
     }
@@ -1254,6 +1254,7 @@ class Renderer {
     hw : f64,             // half the render width (horizontal projection centre);
                           // updated on resize so the aspect / FOV track the window
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
+    gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
     day : DayLighting,    // owns the day/night colour + brightness cache
     /**
      * The world-face raster crew: `BUILD_WORKERS` independent components,
@@ -1277,6 +1278,7 @@ class Renderer {
     constructor() {
         self.hw = Screen::HALF_W;
         self.atlas = new TextureAtlas();
+        self.gamma = new GammaTables();
         self.day = new DayLighting();
         self.crew = malloc<ChunkRenderer>(BUILD_WORKERS as i64);
         for (i of 0..BUILD_WORKERS) {
@@ -1293,7 +1295,7 @@ class Renderer {
      * @param base  base address of the loaded atlas texels
      */
     pub(crate) fn setAtlas(mut self, base : i64) : void {
-        self.atlas.setBase(base);
+        self.atlas.setBase(base, self.gamma.view());
     }
 
     /**
@@ -1347,14 +1349,15 @@ class Renderer {
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
      * @param atlas   the texture atlas mip chain view
+     * @param gam     the colour space the texels are lit in
      * @param fog     the distance-fog colour (this frame's sky colour)
      * @param day     the day/night state
      * @param lcurve  the brightness-curve lookup
      */
     pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera,
-        phase : f64, atlas : MipAtlas, fog : Rgb, day : DayState, lcurve : i64) : void {
+        phase : f64, atlas : MipAtlas, gam : Gamma, fog : Rgb, day : DayState, lcurve : i64) : void {
         for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64].setFrame(atlas, fog, day, lcurve);
+            self.crew[i as i64].setFrame(atlas, gam, fog, day, lcurve);
         }
         let builders : Task<i32>[5];
         for (i of 0..5) {
@@ -1428,7 +1431,7 @@ class Renderer {
         // face this frame; the world raster owns the rest of the pass.
         let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, hw: self.hw };
         let fog : Rgb = Rgb { r: ds.skyColR, g: ds.skyColG, b: ds.skyColB };
-        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), fog, ds, self.day.curve());
+        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), self.gamma.view(), fog, ds, self.day.curve());
     }
 
     // ── Post-processing (god-rays, bloom, underwater) ──
@@ -1537,15 +1540,17 @@ class Renderer {
     }
 
     /**
-     * Build this frame's mob/torch scene: the atlas mip chain, the distance-fog
-     * colour and the day/night state (from the render components) plus the
-     * projection half-width. Handed to the MobView draws each frame.
+     * Build this frame's mob/torch scene: the atlas mip chain, the colour space,
+     * the distance-fog colour and the day/night state (from the render
+     * components) plus the projection half-width. Handed to the MobView draws
+     * each frame.
      * @return the per-frame mob scene context
      */
     fn mobScene(self) : MobScene {
         let ds : DayState = self.day.state();
         return MobScene {
             atlas: self.atlas.mip(),
+            gam: self.gamma.view(),
             fog: Rgb { r: ds.skyColR, g: ds.skyColG, b: ds.skyColB },
             ds: ds,
             hw: self.hw,

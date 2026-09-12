@@ -1,0 +1,49 @@
+// cornerlight — how much light reaches ONE corner of one face, and in what
+// colour.
+//
+// Smooth lighting is a per-corner quantity: the mesher bakes a sky level and
+// a block level at each of a face's four corners, the shadow pass measures how
+// much of the sun that corner can see, and the rasteriser interpolates the
+// four results across the quad. This is the arithmetic that turns those
+// numbers into a colour, kept out of the face loop that gathers them — that
+// loop is about geometry, this is about light.
+//
+// Everything here is LINEAR light, so the two sources ADD. Vanilla takes the
+// brighter of sky and block, which is why a torch there can never brighten a
+// wall the sky already reaches; it can only fail to. The sum is what a photon
+// count would do, and the tone map at the end of the raster is what keeps a
+// corner that lands over full white from flattening.
+
+use crate::kernel::krender::gamma::{ LinRgb };
+use crate::configs::light::{ Light };
+
+/**
+ * One face corner's light, before it is given a colour: the two baked levels
+ * already through the brightness curve, the directional term already shadowed
+ * for this corner, and the ambient-occlusion factor.
+ */
+struct CornerLight {
+    pub(crate) sky : f64,
+    pub(crate) block : f64,
+    pub(crate) bright : f64,
+    pub(crate) ao : f64,
+
+    /**
+     * The corner's colour: the sky term takes the warm-sun / cool-shade tint
+     * (and the one-bounce colour folded into it), the block term takes the
+     * emitter's own colour, and occlusion darkens the sum. Only the sky half is
+     * shadowed — a torch burns just as brightly on the shaded side of its block.
+     * @param tint  the sky term's tint, bounce included
+     * @return the corner's light colour
+     */
+    pub(crate) fn colour(self, tint : LinRgb) : LinRgb {
+        let sun : f64 = self.bright * self.sky;
+        let dark : f64 = Light::MIN * self.ao;
+        let span : f64 = (1.0 - Light::MIN) * self.ao;
+        return LinRgb {
+            r: dark + span * (sun * tint.r + self.block * Light::TORCH_R),
+            g: dark + span * (sun * tint.g + self.block * Light::TORCH_G),
+            b: dark + span * (sun * tint.b + self.block * Light::TORCH_B),
+        };
+    }
+}

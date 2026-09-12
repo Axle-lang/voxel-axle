@@ -7,6 +7,7 @@ use smalt::Mem;
 use smalt::Color;
 use crate::kernel::kmath::mathx::clampI32;
 use crate::kernel::kmath::vec3::{ Vec3 };
+use crate::kernel::krender::gamma::{ Gamma, LinRgb, linearToSrgb };
 use crate::configs::atlas::{ Atlas };
 use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
@@ -189,6 +190,23 @@ fn shadeLambert(n : Vec3, sun : Vec3) : f64 {
 }
 
 /**
+ * The exposed directional term: the ambient floor, plus the sun's own share of
+ * `shadeLambert` scaled by how much of the sun this point can see and by
+ * `Render::SUN_STRENGTH`. Only the sun's share is exposed — lifting the floor
+ * with it would raise the shadows by exactly as much and show nothing.
+ *
+ * The world faces pass their corner's soft shadow fraction; a mob, which has
+ * no shadow map, passes 1. Both go through here so a mob standing in the open
+ * is lit by the same sun as the ground it stands on.
+ * @param bright  the Lambert term for the surface normal
+ * @param vis     the fraction of the direct term this point keeps (0..1)
+ * @return the light factor for the surface
+ */
+fn sunExposure(bright : f64, vis : f64) : f64 {
+    return Render::AMBIENT + Render::SUN_STRENGTH * vis * (bright - Render::AMBIENT);
+}
+
+/**
  * Edge function: signed area of the triangle (a, b, p).
  * @param ax  first vertex x.
  * @param ay  first vertex y.
@@ -220,17 +238,12 @@ fn clearFrame(fb : FrameBuf, bg : i32) : void {
 }
 
 /**
- * Extract one 8-bit channel of an ARGB colour.
- * @param c      the packed colour.
- * @param shift  the channel's bit shift (16 = red, 8 = green, 0 = blue).
- * @return the channel value in 0..255.
- */
-fn channel(c : i32, shift : i32) : i32 {
-    return (c >> shift) & 0xFF;
-}
-
-/**
- * Average one channel across four texels (a 2×2 box, for mip downscaling).
+ * Average one channel across four texels (a 2×2 box, for mip downscaling),
+ * IN LINEAR LIGHT: the four bytes are decoded, averaged as light, and encoded
+ * back. Averaging the bytes themselves — which is what this did — darkens
+ * every level of the chain, because the midpoint of two sRGB codes is far
+ * below the midpoint of the light they stand for.
+ * @param gam    the colour space to decode / encode through.
  * @param a      first texel.
  * @param b      second texel.
  * @param c      third texel.
@@ -238,8 +251,9 @@ fn channel(c : i32, shift : i32) : i32 {
  * @param shift  the channel's bit shift.
  * @return the averaged channel value in 0..255.
  */
-fn avg4(a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
-    return (channel(a, shift) + channel(b, shift) + channel(c, shift) + channel(d, shift)) / 4;
+fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
+    let sum : f64 = gam.decode(a, shift) + gam.decode(b, shift) + gam.decode(c, shift) + gam.decode(d, shift);
+    return (linearToSrgb(sum * 0.25) * 255.0 + 0.5).floorToInt() as i32;
 }
 
 /**
@@ -287,11 +301,14 @@ fn mipChainTexels() : i32 {
  * Build the mip chain into `mips` from the level-0 `atlas`: level 0 is a
  * copy, each finer level a 2×2 box-filtered downsample of the previous.
  * Pre-averaging the texels is what stops distant textures from shimmering
- * as the camera moves (Minecraft-style mipmapping).
+ * as the camera moves (Minecraft-style mipmapping). The downsample averages
+ * LINEAR light, so a shrinking texture keeps its brightness instead of sinking
+ * a little darker at every level.
  * @param atlas  the level-0 texture atlas.
  * @param mips   the destination mip chain buffer.
+ * @param gam    the colour space the box filter averages through.
  */
-fn buildMipChain(atlas : i64, mips : i64) : void {
+fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
     let n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
     let i : i32 = 0;
     while (i < n0) {
@@ -318,9 +335,9 @@ fn buildMipChain(atlas : i64, mips : i64) : void {
                     let c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
                     let c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
                     let c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
-                    let rr : i32 = avg4(c00, c01, c10, c11, 16);
-                    let gg : i32 = avg4(c00, c01, c10, c11, 8);
-                    let bb : i32 = avg4(c00, c01, c10, c11, 0);
+                    let rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
+                    let gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
+                    let bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
                     Mem::putWordOf(mips, base + (t * sz + ty) * sz + tx, Color::packBytes(rr, gg, bb));
                     tx = tx + 1;
                 }
@@ -421,22 +438,32 @@ struct Band {
 }
 
 /**
- * Bilinear sample of one atlas tile at a given mip level, returning packed rgb.
- * Used for the anisotropic minification taps.
- * @param mips     the mip chain buffer
- * @param lvlBase  texel offset of the mip level
- * @param lvlSz    tile side length of the mip level
- * @param tile     atlas tile index
- * @param u        tile u (0..1, may exceed when wrapping)
- * @param v        tile v
- * @param wrap     wrap within the tile (scrolled water) vs clamp
- * @return packed rgb of the bilinear sample
+ * One mip level of one tile, as the sampler addresses it: the chain, where the
+ * level starts in it, how wide the level's tiles are, and the texel row this
+ * tile begins at. The magnified and the minified paths differ in WHICH level
+ * they read and in how they arrive at their texel coordinates — not in how a
+ * tap is fetched — so they share one shape and one fetch.
  */
-fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f64, wrap : bool) : i32 {
-    let tmax : i32 = lvlSz - 1;
-    let tbase : i32 = tile * lvlSz;
-    let fu : f64 = u * (lvlSz as f64) - 0.5;
-    let fv : f64 = v * (lvlSz as f64) - 0.5;
+struct TileLevel {
+    mips : i64,
+    base : i32,
+    size : i32,
+    row : i32,
+}
+
+/**
+ * One bilinear tap, in linear light: the 2×2 texels around (fu, fv) weighted by
+ * the fractional part. Coordinates are in the LEVEL's texel space, already
+ * shifted by the half-texel the box centre needs.
+ * @param lvl   the mip level of the tile to read
+ * @param fu    texel-space u within the tile
+ * @param fv    texel-space v within the tile
+ * @param wrap  wrap within the tile (scrolled water) vs clamp
+ * @param gam   the colour space to decode through
+ * @return the weighted sample, as linear light
+ */
+fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : LinRgb {
+    let tmax : i32 = lvl.size - 1;
     let tx0 : i32 = fu.floorToInt() as i32;
     let ty0 : i32 = fv.floorToInt() as i32;
     let fx : f64 = fu - (tx0 as f64);
@@ -454,22 +481,23 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
         ty0 = clampI32(ty0, 0, tmax);
         ty1 = clampI32(ty1, 0, tmax);
     }
-    let rw0 : i32 = lvlBase + (tbase + ty0) * lvlSz;
-    let rw1 : i32 = lvlBase + (tbase + ty1) * lvlSz;
-    let c00 : i32 = Mem::dwordAt(mips, ((rw0 + tx0) as i64) * 4);
-    let c10 : i32 = Mem::dwordAt(mips, ((rw0 + tx1) as i64) * 4);
-    let c01 : i32 = Mem::dwordAt(mips, ((rw1 + tx0) as i64) * 4);
-    let c11 : i32 = Mem::dwordAt(mips, ((rw1 + tx1) as i64) * 4);
+    let rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
+    let rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
+    let c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
+    let c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
+    let c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
+    let c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
     let mfx : f64 = 1.0 - fx;
     let mfy : f64 = 1.0 - fy;
     let w00 : f64 = mfx * mfy;
     let w10 : f64 = fx * mfy;
     let w01 : f64 = mfx * fy;
     let w11 : f64 = fx * fy;
-    let rr : i32 = ((((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11).floorToInt() as i32;
-    let gg : i32 = ((((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11).floorToInt() as i32;
-    let bb : i32 = (((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11).floorToInt() as i32;
-    return rr * 65536 + gg * 256 + bb;
+    return LinRgb {
+        r: gam.decode(c00, 16) * w00 + gam.decode(c10, 16) * w10 + gam.decode(c01, 16) * w01 + gam.decode(c11, 16) * w11,
+        g: gam.decode(c00, 8) * w00 + gam.decode(c10, 8) * w10 + gam.decode(c01, 8) * w01 + gam.decode(c11, 8) * w11,
+        b: gam.decode(c00, 0) * w00 + gam.decode(c10, 0) * w10 + gam.decode(c01, 0) * w01 + gam.decode(c11, 0) * w11,
+    };
 }
 
 /**
@@ -480,14 +508,18 @@ fn sampleTile(mips : i64, lvlBase : i32, lvlSz : i32, tile : i32, u : f64, v : f
  * one, so distant surfaces stay sharp instead of smearing to a blurry mush. The
  * per-pixel screen-space UV derivatives come from the triangle's constant
  * gradients of (u/z, v/z, 1/z). Each channel is scaled by its own per-vertex
- * multiplier (Gouraud light colour).
+ * multiplier (Gouraud light colour) — in LINEAR light: the filtered texel is
+ * decoded, lit, then tone-mapped back to a display byte. The distance fog
+ * stays where it always was, on the encoded bytes, so far terrain still meets
+ * the sky (drawn in sRGB by its own pass) at exactly the same colour.
  * @param fb     the render target (framebuffer + z-buffer + size)
  * @param tri    the triangle: 3 RasterVerts + atlas tile index + wrap flag
  * @param atlas  the texture atlas mip chain (buffer + offset / size tables)
+ * @param gam    the colour space the texels are lit in
  * @param fogCol  distance-fog colour (terrain dissolves toward the sky)
  * @param band   the worker's disjoint screen-column band [x0, x1) to fill
  */
-fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, band : Band) : void {
+fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, fogCol : Rgb, band : Band) : void {
     let pixels : i64 = fb.pixels;
     let zbuf : i64 = fb.zbuf;
     let w : i32 = fb.w;
@@ -569,7 +601,6 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
     let maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
     let tf : f64 = tp;
-    let tmax : i32 = Atlas::TILE_PX - 1;
     let tbase : i32 = tri.tile * Atlas::TILE_PX;
 
     let py : i32 = miny;
@@ -649,38 +680,13 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                                 ccy0 = 0.0 - rrs;
                             }
                             let fv : f64 = fly + (cdy0 - ccy0) * sharp;
-                            let tx0 : i32 = fu.floorToInt() as i32;
-                            let ty0 : i32 = fv.floorToInt() as i32;
-                            let fx : f64 = fu - (tx0 as f64);
-                            let fy : f64 = fv - (ty0 as f64);
-                            let tx1 : i32 = tx0 + 1;
-                            let ty1 : i32 = ty0 + 1;
-                            if (wrap) {
-                                tx0 = tx0 & tmax;
-                                tx1 = tx1 & tmax;
-                                ty0 = ty0 & tmax;
-                                ty1 = ty1 & tmax;
-                            } else {
-                                tx0 = clampI32(tx0, 0, tmax);
-                                tx1 = clampI32(tx1, 0, tmax);
-                                ty0 = clampI32(ty0, 0, tmax);
-                                ty1 = clampI32(ty1, 0, tmax);
-                            }
-                            let rw0 : i32 = (tbase + ty0) * Atlas::TILE_PX;
-                            let rw1 : i32 = (tbase + ty1) * Atlas::TILE_PX;
-                            let c00 : i32 = *((atlas.mips + ((rw0 + tx0) as i64) * 4) as ptr<i32>);
-                            let c10 : i32 = *((atlas.mips + ((rw0 + tx1) as i64) * 4) as ptr<i32>);
-                            let c01 : i32 = *((atlas.mips + ((rw1 + tx0) as i64) * 4) as ptr<i32>);
-                            let c11 : i32 = *((atlas.mips + ((rw1 + tx1) as i64) * 4) as ptr<i32>);
-                            let mfx : f64 = 1.0 - fx;
-                            let mfy : f64 = 1.0 - fy;
-                            let w00 : f64 = mfx * mfy;
-                            let w10 : f64 = fx * mfy;
-                            let w01 : f64 = mfx * fy;
-                            let w11 : f64 = fx * fy;
-                            rf = (((c00 >> 16) & 0xFF) as f64) * w00 + (((c10 >> 16) & 0xFF) as f64) * w10 + (((c01 >> 16) & 0xFF) as f64) * w01 + (((c11 >> 16) & 0xFF) as f64) * w11;
-                            gf = (((c00 >> 8) & 0xFF) as f64) * w00 + (((c10 >> 8) & 0xFF) as f64) * w10 + (((c01 >> 8) & 0xFF) as f64) * w01 + (((c11 >> 8) & 0xFF) as f64) * w11;
-                            bf = ((c00 & 0xFF) as f64) * w00 + ((c10 & 0xFF) as f64) * w10 + ((c01 & 0xFF) as f64) * w01 + ((c11 & 0xFF) as f64) * w11;
+                            let c : LinRgb = bilinearLin(
+                                TileLevel { mips: atlas.mips, base: 0, size: Atlas::TILE_PX, row: tbase },
+                                fu, fv, wrap, gam
+                            );
+                            rf = c.r;
+                            gf = c.g;
+                            bf = c.b;
                         } else {
                             // ── Minification (distance): anisotropic filtering ──
                             // Mip from the minor axis (with a sharpening bias), then
@@ -693,8 +699,14 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                                 lim = lim * 4.0;
                                 mip = mip + 1;
                             }
-                            let lvlBase : i32 = Mem::dwordAt(atlas.mipOff, (mip as i64) * 4);
                             let lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
+                            let lvl : TileLevel = TileLevel {
+                                mips: atlas.mips,
+                                base: Mem::dwordAt(atlas.mipOff, (mip as i64) * 4),
+                                size: lvlSz,
+                                row: tri.tile * lvlSz,
+                            };
+                            let lvlF : f64 = lvlSz as f64;
                             let ratio : f64 = (major2 / minor2).sqrt();
                             let nN : i32 = (ratio + 0.5).floorToInt() as i32;
                             if (nN < 1) {
@@ -715,10 +727,11 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                             let i : i32 = 0;
                             while (i < nN) {
                                 let tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
-                                let c : i32 = sampleTile(atlas.mips, lvlBase, lvlSz, tri.tile, u + mju * tt, v + mjv * tt, wrap);
-                                sr = sr + (((c >> 16) & 0xFF) as f64);
-                                sg = sg + (((c >> 8) & 0xFF) as f64);
-                                sb = sb + ((c & 0xFF) as f64);
+                                let c : LinRgb = bilinearLin(lvl,
+                                    (u + mju * tt) * lvlF - 0.5, (v + mjv * tt) * lvlF - 0.5, wrap, gam);
+                                sr = sr + c.r;
+                                sg = sg + c.g;
+                                sb = sb + c.b;
                                 i = i + 1;
                             }
                             let invN : f64 = 1.0 / (nN as f64);
@@ -732,18 +745,9 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, fogCol : Rgb, 
                         let trp : f64 = b0 * tri.a.tr + b1 * tri.b.tr + b2 * tri.c.tr;
                         let tgp : f64 = b0 * tri.a.tg + b1 * tri.b.tg + b2 * tri.c.tg;
                         let tbp : f64 = b0 * tri.a.tb + b1 * tri.b.tb + b2 * tri.c.tb;
-                        let r : i32 = (rf * trp).floorToInt() as i32;
-                        let g : i32 = (gf * tgp).floorToInt() as i32;
-                        let bl : i32 = (bf * tbp).floorToInt() as i32;
-                        if (r > 255) {
-                            r = 255;
-                        }
-                        if (g > 255) {
-                            g = 255;
-                        }
-                        if (bl > 255) {
-                            bl = 255;
-                        }
+                        let r : i32 = gam.encode(rf * trp);
+                        let g : i32 = gam.encode(gf * tgp);
+                        let bl : i32 = gam.encode(bf * tbp);
                         // Distance fog: blend toward the sky past `Render::FOG_START`
                         // so far terrain dissolves instead of shimmering.
                         if (invz > Render::FOG_START) {

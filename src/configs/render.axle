@@ -13,14 +13,38 @@ class Render {
     static FOG_START : f64 = 66.0;
     static FOG_END : f64 = 90.0;
 
+    // ── Colour pipeline ─────────────────────────────────────────
+    // The world pass decodes texels to linear light, lights them there, and
+    // encodes the result through a tone curve (`krender::gamma`). The curve is
+    // the IDENTITY below `Render::TONE_KNEE` — so a fully lit surface still
+    // renders as the byte its texture was painted with — and rolls the excess
+    // off toward white above it, which is what lets a torch add onto sunlight
+    // without flattening into a white blob. `Render::TONE_MAX` is the brightest
+    // light the encode table resolves, over `Render::TONE_STEPS` entries.
+    static TONE_KNEE : f64 = 0.75;
+    static TONE_MAX : f64 = 4.0;
+    static TONE_STEPS : i32 = 32768;
+
     // ── Directional light ───────────────────────────────────────
     static LIGHT_X : f64 = 0.35;
     static LIGHT_Y : f64 = 0.86;
     static LIGHT_Z : f64 = 0.37;
-    static AMBIENT : f64 = 0.32;  // lower = darker shadow side / cast shadows (more contrast)
+    // Both of these are LINEAR light factors, and that is why they read low. A
+    // factor applied to linear light and then encoded to sRGB lands far higher
+    // than the same number applied to the display bytes: 0.20 of the light is
+    // about 0.48 of the pixel. Set them by the darkness you want to SEE, not by
+    // the number that used to produce it.
+    static AMBIENT : f64 = 0.11;  // lower = darker shadow side / cast shadows (more contrast)
     // Fraction of the direct-sun term a cast-shadowed face keeps (0 = flat ambient /
     // fully aggressive, 1 = no shadow). Higher = softer / less aggressive shadows.
-    static SHADOW_KEEP : f64 = 0.20;
+    static SHADOW_KEEP : f64 = 0.05;
+    // How much light the sun itself carries, over the ambient floor. Above 1 on
+    // purpose: a sunlit surface then lands past `Render::TONE_KNEE` and rolls off
+    // through the tone map's shoulder instead of stopping at the texture's own
+    // brightness, which is what makes the lit half read as SUNLIT rather than
+    // merely visible — and what makes a shadow read as dark, since the two are
+    // judged against each other and only their ratio is seen.
+    static SUN_STRENGTH : f64 = 1.70;
 
     // ── Atmospheric sky ─────────────────────────────────────────
     // The flat sky clear is replaced by a per-pixel gradient: a deeper zenith, a
@@ -30,13 +54,13 @@ class Render {
     static SKY_ZENITH_R : f64 = 0.72;      // zenith = skyCol × these (deeper, bluer up high)
     static SKY_ZENITH_G : f64 = 0.82;
     static SKY_ZENITH_B : f64 = 1.04;
-    static SKY_HORIZON_LIFT : f64 = 0.40;  // horizon fades toward a pale warm white by this much
+    static SKY_HORIZON_LIFT : f64 = 0.26;  // horizon fades toward a pale warm white by this much
     static SKY_HALO_R : i32 = 255;         // warm sun-halo colour added around the sun
     static SKY_HALO_G : i32 = 214;
     static SKY_HALO_B : i32 = 138;
-    static SKY_HALO_STRENGTH : f64 = 0.55; // broad halo intensity (applied to cos⁶ around the sun)
+    static SKY_HALO_STRENGTH : f64 = 0.40; // broad halo intensity (applied to cos⁶ around the sun)
     static SKY_CORE_THRESH : f64 = 0.9992; // cos(view,sun) above this = the tight bright core (higher = smaller)
-    static SKY_CORE_STRENGTH : f64 = 0.45; // brightness of that tight core (lower = less white-out when facing the sun)
+    static SKY_CORE_STRENGTH : f64 = 0.28; // brightness of that tight core (lower = less white-out when facing the sun)
 
     // ── Volumetric god-rays (crepuscular light shafts) ──────────
     // A screen-space radial scatter from the sun's projected position: each pixel
@@ -46,7 +70,7 @@ class Render {
     static GOD_RAYS_ON : bool = true;
     static GOD_RAY_SAMPLES : i32 = 24;   // steps per pixel toward the sun
     static GOD_RAY_DECAY : f64 = 0.92;   // per-step attenuation of the accumulated shaft
-    static GOD_RAY_WEIGHT : f64 = 0.42;  // overall shaft brightness (exposure)
+    static GOD_RAY_WEIGHT : f64 = 0.30;  // overall shaft brightness (exposure)
     static GOD_RAY_DENSITY : f64 = 0.92; // fraction of the pixel→sun distance the march spans
 
     // ── Bloom (soft glow on bright pixels) ──────────────────────
@@ -54,8 +78,13 @@ class Render {
     // Extracted above a luminance threshold at half resolution, blurred, and added
     // back — gives the image a honeyed, sunlit feel without touching midtones.
     static BLOOM_ON : bool = true;
-    static BLOOM_THRESHOLD : f64 = 190.0; // luminance (0..255) above which a pixel blooms
-    static BLOOM_STRENGTH : f64 = 0.68;   // how strongly the blurred glow is added back
+    // The threshold is a luminance the LIT WORLD must not reach, or the glow
+    // stops being a glow and becomes a haze over everything. Sunlit ground now
+    // sits near 180 — under the old 190 the grass itself bloomed — so this is
+    // set above the world and below the sky, the sun and the water glints,
+    // which are the things that are supposed to bleed.
+    static BLOOM_THRESHOLD : f64 = 232.0; // luminance (0..255) above which a pixel blooms
+    static BLOOM_STRENGTH : f64 = 0.60;   // how strongly the blurred glow is added back
     static BLOOM_RADIUS : i32 = 5;        // half-res blur radius (larger = wider glow)
     static BLOOM_ITERS : i32 = 2;         // separable blur passes (smoother glow)
 
