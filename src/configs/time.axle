@@ -39,8 +39,21 @@ class Daylight {
                                           // passes, and a cell only moves once per sweep, so the
                                           // sweep's LENGTH is how coarsely the shadow tracks the sun)
     static SUN_SHADOW_SAMPLES : i32 = 6;  // rays per cell over the sun disc (1 = hard, more = softer penumbra)
-    static SUN_DISC_ANGLE : f64 = 0.085;  // angular radius of the sun disc the rays spread over (rad);
-                                          // larger = softer, wider shadow edges (exaggerated vs the real sun)
+    // Angular radius of the sun disc the rays spread over, in radians, and the
+    // one number that decides whether a shadow has a SHAPE.
+    //
+    // A penumbra is the disc's angle carried over the distance to whatever casts
+    // the shadow: twice the distance times the tangent, so every feature narrower
+    // than that is averaged away before it reaches the ground. At 0.085 — some
+    // eighteen times the real sun — a shadow fifteen blocks from its caster had a
+    // penumbra two and a half blocks wide, which is wider than a tree trunk. That
+    // is why the ground carried soft grey blobs with no canopy in them and no
+    // trunk shadows at all: the blur was not a soft edge, it was the whole shadow.
+    //
+    // Four times the real sun instead. Fifteen blocks out the penumbra is six
+    // tenths of a block and the shape survives; forty blocks out it is a block and
+    // a half, so an edge still softens with distance the way a real one does.
+    static SUN_DISC_ANGLE : f64 = 0.020;
 
     // How far a cell's sun visibility moves toward its freshly measured value on
     // each sweep of the ring. Not 1.0, and that is the whole point: a cell is
