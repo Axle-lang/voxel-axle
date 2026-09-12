@@ -33,9 +33,22 @@ class Light {
     // and what makes a shadow read as dark, since the two are judged against each
     // other and only their ratio is seen.
     static SUN_STRENGTH : f64 = 1.42;
-    // Fraction of the direct term a cast-shadowed face keeps (0 = flat ambient /
-    // fully aggressive, 1 = no shadow). Higher = softer, less aggressive shadows.
-    static SHADOW_KEEP : f64 = 0.05;
+    // Fraction of the direct term a cast-shadowed face keeps.
+    //
+    // Zero, and the number is not the change — the meaning is. It used to be
+    // applied BEFORE `SUN_STRENGTH`, so a "five percent shadow" let through
+    // seven percent of the sun, and only onto faces turned toward it, which at
+    // noon is the ground. A shadowed ground face was taking thirty percent of
+    // its light straight from the sun and wearing the sun's warm tint while
+    // doing it, which is a lit surface with the brightness turned down, not a
+    // shadow.
+    //
+    // What a cast shadow leaves is the sky, and the sky is `AMBIENT`. There is
+    // nothing left for this to add: at noon the direct term is ten times the
+    // ambient, so even a hundredth of it would be a tenth of the shadow. The
+    // penumbra still comes from the disc — a cell half in shadow keeps half the
+    // direct term — so an edge is a gradient, not a step.
+    static SHADOW_KEEP : f64 = 0.0;
     // How far the sun visibility (0..255) may vary along ONE merged quad before
     // the mesher's run is cut and each cell gets its own quad. A merged quad reads
     // the shadow at its four corners and interpolates between them, so a run a
@@ -72,7 +85,7 @@ class Light {
 
     // A block light's colour is no longer a constant here: it is the per-channel
     // emission level in `blocks::emissionOf`, which floods the world as three
-    // volumes. See `krender::cornerlight`.
+    // volumes. See `klight::surface`.
     //
     // What is left is how bright the FLAME ITSELF is drawn — a source is not lit
     // by the room, it lights it. Above 1 so it comes through the tone map's
@@ -88,7 +101,7 @@ class Light {
 
     // Warm sun / cool shade — the heart of the "sunny" feel. Direct sunlight tints
     // surfaces a warm gold; the ambient / shadow side cools to a soft blue, like
-    // skylight. `krender::cornerlight` blends between them by how directly a
+    // skylight. `klight::surface` blends between them by how directly a
     // corner faces the sun (and by daylight, so night stays neutral moonlight).
     //
     // These are HUE, not brightness: the blend is divided by its own luminance

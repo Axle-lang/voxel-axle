@@ -1,0 +1,268 @@
+// klight::surface — how much light reaches a surface, in what colour.
+//
+// One model, one place. It replaces two files and a hundred lines that lived
+// inside the renderer's face loop, and the reason to gather them is not tidiness:
+// while they were apart, the same physical quantity was measured twice and the
+// two measurements were multiplied together.
+//
+// THE MODEL
+//
+// A surface receives light from exactly two places, and everything else follows
+// from keeping them apart.
+//
+//   DIRECT   the body — sun or moon — arriving from one direction. A Lambert
+//            dot product, so it is everything on a face turned toward it and
+//            nothing on one turned away. What takes it away is the CAST SHADOW,
+//            and nothing else: a cast shadow is the only thing between a surface
+//            and the sun.
+//
+//   AMBIENT  the sky, arriving from the whole dome at once. It does not care
+//            where the sun is, only how much dome the surface can see. What
+//            takes it away is OCCLUSION — how much sky is actually up there from
+//            here — and nothing else.
+//
+// Three rules keep them honest, and each of them was being broken:
+//
+//   1. The shadow scales the WHOLE direct term. It used to be applied before the
+//      sun's strength, so a "five percent shadow" kept seven percent of the sun,
+//      and it landed only on faces turned toward the sun, which at noon is the
+//      ground. The ground was the brightest shadow in the world by construction.
+//
+//   2. Occlusion scales the AMBIENT term only. The flood's sky level and the
+//      ray-traced sky access are two measurements of one thing — how much sky
+//      this cell sees — and they were multiplied, which squares a canopy's
+//      darkening. They are now the MINIMUM of the two: whichever measurement
+//      sees less sky is believed. And their product used to be applied to the
+//      DIRECT term as well, so a cast shadow was gated three times, twice by
+//      something that is not the sun.
+//
+//   3. Ambient occlusion is occlusion. The baked corner term darkens the sky's
+//      share, not the sun's: a corner in full sunlight is in full sunlight, and
+//      a seam is dark because the sky cannot reach into it.
+//
+// What is left over is the floor — what a surface reflects with no light at all
+// — and it is a floor, flat, not something ambient occlusion darkens further.
+
+use crate::kernel::kmath::vec3::{ Vec3 };
+use crate::kernel::klight::gamma::{ LinRgb };
+use crate::configs::light::{ Light };
+
+/** Rec. 601 luminance of a linear triple — what "the same brightness" means. */
+fn luma(c : LinRgb) : f64 {
+    return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+}
+
+/** The larger of two, so a clamp reads as what it is. */
+fn maxF(a : f64, b : f64) : f64 {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+/** The smaller of two. */
+fn minF(a : f64, b : f64) : f64 {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+/** `v`, held inside 0..1. */
+fn unit(v : f64) : f64 {
+    return maxF(0.0, minF(1.0, v));
+}
+
+/**
+ * How much of the sky dome a face with this normal can see, against what one
+ * pointing straight up sees.
+ *
+ * The sky is a hemisphere, not a lamp: a floor sees all of it, a wall half, a
+ * ceiling's underside only what the ground bounces back. A flat ambient gave
+ * all three the same, which is what makes a scene look lit from nowhere.
+ * @param n  the (unit) surface normal
+ * @return the sky-dome fraction, `Light::SKY_VIEW_MIN`..1
+ */
+fn skyView(n : Vec3) : f64 {
+    return Light::SKY_VIEW_MIN + (1.0 - Light::SKY_VIEW_MIN) * (0.5 + 0.5 * n.y);
+}
+
+/**
+ * The two halves of the light landing on a surface, each already carrying
+ * everything that is a property of the HOUR rather than of the place.
+ *
+ * `direct` has the body's strength and the sun's own multiplier folded in, so
+ * the cast shadow that scales it scales all of it. `ambient` has how much sky
+ * there is folded in. Neither carries anything about occlusion — that belongs to
+ * the place, and the place is a corner, not a face.
+ */
+struct SurfaceLight {
+    pub(crate) direct : f64,
+    pub(crate) ambient : f64,
+
+    /**
+     * The light this surface ends up with.
+     * @param shadow  the fraction of the direct term the cast shadow leaves, 0..1
+     * @param occ     the fraction of the sky this point can see, 0..1
+     * @return the light factor for the surface
+     */
+    pub(crate) fn exposure(self, shadow : f64, occ : f64) : f64 {
+        return self.direct * shadow + self.ambient * occ;
+    }
+
+    /**
+     * How much of that light came straight from the body, 0..1 — which is what
+     * decides its colour, since the two halves arrive in different ones.
+     *
+     * A face in the open at noon is nearly all sun and takes the sun's gold; the
+     * same face turned away is nearly all sky and takes the sky's blue; and one
+     * in a cast shadow is all sky whichever way it faces, which is a sentence
+     * this model can finally say truthfully.
+     * @param shadow  the fraction of the direct term the cast shadow leaves
+     * @param occ     the fraction of the sky this point can see
+     * @return the direct share of the light, 0..1
+     */
+    pub(crate) fn directShare(self, shadow : f64, occ : f64) : f64 {
+        let d : f64 = self.direct * shadow;
+        let t : f64 = d + self.ambient * occ;
+        if (t < 0.000001) {
+            return 0.0;
+        }
+        return d / t;
+    }
+}
+
+/**
+ * Split the light on a surface normal into the body's share and the sky's.
+ *
+ * The one shared shade term: the world faces, the mob boxes and the checks all
+ * call this instead of each open-coding the same dot product against a slightly
+ * different vector — which is how the mobs ended up lit by the sun's DRAWN
+ * position and stayed in daylight all night.
+ * @param n           the (unit) surface normal
+ * @param body        the (unit) direction to the body actually lighting the world
+ * @param strength    how much of full sun that body carries, 0..1
+ * @param skyAmbient  how much of the sky's own light there is this hour, 0..1
+ * @return the surface's direct and ambient terms
+ */
+fn surfaceLight(n : Vec3, body : Vec3, strength : f64, skyAmbient : f64) : SurfaceLight {
+    let ndl : f64 = n.dot(body);
+    if (ndl < 0.0) {
+        ndl = 0.0;
+    }
+    return SurfaceLight {
+        direct: Light::SUN_STRENGTH * (1.0 - Light::AMBIENT) * ndl * strength,
+        ambient: Light::AMBIENT * skyView(n) * skyAmbient,
+    };
+}
+
+/**
+ * What a cast shadow leaves of the direct term.
+ *
+ * `Light::SHADOW_KEEP` is now what its name says: a fraction of the sun, applied
+ * to the sun's whole contribution. It used to be applied before
+ * `Light::SUN_STRENGTH`, so it let through half again as much as it claimed.
+ * @param vis  how much of the body's disc this point can see, 0..1
+ * @return the fraction of the direct term that survives
+ */
+fn shadowFactor(vis : f64) : f64 {
+    return Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * unit(vis);
+}
+
+/**
+ * How much sky a point can see, from the two things that measure it.
+ *
+ * The flood's level answers everywhere and coarsely; the hemisphere rays answer
+ * finely but only as far as they reach. They are the SAME quantity, so the
+ * answer is whichever of them sees less sky — not, as it was, their product,
+ * which darkens a canopy by the square of its own occlusion.
+ * @param level   the flooded sky light at this corner, already through the curve
+ * @param access  the ray-traced sky access, 0..1
+ * @return the fraction of the sky dome this point receives
+ */
+fn skyOcclusion(level : f64, access : f64) : f64 {
+    return minF(level, Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * unit(access));
+}
+
+/**
+ * The colour the sky's light arrives in: warm where the body reaches it, cool
+ * where only the sky does, and carrying the surrounding albedo where the light
+ * got there by bouncing.
+ *
+ * The tint is HUE ONLY — divided by its own luminance — so it can move a colour
+ * but not brighten it. Brightness is the shadow's job, and a tint that also
+ * carried it was deciding the same thing twice.
+ *
+ * The bounce rides on `1 - direct`, because one-bounce light is by definition
+ * the light that did NOT come straight from the body: tinting a surface in full
+ * sun with the colour of its neighbours pushes green grass greener under an open
+ * sky, which is most of what reads as garish.
+ * @param share   how much of this point's light came straight from the body
+ * @param body    the colour the body's light arrives in this hour
+ * @param bounce  the one-bounce colour tint (1, 1, 1 = neutral)
+ * @return the light's colour, at unit luminance
+ */
+fn lightTint(share : f64, body : LinRgb, bounce : Vec3) : LinRgb {
+    let k : f64 = unit(share);
+    let ind : f64 = 1.0 - k;
+    let c : LinRgb = LinRgb {
+        r: (Light::SHADE_TINT_R + (body.r - Light::SHADE_TINT_R) * k) * (1.0 + (bounce.x - 1.0) * ind),
+        g: (Light::SHADE_TINT_G + (body.g - Light::SHADE_TINT_G) * k) * (1.0 + (bounce.y - 1.0) * ind),
+        b: (Light::SHADE_TINT_B + (body.b - Light::SHADE_TINT_B) * k) * (1.0 + (bounce.z - 1.0) * ind),
+    };
+    let l : f64 = luma(c);
+    if (l < 0.0001) {
+        return LinRgb { r: 1.0, g: 1.0, b: 1.0 };
+    }
+    return LinRgb { r: c.r / l, g: c.g / l, b: c.b / l };
+}
+
+/**
+ * Everything one face corner brings to the model: what it can see of the body,
+ * what it can see of the sky, and what is already burning there.
+ *
+ * A value struct because it is gathered in one place and used in another, and
+ * because the alternative — eight loose scalars threaded through two calls — is
+ * how the terms got out of step in the first place.
+ */
+struct CornerTerms {
+    pub(crate) vis : f64,        // the body's disc this corner can see, 0..1
+    pub(crate) skyLevel : f64,   // the flooded sky light, already through the curve
+    pub(crate) skyAccess : f64,  // the ray-traced sky access, 0..1
+    pub(crate) ao : f64,         // the baked corner occlusion, 0..1
+    pub(crate) block : LinRgb,   // block light, already through the curve
+    pub(crate) bounce : Vec3,    // the one-bounce tint multipliers
+}
+
+/**
+ * One face corner's colour: the whole model, in one expression.
+ *
+ * Read it as the three sentences at the top of this file. The body's share is
+ * scaled by the cast shadow. The sky's share is scaled by how much sky is up
+ * there and by how much of it this seam can reach. Their sum takes a colour from
+ * which of them won. Block light is added on top, uncoloured by any of it — a
+ * torch burns just as brightly on the shaded side of its own block. And the
+ * floor is added under all of it, flat.
+ * @param surf  the face's two shares, from `surfaceLight`
+ * @param t     what this corner can see
+ * @param body  the colour the body's light arrives in this hour
+ * @return the corner's light, as a linear multiplier on the texel
+ */
+fn cornerColour(surf : SurfaceLight, t : CornerTerms, body : LinRgb) : LinRgb {
+    let shadow : f64 = shadowFactor(t.vis);
+    let occ : f64 = skyOcclusion(t.skyLevel, t.skyAccess) * unit(t.ao);
+    let sun : f64 = surf.direct * shadow;
+    let sky : f64 = surf.ambient * occ;
+    let total : f64 = sun + sky;
+    let share : f64 = 0.0;
+    if (total > 0.000001) {
+        share = sun / total;
+    }
+    let tint : LinRgb = lightTint(share, body, t.bounce);
+    let span : f64 = 1.0 - Light::MIN;
+    return LinRgb {
+        r: Light::MIN + span * (total * tint.r + t.block.r),
+        g: Light::MIN + span * (total * tint.g + t.block.g),
+        b: Light::MIN + span * (total * tint.b + t.block.b),
+    };
+}

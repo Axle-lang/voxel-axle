@@ -6,6 +6,13 @@
 /** Hit points, fall and drowning damage, and regeneration. */
 class Health {
     static PLAYER_MAX_HP : i32 = 20;
+    // The damage flash, as light rather than as paint: the struck face keeps its
+    // own brightness, lifted in red and damped in green and blue. Named because
+    // the same effect existed twice with two different sets of digits, one in
+    // linear light and one in display bytes.
+    static HURT_LIFT : f64 = 0.6;
+    static HURT_DAMP : f64 = 0.4;
+
     static SAFE_FALL_DIST : f64 = 4.0;        // blocks fallen before it hurts
     static FALL_DAMAGE_PER_BLOCK : f64 = 1.5; // hp per block beyond the safe distance
     static DROWN_GRACE_FRAMES : i32 = 180;    // ~3 s of breath

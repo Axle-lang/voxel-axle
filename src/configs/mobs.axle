@@ -17,6 +17,12 @@ enum MobKind : i32 {
 
 /** Population, per-species hit points and speeds, the wander AI, melee, and the creeper. */
 class Mobs {
+    // How far a mob face's own light is blended toward the light of an upward
+    // face. A mob is a little stack of boxes, and the world's full contrast
+    // makes every box edge read as a hard seam; blending toward the average over
+    // a rounded thing is what makes it read as a creature rather than a crate.
+    static ROUNDING : f64 = 0.80;
+
     static CAP : i32 = 32;
     static CHICKEN_HP : i32 = 4;
     static SHEEP_HP : i32 = 8;

@@ -22,7 +22,7 @@ use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightTransmit, emissionOf, albedoFor, Emission };
 use crate::kernel::seams::{ LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels };
 use crate::kernel::klight::volumes::{ Nibble, nibGet, nibPut, LightVolumes, LightRemoval, HemiRays, HemiHit, LightStore };
-use crate::kernel::klight::sample::{ CornerChunk, chanMean, blend4 };
+use crate::kernel::klight::sample::{ CornerChunk, CellLight, blendCells, openCell };
 use crate::kernel::klight::daymodel::{ SkyBodyLight, activeBody };
 use crate::kernel::ksky::cloud::{ cloudFieldAt };
 use crate::kernel::ksky::cloudlight::{ CloudMap };
@@ -884,14 +884,29 @@ class LightEngine : LightSample, LightBaker {
                 let y : i32 = 0;
                 while (y <= top) {
                     let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
-                        && nibGet(self.lights.vols.sky(), off) > 0
-                        && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                    let air : bool = self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air;
+                    let lit : bool = nibGet(self.lights.vols.sky(), off) > 0;
+                    if (air && lit && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
                         let v : i32 = ((self.sunRaySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil) as f64) * cloudT).floorToInt() as i32;
                         if (!snap) {
                             v = self.glideTo(Mem::byteAt(self.lights.vols.sunlit, off), v);
                         }
                         Mem::putByte(self.lights.vols.sunlit, off, v);
+                    } else if (air && !lit) {
+                        // No sky light reaches here, so no sun does either, and
+                        // the ray is not worth casting to find that out. Written
+                        // rather than left, and that is the whole point: a cell
+                        // the bake skips keeps what the slot was CLEARED to,
+                        // which is full sun. It used to be masked by the sky
+                        // level gating the direct term as well — three gates for
+                        // one shadow — and now that the direct term is gated by
+                        // the shadow alone, a cave would be in full sunlight if
+                        // this branch were not here.
+                        //
+                        // It also un-freezes a cell that used to qualify and
+                        // stopped: roof over a lit patch of ground and its
+                        // afternoon shadow no longer stays there for good.
+                        Mem::putByte(self.lights.vols.sunlit, off, 0);
                     }
                     y = y + 1;
                 }
@@ -1124,16 +1139,22 @@ class LightEngine : LightSample, LightBaker {
      * @param cell  the world voxel
      * @return its sun visibility, sky access and packed bounce tint
      */
-    fn cellSample(self, cell : IVec3) : CornerSample {
-        if (cell.y < 0 || cell.y >= World::HEIGHT) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+    fn cellSample(self, cell : IVec3) : CellLight {
+        if (cell.y < 0) {
+            return CellLight { light: openCell(), counts: false };
+        }
+        if (cell.y >= World::HEIGHT) {
+            return CellLight { light: openCell(), counts: true };
         }
         let s : i32 = World::CHUNK_SIZE;
         let cx : i32 = self.floorDiv(cell.x, s);
         let cz : i32 = self.floorDiv(cell.z, s);
         let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+            // A chunk the ring does not hold is not "open sky", it is unknown.
+            // Counting it as open is what made the faces at the ring's edge read
+            // half-way to full sun until the neighbour landed.
+            return CellLight { light: openCell(), counts: false };
         }
         return self.cellIn(slot, cell.x - cx * s, cell.y, cell.z - cz * s);
     }
@@ -1146,17 +1167,26 @@ class LightEngine : LightSample, LightBaker {
      * @param lz    local z inside that chunk
      * @return the three terms at that cell
      */
-    fn cellIn(self, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
-        if (y < 0 || y >= World::HEIGHT) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+    fn cellIn(self, slot : i32, lx : i32, y : i32, lz : i32) : CellLight {
+        if (y < 0) {
+            return CellLight { light: openCell(), counts: false };
         }
-        let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-        return CornerSample {
-            sun: Mem::byteAt(self.lights.vols.sunlit, off),
-            sky: Mem::byteAt(self.lights.vols.skyaccess, off),
-            bounce: (Mem::byteAt(self.lights.vols.bnR, off) << 16)
-                | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
-                | Mem::byteAt(self.lights.vols.bnB, off),
+        if (y >= World::HEIGHT) {
+            return CellLight { light: openCell(), counts: true };
+        }
+        let idx : i32 = self.store.voxIdx(slot, lx, y, lz);
+        let off : i64 = idx as i64;
+        return CellLight {
+            light: CornerSample {
+                sun: Mem::byteAt(self.lights.vols.sunlit, off),
+                sky: Mem::byteAt(self.lights.vols.skyaccess, off),
+                bounce: (Mem::byteAt(self.lights.vols.bnR, off) << 16)
+                    | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
+                    | Mem::byteAt(self.lights.vols.bnB, off),
+            },
+            // The volumes share the voxel field's index, so what this cell IS
+            // costs one more read of an offset already computed.
+            counts: !isOpaque(self.store.voxAt(idx)),
         };
     }
 
@@ -1210,10 +1240,10 @@ class LightEngine : LightSample, LightBaker {
         // reads without four walks down the ring to reach them.
         let cc : CornerChunk = self.cornerSlot(b, c3);
         if (cc.slot < 0) {
-            return blend4(self.cellSample(b), self.cellSample(c1),
+            return blendCells(self.cellSample(b), self.cellSample(c1),
                 self.cellSample(c2), self.cellSample(c3));
         }
-        return blend4(
+        return blendCells(
             self.cellIn(cc.slot, b.x - cc.ox, b.y, b.z - cc.oz),
             self.cellIn(cc.slot, c1.x - cc.ox, c1.y, c1.z - cc.oz),
             self.cellIn(cc.slot, c2.x - cc.ox, c2.y, c2.z - cc.oz),

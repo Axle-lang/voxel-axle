@@ -29,7 +29,7 @@ use crate::configs::world::{ World };
 use crate::configs::cloud::{ Cloud };
 use crate::configs::light::{ Light };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
-use crate::kernel::klight::facelight::{ FaceLight, shadeLambert };
+use crate::kernel::klight::surface::{ SurfaceLight, surfaceLight, shadowFactor };
 use crate::kernel::ksky::cloud::{ CloudField, cloudFieldAt };
 use crate::kernel::ksky::cloudlight::{ sunThrough };
 use crate::kernel::ksky::clouddome::{ CloudSky, CloudDome, CloudCell };
@@ -341,11 +341,11 @@ fn checkPluggedTunnel(man : ChunkManager, site : IVec3) : i32 {
  */
 fn checkDirectional() : i32 {
     let sun : Vec3 = vec3(0.455, 0.827, 0.330);
-    let toward : FaceLight = shadeLambert(vec3(0.0, 1.0, 0.0), sun);
-    let away : FaceLight = shadeLambert(vec3(0.0 - 0.455, 0.0 - 0.827, 0.0 - 0.330), sun);
-    let lit : f64 = toward.exposure(1.0);
-    let dark : f64 = away.exposure(1.0);
-    let shadowed : f64 = toward.exposure(Light::SHADOW_KEEP);
+    let toward : SurfaceLight = surfaceLight(vec3(0.0, 1.0, 0.0), sun, 1.0, 1.0);
+    let away : SurfaceLight = surfaceLight(vec3(0.0 - 0.455, 0.0 - 0.827, 0.0 - 0.330), sun, 1.0, 1.0);
+    let lit : f64 = toward.exposure(1.0, 1.0);
+    let dark : f64 = away.exposure(1.0, 1.0);
+    let shadowed : f64 = toward.exposure(shadowFactor(0.0), 1.0);
     Console::println("  sunward=${lit} away=${dark} same-face-shadowed=${shadowed}"
         + "  (directional ${lit / dark}x, shadow ${lit / shadowed}x)");
     let bad : i32 = 0;

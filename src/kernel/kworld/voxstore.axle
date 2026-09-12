@@ -61,6 +61,20 @@ class VoxStore {
     }
 
     /**
+     * The block at a flat index `voxIdx` already produced.
+     *
+     * The light volumes share the voxel field's layout exactly, so a caller that
+     * has computed an offset to read a cell's light has also computed the offset
+     * of the cell's block. Asking for it again through `getVox` would walk the
+     * same multiply twice.
+     * @param off  the flat offset
+     * @return the block id at that cell
+     */
+    pub(crate) fn voxAt(self, off : i32) : Block {
+        return self.vox[off];
+    }
+
+    /**
      * Read a local voxel: bedrock (Stone) below y=0, Air at/above the
      * world top, the stored block otherwise.
      * @param slot   the slot index

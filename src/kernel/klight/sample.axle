@@ -5,13 +5,19 @@
 // quad. This is the averaging, kept apart from both the bake that fills the
 // cells and the shading that colours the result.
 //
-// The rule the average follows is the one the mesher already follows for the
-// baked levels: a cell that is inside a block is not averaged in. It has no
-// light to report — the bake never writes one — so counting it means counting
-// whatever the slot was cleared to.
+// The rule the average follows is the one the mesher has always followed for the
+// baked levels, and the one this half of the same corner did not: a cell that is
+// inside a block is not averaged in.
+//
+// It is not a refinement. A solid cell has no sun visibility to report — the
+// bake only ever writes air — so what it holds is whatever the slot was cleared
+// to, which is full sun. Averaging it in lightens the corner in proportion to
+// how much solid meets there, and the places where solid meets are exactly the
+// foot of a wall, the base of a trunk and the lip of a step: the shadow was
+// being erased precisely where its own object stands. Measured over the ring,
+// four corners in a hundred read up to 191 of 255 too bright.
 
 use crate::kernel::seams::{ CornerSample };
-
 
 /**
  * A chunk found once for the four cells of a face corner: which slot holds it,
@@ -28,38 +34,78 @@ struct CornerChunk {
 }
 
 /**
- * The mean of one channel of four packed bounce tints.
- * @param b0     the corner's own tint
- * @param b1     one step along the first in-plane axis
- * @param b2     one step along the second
- * @param b3     one step along both
- * @param shift  where the channel sits in the packed word
- * @return the channel's mean, 0..255
+ * One cell's contribution to a corner: what it holds, and whether it holds
+ * anything at all.
+ *
+ * `counts` is false for a cell light cannot be in — inside a block, below the
+ * world, or in a chunk the ring does not have. The first is the one that
+ * mattered; the third is why a face at the edge of the loaded ring used to read
+ * half-way to full sun until its neighbour arrived.
  */
-fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
-    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
-        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
+struct CellLight {
+    pub(crate) light : CornerSample,
+    pub(crate) counts : bool,
 }
 
 /**
- * The mean of the four cells meeting at a face corner.
+ * What a cell with nothing over it holds: all the sun, all the sky, no tint.
+ * @return the open-sky reading
+ */
+fn openCell() : CornerSample {
+    return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+}
+
+/**
+ * The mean of the cells meeting at a face corner that have something to say.
+ *
+ * The corner's OWN cell always counts. It is the air cell the face looks out of,
+ * so it is air by construction, and it is the one reading that is certainly
+ * about this surface — if the other three all turn out to be solid, the corner
+ * is a deep inside seam and its own cell is the honest answer.
  *
  * The bounce tint averages per channel: packed, its channels would carry each
  * other's overflow and a corner between a green cell and a red one would come
  * out neither.
- * @param s0  the corner's own cell
- * @param s1  one step along the first in-plane axis
- * @param s2  one step along the second
- * @param s3  one step along both
+ * @param c0  the corner's own cell
+ * @param c1  one step along the first in-plane axis
+ * @param c2  one step along the second
+ * @param c3  one step along both
  * @return the averaged terms
  */
-fn blend4(s0 : CornerSample, s1 : CornerSample, s2 : CornerSample, s3 : CornerSample) : CornerSample {
-    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
-    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
-    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+fn blendCells(c0 : CellLight, c1 : CellLight, c2 : CellLight, c3 : CellLight) : CornerSample {
+    let sun : i32 = c0.light.sun;
+    let sky : i32 = c0.light.sky;
+    let br : i32 = (c0.light.bounce >> 16) & 0xFF;
+    let bg : i32 = (c0.light.bounce >> 8) & 0xFF;
+    let bb : i32 = c0.light.bounce & 0xFF;
+    let n : i32 = 1;
+    if (c1.counts) {
+        sun = sun + c1.light.sun;
+        sky = sky + c1.light.sky;
+        br = br + ((c1.light.bounce >> 16) & 0xFF);
+        bg = bg + ((c1.light.bounce >> 8) & 0xFF);
+        bb = bb + (c1.light.bounce & 0xFF);
+        n = n + 1;
+    }
+    if (c2.counts) {
+        sun = sun + c2.light.sun;
+        sky = sky + c2.light.sky;
+        br = br + ((c2.light.bounce >> 16) & 0xFF);
+        bg = bg + ((c2.light.bounce >> 8) & 0xFF);
+        bb = bb + (c2.light.bounce & 0xFF);
+        n = n + 1;
+    }
+    if (c3.counts) {
+        sun = sun + c3.light.sun;
+        sky = sky + c3.light.sky;
+        br = br + ((c3.light.bounce >> 16) & 0xFF);
+        bg = bg + ((c3.light.bounce >> 8) & 0xFF);
+        bb = bb + (c3.light.bounce & 0xFF);
+        n = n + 1;
+    }
     return CornerSample {
-        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
-        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
-        bounce: r * 65536 + g * 256 + b,
+        sun: sun / n,
+        sky: sky / n,
+        bounce: (br / n) * 65536 + (bg / n) * 256 + (bb / n),
     };
 }

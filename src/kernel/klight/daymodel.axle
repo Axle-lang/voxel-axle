@@ -11,7 +11,7 @@
 // with the backdrop.
 
 use smalt::Mem;
-use crate::kernel::klight::facelight::{ FaceLight, SkyLighting, shadeLambert };
+use crate::kernel::klight::surface::{ SurfaceLight, surfaceLight };
 use crate::kernel::kmath::vec3::{ Vec3, vec3 };
 use crate::configs::light::{ Light };
 use crate::configs::cloud::{ Cloud };
@@ -93,7 +93,7 @@ fn activeBody(dayTime : f64) : SkyBodyLight {
  * value-type struct passed by value into every sky draw (and across the gradient
  * job's thread), so no day-state is shared by reference.
  */
-struct DayState : SkyLighting {
+struct DayState {
     // Where the SUN is, for the things that draw it: its disc, the halo around
     // it, the god-ray origin. A fact about the picture, not about the light — at
     // night it is below the horizon and lighting nothing.
@@ -123,15 +123,38 @@ struct DayState : SkyLighting {
      * dot-product from loose scalars, so there is one answer to "what reaches
      * this normal".
      * @param n  the (unit) surface normal
-     * @return the face's direct and ambient terms
+     * @return the surface's direct and ambient terms
      */
-    pub(crate) fn shade(self, n : Vec3) : FaceLight {
-        let f : FaceLight = shadeLambert(n, vec3(self.dirX, self.dirY, self.dirZ));
-        return FaceLight {
-            direct: f.direct * self.dirStrength,
-            ambient: f.ambient * self.skyAmbient,
-        };
+    pub(crate) fn shade(self, n : Vec3) : SurfaceLight {
+        return surfaceLight(n, vec3(self.dirX, self.dirY, self.dirZ),
+            self.dirStrength, self.skyAmbient);
     }
+}
+
+/**
+ * How much of the sky's own light there is this hour, 0..1.
+ *
+ * A deck takes the sun away and hands part of it back diffused, so an overcast
+ * sky loses its shadows without losing its light. That is a REDISTRIBUTION, and
+ * it used to be written as an addition: the lift multiplied the daylight factor
+ * with nothing bounding the result, so at noon under the shipped coverage every
+ * ambient term in the world was 1.2365 — a quarter more sky than there is sky,
+ * permanently, on a frame with no cloud in it. It is the single largest reason a
+ * shadowed surface read too bright.
+ *
+ * Bounded here, where the number is made, rather than at each of the places that
+ * read it and did not.
+ * @param dl        the daylight factor, 0..1
+ * @param overcast  how much of the sky the deck covers, 0..1
+ * @return the sky's share, never over 1
+ */
+fn skyShare(dl : f64, overcast : f64) : f64 {
+    let v : f64 = (Daylight::STARLIGHT + (1.0 - Daylight::STARLIGHT) * dl)
+        * (1.0 + Cloud::AMBIENT_LIFT * overcast);
+    if (v > 1.0) {
+        return 1.0;
+    }
+    return v;
 }
 
 /**
@@ -203,8 +226,7 @@ fn computeDayState(dayTime : f64) : DayState {
         // directional half is cut per column by the cloud map; this is the other
         // side of that trade, and it is bounded — the rule is still that the
         // light comes from the sun, so overcast reads as SOFT, not as flat.
-        skyAmbient: (Daylight::STARLIGHT + (1.0 - Daylight::STARLIGHT) * dl)
-            * (1.0 + Cloud::AMBIENT_LIFT * overcast),
+        skyAmbient: skyShare(dl, overcast),
         skyColR: r.floorToInt() as i32,
         skyColG: g.floorToInt() as i32,
         skyColB: b.floorToInt() as i32,

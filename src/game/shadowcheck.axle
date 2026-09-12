@@ -32,7 +32,7 @@ use crate::game::world::terraingen::TerrainGen;
 use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
 use crate::kernel::kblock::blocks::{ isOpaque };
 use crate::kernel::klight::daymodel::{ DayState, SkyBodyLight, activeBody, computeDayState };
-use crate::kernel::klight::facelight::{ FaceLight };
+use crate::kernel::klight::surface::{ SurfaceLight, shadowFactor };
 use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::seams::{ CornerProbe, CornerSample, LightMoment };
 use crate::configs::blocks::{ Block };
@@ -467,8 +467,8 @@ fn checkInvariants(ds : DayState) : i32 {
             + " — every ambient in the world is lifted by that factor, forever");
         bad = bad + 1;
     }
-    let ground : FaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
-    let share : f64 = ground.directShare(Light::SHADOW_KEEP);
+    let ground : SurfaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
+    let share : f64 = ground.directShare(shadowFactor(0.0), 1.0);
     Console::println("  a fully shadowed ground face still calls ${share} of its light sun");
     if (share > SHADOW_SHARE_MAX) {
         Console::println("FAIL shadow colour: ${share} of the light on a face in full cast"
@@ -488,11 +488,11 @@ fn checkInvariants(ds : DayState) : i32 {
  * @param gam  the colour space to encode through
  */
 fn reportDepth(ds : DayState, gam : Gamma) : void {
-    let ground : FaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
+    let ground : SurfaceLight = ds.shade(vec3(0.0, 1.0, 0.0));
     // A mid grass texel, so the number means something next to a screenshot.
     let albedo : f64 = gam.decode(0x747474, 16);
-    let lit : i32 = gam.encode(albedo * ground.exposure(1.0));
-    let dark : i32 = gam.encode(albedo * ground.exposure(Light::SHADOW_KEEP));
+    let lit : i32 = gam.encode(albedo * ground.exposure(1.0, 1.0));
+    let dark : i32 = gam.encode(albedo * ground.exposure(shadowFactor(0.0), 1.0));
     let pct : f64 = 0.0;
     if (lit > 0) {
         pct = (dark as f64) * 100.0 / (lit as f64);

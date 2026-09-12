@@ -18,7 +18,7 @@ use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::raster::{ rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected };
-use crate::kernel::klight::facelight::{ sunExposure };
+use crate::kernel::klight::surface::{ SurfaceLight, CornerTerms, cornerColour };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
@@ -28,7 +28,8 @@ use crate::kernel::kworld::manager::ChunkManager;
 use crate::kernel::seams::{ ChannelLevels, ActorVisual };
 use crate::configs::atlas::{ Atlas, Tile };
 use crate::configs::light::{ Light };
-use crate::configs::mobs::{ MobKind };
+use crate::configs::mobs::{ MobKind, Mobs };
+use crate::configs::health::{ Health };
 use crate::configs::screen::{ Screen };
 
 /**
@@ -71,7 +72,8 @@ class MobView {
     obx : i64,      // oriented-box world corners (8 per body part)
     oby : i64,
     obz : i64,
-    mobLight : LinRgb, // ambient light on the mob currently being drawn, per channel
+    mobSky : f64,      // the flooded sky level at the mob currently being drawn
+    mobBlock : LinRgb, // and the block light there, per channel
 
     /** Allocate the quad projection scratch and the oriented-box corner buffers. */
     constructor() {
@@ -82,7 +84,8 @@ class MobView {
         self.obx = Mem::take(8 * 8);
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
-        self.mobLight = LinRgb { r: 1.0, g: 1.0, b: 1.0 };
+        self.mobSky = 1.0;
+        self.mobBlock = LinRgb { r: 0.0, g: 0.0, b: 0.0 };
     }
 
     /**
@@ -111,24 +114,56 @@ class MobView {
      * lit by the room the way an animal standing in it is — left to take the
      * ambient it would be a black post in the middle of the pool of light it
      * is casting.
+     * It arrives as BLOCK light, because that is what it is: a torch is lit by
+     * its own emission, not by the sky, so the sky term goes to nothing and the
+     * flame keeps its colour at any hour.
      * @param l  the light to draw in
      */
     pub(crate) fn setLight(mut self, l : LinRgb) : void {
-        self.mobLight = l;
+        self.mobSky = 0.0;
+        self.mobBlock = l;
     }
 
     /**
-     * Mob Lambert term for a face normal, lifted by ambient and exposed by the
-     * same sun the world faces get — a mob has no shadow map, so it sees the
-     * whole of it. Kept local so mobview has no back-reference to Renderer.
-     * @param nx  normal x
-     * @param ny  normal y
-     * @param nz  normal z
-     * @param ds  the day/night state (sun direction)
-     * @return the mob face's light factor
+     * The light on one face of a mob, through the SAME model the world uses.
+     *
+     * It used to be its own: a Lambert against `ds.sunX/Y/Z`, which is where the
+     * sun is DRAWN rather than which body is lighting the world, so a mob stood
+     * in full daylight all night with no handover to the moon. And it used to
+     * come out as one number that the flat-shaded path then multiplied by the
+     * green channel alone, so a mob under a coloured torch took none of its
+     * colour while the textured mob beside it did.
+     *
+     * A mob carries no shadow map and no baked occlusion, so it sees all of
+     * whatever reaches its cell; what it does carry is the flooded sky and block
+     * light there, sampled once per mob.
+     *
+     * The two evaluations are the rounding. A mob is a little stack of boxes and
+     * the world's full contrast makes every box edge a hard seam, so the face's
+     * own light is blended toward the light of an upward face — the average over
+     * a rounded thing — by `Mobs::ROUNDING`.
+     * @param n   the face normal
+     * @param ds  the day/night state
+     * @return the face's light, per channel
      */
-    fn shadeMob(self, nx : f64, ny : f64, nz : f64, ds : DayState) : f64 {
-        return sunExposure(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
+    fn mobFaceLight(self, n : Vec3, ds : DayState) : LinRgb {
+        let terms : CornerTerms = CornerTerms {
+            vis: 1.0,
+            skyLevel: self.mobSky,
+            skyAccess: 1.0,
+            ao: 1.0,
+            block: self.mobBlock,
+            bounce: vec3(1.0, 1.0, 1.0),
+        };
+        let tint : LinRgb = LinRgb { r: ds.dirTintR, g: ds.dirTintG, b: ds.dirTintB };
+        let face : LinRgb = cornerColour(ds.shade(n), terms, tint);
+        let up : LinRgb = cornerColour(ds.shade(vec3(0.0, 1.0, 0.0)), terms, tint);
+        let k : f64 = Mobs::ROUNDING;
+        return LinRgb {
+            r: face.r + (up.r - face.r) * k,
+            g: face.g + (up.g - face.g) * k,
+            b: face.b + (up.b - face.b) * k,
+        };
     }
 
     /**
@@ -160,12 +195,7 @@ class MobView {
         if (self.cvis[0] == 0 || self.cvis[1] == 0 || self.cvis[2] == 0 || self.cvis[3] == 0) {
             return;
         }
-        // Mobs are little multi-box models: the full terrain light contrast
-        // (0.5..1.0) makes every box edge read as a hard seam. Compress it
-        // toward bright so adjacent faces blend and the model looks rounded
-        // rather than crated.
-        let shade : f64 = 0.80 + 0.20 * self.shadeMob(n.x, n.y, n.z, scene.ds);
-        let bright : f64 = shade * self.mobLight.g;
+        let lit : LinRgb = self.mobFaceLight(n, scene.ds);
         let sx0 : f64 = Mem::realOf(self.csx, 0);
         let sy0 : f64 = Mem::realOf(self.csy, 0);
         let iz0 : f64 = Mem::realOf(self.ciz, 0);
@@ -180,13 +210,14 @@ class MobView {
         let iz3 : f64 = Mem::realOf(self.ciz, 3);
         if (Atlas::USE_MOB_TEXTURES && mat.tile >= 0) {
             // A struck mob glows red: lift the red multiplier, damp green/blue.
-            let tr : f64 = shade * self.mobLight.r;
-            let tg : f64 = bright;
-            let tb : f64 = shade * self.mobLight.b;
+            let tr : f64 = lit.r;
+            let tg : f64 = lit.g;
+            let tb : f64 = lit.b;
             if (mat.hurt) {
-                tr = bright + 0.6;
-                tg = bright * 0.4;
-                tb = bright * 0.4;
+                let m : f64 = lit.g;
+                tr = m + Health::HURT_LIFT;
+                tg = m * Health::HURT_DAMP;
+                tb = m * Health::HURT_DAMP;
             }
             let band : Band = Band { x0: 0, x1: fb.w };
             // The queue's vertex is 32-bit; the projection and the light are
@@ -206,7 +237,13 @@ class MobView {
             rasterTriTex(fb, RasterTri { a: va, b: vc, c: vd, tile: tile, wrap: 0 as i8, minx: acdLo, maxx: acdHi },
                 scene.atlas, scene.gam, scene.fogT, band);
         } else {
-            let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
+            // Three channels, like the textured path beside it: the flat mob
+            // used to be handed the green one and told it was the light.
+            let base : i32 = tintIf(mat.hurt, mat.color);
+            let col : i32 = Color::packBytes(
+                scene.gam.encode(scene.gam.decode(base, 16) * lit.r),
+                scene.gam.encode(scene.gam.decode(base, 8) * lit.g),
+                scene.gam.encode(scene.gam.decode(base, 0) * lit.b));
             rasterTri(fb, sx0, sy0, iz0, sx1, sy1, iz1, sx2, sy2, iz2, col);
             rasterTri(fb, sx0, sy0, iz0, sx2, sy2, iz2, sx3, sy3, iz3, col);
         }
@@ -463,17 +500,15 @@ class MobView {
      * @param daylight  the day factor that scales sky light
      * @return ambient light factor in [`Light::MIN`, 1]
      */
-    fn mobLightAt(self, man : ChunkManager, pos : Vec3, lcurve : i64, daylight : f64) : LinRgb {
+    fn mobLightAt(mut self, man : ChunkManager, pos : Vec3, lcurve : i64) : void {
         let cell : IVec3 = ivec3(pos.x.floorToInt() as i32, (pos.y + 0.5).floorToInt() as i32,
             pos.z.floorToInt() as i32);
-        let skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
         let blk : ChannelLevels = man.blGetW(cell);
-        let floor : f64 = Light::MIN;
-        let span : f64 = 1.0 - Light::MIN;
-        return LinRgb {
-            r: floor + span * (skyF + Mem::realOf(lcurve, blk.r)),
-            g: floor + span * (skyF + Mem::realOf(lcurve, blk.g)),
-            b: floor + span * (skyF + Mem::realOf(lcurve, blk.b)),
+        self.mobSky = Mem::realOf(lcurve, man.skGetW(cell));
+        self.mobBlock = LinRgb {
+            r: Mem::realOf(lcurve, blk.r),
+            g: Mem::realOf(lcurve, blk.g),
+            b: Mem::realOf(lcurve, blk.b),
         };
     }
 
@@ -496,7 +531,7 @@ class MobView {
         let i : i32 = 0;
         while (i < n) {
             let a : dyn ActorVisual = mm.actorAt(i);
-            self.mobLight = self.mobLightAt(man, a.pos(), lcurve, day);
+            self.mobLightAt(man, a.pos(), lcurve);
             self.drawActor(p, a, fb, scene);
             i = i + 1;
         }

@@ -15,10 +15,9 @@
 
 use smalt::Mem;
 use crate::kernel::krender::raster::{ rasterTriTex, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected, VertAttribs, ScreenScratch };
-use crate::kernel::klight::facelight::{ FaceLight };
+use crate::kernel::klight::surface::{ SurfaceLight, CornerTerms, cornerColour };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
-use crate::kernel::klight::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::seams::{ CornerProbe, CornerSample };
 use crate::kernel::kmath::vec3::{ Vec3, IVec3, vec3, ivec3 };
@@ -32,6 +31,12 @@ use crate::configs::render::{ Render };
 use crate::configs::time::{ Daylight };
 use crate::configs::water::{ Water };
 use crate::configs::world::{ World };
+
+/** A 0..255 byte as a 0..1 fraction. */
+const BYTE_TO_UNIT : f64 = 0.00392157;
+
+/** The baked corner occlusion runs 0..3, so a level is a third of the way. */
+const THIRD : f64 = 0.33333333333333333;
 
 /**
  * Reconstruct a FaceDir from its packed discriminant (0..5). The mesher packs
@@ -222,7 +227,7 @@ struct FaceShade {
     dir : FaceDir,
     naxis : i32,        // normal axis: 0 = X, 1 = Y, 2 = Z
     normal : Vec3,
-    light : FaceLight,  // the sun's and the sky's shares, before the shadow
+    light : SurfaceLight, // the body's and the sky's shares, before the shadow
     boxH : f64,         // the block's box height (1.0 = full cube)
     isWater : bool,
     isPartial : bool,
@@ -790,10 +795,10 @@ class ChunkRenderer {
 
         // Face-direction (Lambert) shading + the directional sun shadow, shared
         // by all 4 corners (computed once before the per-corner light below).
-        let bright : FaceLight = self.day.shade(vec3(nx, ny, nz));
+        let bright : SurfaceLight = self.day.shade(vec3(nx, ny, nz));
         if (isWaterFace && facing <= 0.0) {
             // underside / far face of water, dimmer on both counts
-            bright = FaceLight { direct: bright.direct * 0.62, ambient: bright.ambient * 0.62 };
+            bright = SurfaceLight { direct: bright.direct * 0.62, ambient: bright.ambient * 0.62 };
         }
         // Directional sun shadow: if the air cell this face looks into is in the
         // sun's cast shadow, drop toward ambient (keeping Light::SHADOW_KEEP of
@@ -982,57 +987,40 @@ class ChunkRenderer {
             let smp : CornerSample = man.cornerSample(
                 self.cornerProbe(sp.probe, ivec3(oxv, oyv, ozv), fs.naxis, runXi - 1, runZi - 1));
 
-            let visK : f64 = (smp.sun as f64) * 0.00392157;
-            let keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
-            let brightK : f64 = fs.light.exposure(keepK);
-
-            // Per-corner smooth light: the four nibbles the mesher averaged —
-            // sky, then block red / green / blue — each through the exponential
-            // curve (sky dimmed by daylight), with the corner's shaded
-            // brightness and its ambient occlusion.
+            // Everything this corner can see, gathered once and handed to the
+            // one model. The renderer's job stops here: it says what is at this
+            // corner, `klight::surface` says what colour that is.
             let lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
             let lb0 : i32 = Mem::byteAt(man.faces.flight, lo);
             let lb1 : i32 = Mem::byteAt(man.faces.flight, lo + 1);
             let aok : i32 = (Mem::byteAt(man.faces.fao, fs.idx as i64) >> (2 * k)) & 3;
-            let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
-            let lit : CornerLight = CornerLight {
-                sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.skyAOFactor(smp),
+            let terms : CornerTerms = CornerTerms {
+                vis: (smp.sun as f64) * BYTE_TO_UNIT,
+                skyLevel: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF),
+                skyAccess: (smp.sky as f64) * BYTE_TO_UNIT,
+                ao: 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * THIRD,
                 block: LinRgb {
                     r: Mem::realOf(self.lcurve, lb0 & 0xF),
                     g: Mem::realOf(self.lcurve, (lb1 >> 4) & 0xF),
                     b: Mem::realOf(self.lcurve, lb1 & 0xF),
                 },
-                bright: brightK,
-                ao: aoFac,
+                bounce: self.bounceTint(smp),
             };
-
-            // Warm sun / cool shade by which of the two halves of this corner's
-            // light won — the sun's or the sky's. A ratio, so it is a fraction by
-            // construction. Taking it off the EXPOSED brightness instead, as this
-            // did, folded `Light::SUN_STRENGTH` into it: past 1 the blend stopped
-            // interpolating and started extrapolating, pushing every lit surface
-            // a good third BEYOND the warmest tint the config names. That is
-            // where the neon came from — sunlit grass was being multiplied by a
-            // blue of 0.56 where the table says 0.86.
-            let cc : LinRgb = lit.colour(skyTint(
-                fs.light.directShare(keepK),
-                LinRgb { r: self.day.dirTintR, g: self.day.dirTintG, b: self.day.dirTintB },
-                self.bounceTint(smp)));
-
-            // View vector from this corner to the eye. Both reflections want it:
-            // water's sharp glint, and the broad sheen every other surface has.
-            let vx : f64 = cam.eye.x - (cwx as f64);
-            let vy : f64 = cam.eye.y - cornerY;
-            let vz : f64 = cam.eye.z - (cwz as f64);
-            let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
-            if (vl < 0.0001) {
-                vl = 0.0001;
-            }
-            vx = vx / vl;
-            vy = vy / vl;
-            vz = vz / vl;
-
+            let cc : LinRgb = cornerColour(fs.light, terms,
+                LinRgb { r: self.day.dirTintR, g: self.day.dirTintG, b: self.day.dirTintB });
+            let visK : f64 = terms.vis;
             if (fs.isWater) {
+                // View vector from this corner to the eye, for the glint.
+                let vx : f64 = cam.eye.x - (cwx as f64);
+                let vy : f64 = cam.eye.y - cornerY;
+                let vz : f64 = cam.eye.z - (cwz as f64);
+                let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
+                if (vl < 0.0001) {
+                    vl = 0.0001;
+                }
+                vx = vx / vl;
+                vy = vy / vl;
+                vz = vz / vl;
                 // Sun glint: half-vector specular, cos^32, gated by sun visibility
                 // and daylight. A strong warm multiplier that bloom turns to gold.
                 let hx : f64 = vx + self.day.sunX;
@@ -1063,17 +1051,6 @@ class ChunkRenderer {
                 cc.r = cc.r * fboost * (1.0 + spec * 1.10);
                 cc.g = cc.g * fboost * (1.0 + spec * 1.00);
                 cc.b = cc.b * fboost * (1.0 + spec * 0.72);
-            } else {
-                // What the ground sends back of the sun. Added in the sun's own
-                // colour rather than multiplied into the texel's, so a surface in
-                // full sun moves toward the light instead of simply becoming more
-                // of itself — which is what stops grass at noon reading as paint.
-                let sh : f64 = sunSheen(fs.normal, vec3(vx, vy, vz),
-                    vec3(self.day.dirX, self.day.dirY, self.day.dirZ), visK)
-                    * self.day.dirStrength;
-                cc.r = cc.r + sh * self.day.dirTintR;
-                cc.g = cc.g + sh * self.day.dirTintG;
-                cc.b = cc.b + sh * self.day.dirTintB;
             }
             Mem::putRealOf(self.ca.r, k, cc.r);
             Mem::putRealOf(self.ca.g, k, cc.g);
