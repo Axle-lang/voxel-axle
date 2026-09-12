@@ -30,9 +30,15 @@ class DayLighting {
             daylight: 1.0,
             skyColR: Daylight::DAY_SKY_R, skyColG: Daylight::DAY_SKY_G, skyColB: Daylight::DAY_SKY_B,
         };
-        // Brightness curve lookup: lcurve[level] = `Light::FALLOFF`^(15-level).
+        // Brightness curve lookup: lcurve[level] = `Light::FALLOFF`^(15-level),
+        // and lcurve[0] = 0 — level zero is the ABSENCE of light, not the
+        // fifteenth step down from full. Left as the power it would be, a
+        // sealed cave still receives three-and-a-half percent of the sky, which
+        // the sun exposure then multiplies: enough to see by, from a light that
+        // by definition is not reaching there.
         self.lcurve = Mem::take(16 * 8);
-        let li : i32 = 0;
+        Mem::putRealOf(self.lcurve, 0, 0.0);
+        let li : i32 = 1;
         while (li < 16) {
             let pc : f64 = 1.0;
             let kc : i32 = 0;

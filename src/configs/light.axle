@@ -11,19 +11,24 @@ class Light {
     // Face brightness vs. baked light level (0..15) follows an EXPONENTIAL falloff
     // (Minecraft-style): each level down multiplies brightness by `Light::FALLOFF`, so
     // light dies fast with distance — and since the flood loses one level per block
-    // travelled, a longer/zig-zag path goes much darker. `Light::MIN` is the darkness
-    // floor.
-    static MIN : f64 = 0.02;
+    // travelled, a longer/zig-zag path goes much darker.
+    //
+    // `Light::MIN` is the darkness floor: what a surface reflects with NO light
+    // reaching it at all. It exists so a sealed cave is navigable rather than a
+    // black screen, and it is linear light, so it wants to be small — 0.006 is
+    // about a twentieth of the display range once encoded, which reads as
+    // "almost black" rather than as "dim".
+    static MIN : f64 = 0.006;
     static FALLOFF : f64 = 0.80;
 
-    // The colour a block light emits, per channel. Block light is ADDED to sky
-    // light in linear space, so this is a real emission colour and not the tint
-    // it replaced (a warm skew pushed onto the total after the fact, which could
-    // only lie about a light that had already been merged away by a `max`).
-    // One flame colour for every source until per-block emission lands.
-    static TORCH_R : f64 = 1.00;
-    static TORCH_G : f64 = 0.83;
-    static TORCH_B : f64 = 0.58;
+    // A block light's colour is no longer a constant here: it is the per-channel
+    // emission level in `blocks::emissionOf`, which floods the world as three
+    // volumes. See `krender::cornerlight`.
+    //
+    // What is left is how bright the FLAME ITSELF is drawn — a source is not lit
+    // by the room, it lights it. Above 1 so it comes through the tone map's
+    // shoulder as a highlight and the bloom picks it up.
+    static TORCH_GLOW : f64 = 1.9;
 
     // Ambient occlusion strength for smooth lighting: how much a fully-occluded
     // face corner (AO level 0) is darkened. 0 = no AO, 1 = corner goes black at the

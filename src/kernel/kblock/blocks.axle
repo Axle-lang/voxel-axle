@@ -346,22 +346,44 @@ fn weightOf(id : Block) : Weight {
 
 /** Emitted-light level. */
 struct Emission : Emissive {
-    emit : i32,
+    pub(crate) r : i32,
+    pub(crate) g : i32,
+    pub(crate) b : i32,
 
-    /** Light the block emits (0 none, 1..15). @return emitted light */
-    fn lightEmission(self) : i32 { return self.emit; }
+    /**
+     * How far the block's light carries, as the strongest channel — what a
+     * caller asking "does this glow, and how much" wants.
+     * @return emitted light (0 none, 1..15)
+     */
+    fn lightEmission(self) : i32 {
+        let m : i32 = self.r;
+        if (self.g > m) {
+            m = self.g;
+        }
+        if (self.b > m) {
+            m = self.b;
+        }
+        return m;
+    }
 }
 
 /**
- * Emission for a block: glowstone is a full 15, a torch 14, all else dark.
+ * Emission for a block, PER CHANNEL: a level each for red, green and blue,
+ * which is both how bright the source is and what colour it is.
+ *
+ * The flood loses a level per block travelled, so a channel that starts lower
+ * also reaches less far — a torch is white-hot at its own block and warms to
+ * orange at the edge of its reach, which is what a flame does. Colour and
+ * falloff are the same number on purpose; there is nothing else for the level
+ * to mean.
  * @param id  the block
  * @return its emission capability
  */
 fn emissionOf(id : Block) : Emission {
     return match id {
-        Block::Glowstone => Emission { emit: 15 },
-        Block::Torch => Emission { emit: 14 },
-        _ => Emission { emit: 0 },
+        Block::Glowstone => Emission { r: 15, g: 14, b: 12 },
+        Block::Torch => Emission { r: 14, g: 11, b: 8 },
+        _ => Emission { r: 0, g: 0, b: 0 },
     };
 }
 

@@ -31,12 +31,13 @@ use crate::kernel::krender::sky::{ DayState, drawSkyGradient, drawCelestial };
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
 use crate::kernel::krender::raster::{ clearFrame, FrameBuf, MipAtlas, Rgb, Camera, Projected, PostEffect };
-use crate::kernel::krender::gamma::{ Gamma, GammaTables };
+use crate::kernel::krender::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::kmath::vec3::{ vec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kworld::manager::ChunkManager;
 use crate::kernel::kentity::mobs::MobManager;
 use crate::configs::atlas::{ Tile };
+use crate::configs::light::{ Light };
 use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
 use crate::configs::water::{ Water };
@@ -323,6 +324,9 @@ class Renderer {
         let ht : f64 = 0.55;
         let mat : Material = Material { color: Color::packBytes(240, 180, 70), tile: Tile::TORCH, hurt: false };
         let scene : MobScene = self.mobScene();
+        // A torch is drawn in its own light, above white, so it reads as the
+        // source of the pool around it and the bloom catches the flame.
+        self.mobs.setLight(LinRgb { r: Light::TORCH_GLOW, g: Light::TORCH_GLOW * 0.86, b: Light::TORCH_GLOW * 0.62 });
         let slots : i32 = World::SPAN * World::SPAN;
         let slot : i32 = 0;
         while (slot < slots) {

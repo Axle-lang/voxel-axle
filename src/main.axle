@@ -26,8 +26,6 @@ use smalt::{
     BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, FramePacer, Mem,
     mixerLoop, MouseButton, Platform, PlatformError, Scancode, Surface, Window, WindowDesc,
 };
-use std::sys::process::{argc, argAt};
-use std::lang::{IndexOutOfBoundsException, ParseException};
 use crate::kernel::kio::input::Keys;
 use crate::kernel::kio::assets::Assets;
 use crate::kernel::kworld::manager::{ ChunkManager, lightLoop };
@@ -36,8 +34,10 @@ use crate::kernel::kworld::blocksim::BlockSim;
 use crate::kernel::kentity::player::{ GameMode, Player };
 use crate::kernel::kentity::mobs::MobManager;
 use crate::game::entities::fauna::Fauna;
-use crate::game::start::{Spawn, openYaw, randomColumn};
+use crate::game::start::{Spawn, openYaw};
+use crate::game::cli::{ snapDeadline, startColumn, lookPin, dayTimeArg, hasFlag, wantsPhysicsCheck };
 use crate::game::physcheck::runPhysicsCheck;
+use crate::game::lightcheck::runLightCheck;
 use crate::game::ray::{Picker, cellInPlayer};
 use crate::kernel::kio::sfx::{ AudioManager };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
@@ -81,6 +81,9 @@ fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
     return v;
 }
 
+/** How far ahead of the player `--torch` stands its torch, in blocks. */
+const TORCH_AHEAD : f64 = 3.5;
+
 /**
  * Converts a world coordinate to its containing chunk index.
  * @param p  a world-space coordinate along one axis
@@ -101,6 +104,12 @@ fn main() : i32 {
     // where a regression looks exactly like standing still.
     if (wantsPhysicsCheck()) {
         return runPhysicsCheck();
+    }
+    // `--light-check` places a real torch in the real world and reads the light
+    // volumes back. Headless, for the same reason: a screenshot of a glow says
+    // nothing about the shape of the flood underneath it.
+    if (hasFlag("--light-check")) {
+        return runLightCheck();
     }
     try {
         return run();
@@ -185,6 +194,12 @@ fn run() : i32 ! PlatformError {
     }
     player.refresh();
     while (man.ensureLoaded(chunkOf(player.pos.x), chunkOf(player.pos.z)) > 0) {
+    }
+    // `--torch` stands one on the ground a few blocks ahead. A night capture of
+    // coloured light needs a source in frame, and a source placed by hand is a
+    // capture nobody can reproduce.
+    if (hasFlag("--torch")) {
+        plantTorch(man, player);
     }
 
     let mobs : MobManager = new MobManager();
@@ -657,133 +672,18 @@ fn run() : i32 ! PlatformError {
 }
 
 /**
- * The instant a scripted capture is due, in milliseconds after the first
- * frame, or `0` when `--snap` was not asked for.
- *
- * `--snap` on its own waits three seconds, which is long enough for the
- * spawn view to have streamed in; `--snap <ms>` says how long instead.
+ * Stand a torch on the ground `TORCH_AHEAD` blocks in front of the player, and
+ * light it through the same edit path a right-click uses.
+ * @param man  the world to place into
+ * @param p    the player whose facing the torch is placed along
  */
-fn snapDeadline() : i64 {
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--snap") {
-                if (i + 1 < argc()) {
-                    let ms : i64 = argAt(i + 1).toI64();
-                    if (ms > 0) {
-                        return ms;
-                    }
-                }
-                return 3000;
-            }
-        } catch e : IndexOutOfBoundsException {
-            return 0;
-        } catch e : ParseException {
-            return 3000;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-/**
- * The view a scripted capture is framed with, as (pinned, yaw, pitch) in
- * radians.
- *
- * `--look <yaw°> <pitch°>` pins it: the spawn's own yaw is overridden and the
- * mouse is ignored for the rest of the run, which is the only way two captures
- * can be compared as images. Yaw 0 faces +Z and grows counter-clockwise;
- * pitch is positive upward. Without the flag the spawn picks the view and the
- * mouse drives it, as it always did.
- * @return whether the view is pinned, and the yaw / pitch it is pinned to
- */
-fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
-    let toRad : f64 = 3.14159265358979 / 180.0;
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--look" && i + 2 < argc()) {
-                return (true, argAt(i + 1).toF64() * toRad, argAt(i + 2).toF64() * toRad);
-            }
-        } catch e : IndexOutOfBoundsException {
-            i = argc();
-        } catch e : ParseException {
-            Console::println("--look wants two angles in degrees; leaving the view free");
-            i = argc();
-        }
-        i = i + 1;
-    }
-    return (false, 0.0, 0.0);
-}
-
-/**
- * The time of day the run starts at, in 0..1 over a full day.
- *
- * `--daytime <t>` names one — 0.42 is mid-morning, 0.75 sunset, 0.9 night —
- * so a capture can be taken at the hour that shows what it is about, instead
- * of waiting four real minutes for the sky to come round. Anything else keeps
- * `Daylight::START`.
- * @return the day phase to start the clock at
- */
-fn dayTimeArg() : f64 {
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--daytime" && i + 1 < argc()) {
-                return argAt(i + 1).toF64();
-            }
-        } catch e : IndexOutOfBoundsException {
-            i = argc();
-        } catch e : ParseException {
-            Console::println("--daytime wants a number in 0..1; starting where the config says");
-            i = argc();
-        }
-        i = i + 1;
-    }
-    return Daylight::START;
-}
-
-/**
- * The column this run starts around.
- *
- * `--at <x> <z>` names one, so a world worth keeping can be returned to;
- * anything else is a draw from the monotonic counter, which differs
- * between runs. The counter rather than the wall clock because it is what
- * this program already holds, and because a wall clock read twice in the
- * same second answers twice the same.
- * @param clock  the monotonic clock, read once for entropy
- * @return the (x, z) block column to search for a start around
- */
-fn startColumn(clock : Clock) : (x: i32, z: i32) {
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--at" && i + 2 < argc()) {
-                return (argAt(i + 1).toI64() as i32, argAt(i + 2).toI64() as i32);
-            }
-        } catch e : IndexOutOfBoundsException {
-            i = argc();
-        } catch e : ParseException {
-            Console::println("--at wants two whole numbers; picking a random start");
-            i = argc();
-        }
-        i = i + 1;
-    }
-    return randomColumn(clock.counter());
-}
-
-/** Whether `--physics-check` was asked for. */
-fn wantsPhysicsCheck() : bool {
-    let i : i32 = 1;
-    while (i < argc()) {
-        try {
-            if (argAt(i) == "--physics-check") {
-                return true;
-            }
-        } catch e : IndexOutOfBoundsException {
-            return false;
-        }
-        i = i + 1;
-    }
-    return false;
+fn plantTorch(man : ChunkManager, p : Player) : void {
+    let fx : f64 = 0.0 - p.yaw.sin();
+    let fz : f64 = p.yaw.cos();
+    let tx : i32 = (p.pos.x + fx * TORCH_AHEAD).floorToInt() as i32;
+    let tz : i32 = (p.pos.z + fz * TORCH_AHEAD).floorToInt() as i32;
+    let cell : IVec3 = ivec3(tx, man.columnHeight(tx, tz) + 1, tz);
+    man.placeAt(cell, Block::Torch);
+    man.lightUpdate(cell);
+    Console::println("torch at (${cell.x}, ${cell.y}, ${cell.z})");
 }

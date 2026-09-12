@@ -1,0 +1,223 @@
+// lightcheck — the assertions about coloured light that a picture cannot make.
+//
+// A screenshot of a torch at night proves there is a warm glow. It proves
+// nothing about the SHAPE of that glow: whether each channel really floods
+// from its own emission level, whether the reach follows the colour, whether
+// breaking the torch takes every channel back down. Those are numbers, and a
+// number is what this reads.
+//
+// So it drives the REAL `ChunkManager` over terrain the real generator built,
+// places a real torch through the real edit path, and reads the light volumes
+// back through the same seam the mesher uses. Headless and deterministic — the
+// world is a fixed seed and the site is searched rather than assumed.
+//
+// `voxel --light-check` runs it and exits with the failure count.
+//
+// The equivalence it is built to state: block light used to be ONE volume
+// flooded from one level, losing a level per block. It is now three, and each
+// must reproduce exactly that shape from its own starting level — so a source
+// whose three levels are equal is the old monochrome flood, unchanged. The
+// per-distance assertion below says that for every channel at once.
+
+use crate::kernel::kworld::manager::ChunkManager;
+use crate::game::world::terraingen::TerrainGen;
+use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::kernel::kblock::blocks::{ emissionOf, isOpaque, Emission };
+use crate::kernel::seams::{ ChannelLevels };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/** How far out the probe searches the loaded ring for a test site. */
+const LIGHT_SCAN : i32 = 60;
+
+/** Blocks of clear air the site needs along +X, to sample the falloff along. */
+const LIGHT_RUN : i32 = 14;
+
+/**
+ * Run the coloured-light checks and report the failures.
+ * @return the number of failed assertions
+ */
+fn runLightCheck() : i32 {
+    let fails : i32 = 0;
+    let man : ChunkManager = new ChunkManager();
+    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
+    while (man.ensureLoaded(0, 0) > 0) {
+    }
+
+    let site : IVec3 = findOpenSite(man);
+    if (site.y < 0) {
+        Console::println("  no open site found — the check could not run");
+        man.stopLight();
+        Console::println("light failures: 1");
+        return 1;
+    }
+    Console::println("  site (${site.x}, ${site.y}, ${site.z})");
+
+    fails = fails + checkFalloff(man, site);
+    fails = fails + checkRemoval(man, site);
+    fails = fails + checkBuried(man, site);
+    fails = fails + checkSealedPocket(man, site);
+
+    man.stopLight();
+    Console::println("light failures: ${fails}");
+    return fails;
+}
+
+/**
+ * Find an air cell with `LIGHT_RUN` blocks of clear air beside it along +X, two
+ * blocks above flat ground — somewhere a torch's light can be measured without
+ * terrain in the way.
+ * @param man  the world to search
+ * @return the cell, or a y below zero when the search found nothing
+ */
+fn findOpenSite(man : ChunkManager) : IVec3 {
+    let z : i32 = 0 - LIGHT_SCAN;
+    while (z <= LIGHT_SCAN) {
+        let x : i32 = 0 - LIGHT_SCAN;
+        while (x <= LIGHT_SCAN) {
+            let h : i32 = man.columnHeight(x, z);
+            if (h > 0) {
+                let y : i32 = h + 2;
+                let clear : bool = true;
+                let d : i32 = 0;
+                while (d <= LIGHT_RUN && clear) {
+                    if (isOpaque(man.worldGet(ivec3(x + d, y, z)))
+                        || man.worldGet(ivec3(x + d, y, z)) != Block::Air) {
+                        clear = false;
+                    }
+                    d = d + 1;
+                }
+                if (clear) {
+                    return ivec3(x, y, z);
+                }
+            }
+            x = x + 1;
+        }
+        z = z + 1;
+    }
+    return ivec3(0, 0 - 1, 0);
+}
+
+/**
+ * A torch's light must fall off one level per block ON EVERY CHANNEL, from
+ * that channel's own emission level — which is what makes the reach follow the
+ * colour, and what makes three equal levels behave exactly like the single
+ * volume this replaced.
+ * @param man   the world to light
+ * @param site  the air cell to put the torch in
+ * @return the number of cells whose light was not what the flood promises
+ */
+fn checkFalloff(man : ChunkManager, site : IVec3) : i32 {
+    man.placeAt(site, Block::Torch);
+    man.lightUpdate(site);
+
+    let emit : Emission = emissionOf(Block::Torch);
+    Console::println("  torch emits r=${emit.r} g=${emit.g} b=${emit.b}");
+    let bad : i32 = 0;
+    let d : i32 = 0;
+    while (d <= LIGHT_RUN) {
+        let got : ChannelLevels = man.blGetW(ivec3(site.x + d, site.y, site.z));
+        let wr : i32 = floodLevel(emit.r, d);
+        let wg : i32 = floodLevel(emit.g, d);
+        let wb : i32 = floodLevel(emit.b, d);
+        if (got.r != wr || got.g != wg || got.b != wb) {
+            Console::println("  d=${d}: got (${got.r}, ${got.g}, ${got.b})"
+                + " want (${wr}, ${wg}, ${wb})");
+            bad = bad + 1;
+        }
+        d = d + 1;
+    }
+    return bad;
+}
+
+/**
+ * Breaking the source must take every channel back to nothing — the removal
+ * walk runs once per channel now, and a channel left behind would be a torch
+ * that is still lighting the room after it is gone.
+ * @param man   the world to unlight
+ * @param site  the cell the torch was placed in
+ * @return the number of cells still lit after the torch is broken
+ */
+fn checkRemoval(man : ChunkManager, site : IVec3) : i32 {
+    man.placeAt(site, Block::Air);
+    man.lightUpdate(site);
+
+    let bad : i32 = 0;
+    let d : i32 = 0;
+    while (d <= LIGHT_RUN) {
+        let got : ChannelLevels = man.blGetW(ivec3(site.x + d, site.y, site.z));
+        if (got.r != 0 || got.g != 0 || got.b != 0) {
+            Console::println("  after break, d=${d}: (${got.r}, ${got.g}, ${got.b}) — not dark");
+            bad = bad + 1;
+        }
+        d = d + 1;
+    }
+    return bad;
+}
+
+/**
+ * Rock with the sky eight blocks above it must hold NO light at all — no sky
+ * level, no block level. Anything the renderer shows there afterwards is the
+ * darkness floor and nothing else, which is the only way a cave can be dark.
+ * @param man   the world to read
+ * @param site  a cell on the surface, to dig down from
+ * @return the number of buried cells that were not dark
+ */
+fn checkBuried(man : ChunkManager, site : IVec3) : i32 {
+    let bad : i32 = 0;
+    let d : i32 = 4;
+    while (d <= 12) {
+        let cell : IVec3 = ivec3(site.x, site.y - d, site.z);
+        if (isOpaque(man.worldGet(cell))) {
+            let sky : i32 = man.skGetW(cell);
+            let blk : ChannelLevels = man.blGetW(cell);
+            if (sky != 0 || blk.r != 0 || blk.g != 0 || blk.b != 0) {
+                Console::println("  buried at -${d}: sky=${sky} block=(${blk.r},${blk.g},${blk.b}) — not dark");
+                bad = bad + 1;
+            }
+        }
+        d = d + 1;
+    }
+    return bad;
+}
+
+/**
+ * Hollow a cell out of the rock, well below the surface, and it must stay dark:
+ * carving air into stone does not let the sky in, and the flood must not
+ * invent any. The player's own complaint, as an assertion — a room you seal
+ * yourself into is exactly this cell.
+ * @param man   the world to dig in
+ * @param site  a cell on the surface, to dig down from
+ * @return 1 if the hollow came out lit, 0 if it is dark
+ */
+fn checkSealedPocket(man : ChunkManager, site : IVec3) : i32 {
+    let cell : IVec3 = ivec3(site.x, site.y - 10, site.z);
+    if (!isOpaque(man.worldGet(cell))) {
+        Console::println("  no rock ten below the site — the pocket check could not run");
+        return 0;
+    }
+    man.breakAt(cell);
+    man.lightUpdate(cell);
+    let sky : i32 = man.skGetW(cell);
+    let blk : ChannelLevels = man.blGetW(cell);
+    if (sky != 0 || blk.r != 0 || blk.g != 0 || blk.b != 0) {
+        Console::println("  sealed pocket: sky=${sky} block=(${blk.r},${blk.g},${blk.b}) — not dark");
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * The level a flood seeded at `emit` leaves `d` blocks away: one lost per block
+ * travelled, never below nothing.
+ * @param emit  the source's level on this channel
+ * @param d     blocks from the source
+ * @return the level that cell must hold
+ */
+fn floodLevel(emit : i32, d : i32) : i32 {
+    let v : i32 = emit - d;
+    if (v < 0) {
+        return 0;
+    }
+    return v;
+}

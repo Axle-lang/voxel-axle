@@ -16,8 +16,8 @@
 use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kworld::voxstore::VoxStore;
-use crate::kernel::kblock::blocks::{ isOpaque, lightEmission, albedoFor };
-use crate::kernel::seams::{ LightSample, CornerProbe, CornerSample };
+use crate::kernel::kblock::blocks::{ isOpaque, emissionOf, albedoFor, Emission };
+use crate::kernel::seams::{ LightSample, CornerProbe, CornerSample, ChannelLevels };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
 use crate::configs::time::{ Daylight };
@@ -32,13 +32,16 @@ struct LightRemoval {
 }
 
 /**
- * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
- * block + sky light (0..15), soft sun visibility + hemispherical sky access
- * (0..255), and the one-bounce coloured indirect tint (r/g/b, 128 = neutral).
- * Grouped so `LightStore` carries one field instead of seven loose pointers.
+ * The nine per-voxel light volumes (each a raw byte array in voxIdx layout):
+ * block light per CHANNEL and sky light (0..15), soft sun visibility +
+ * hemispherical sky access (0..255), and the one-bounce coloured indirect tint
+ * (r/g/b, 128 = neutral). Grouped so `LightStore` carries one field instead of
+ * nine loose pointers.
  */
 struct LightVolumes {
-    light : i64,     // per-voxel block light 0..15 (byte array, voxIdx layout)
+    lightR : i64,    // per-voxel block light 0..15, one volume per channel:
+    lightG : i64,    // a source floods each of them from its own level, so the
+    lightB : i64,    // light carries its colour and its reach together
     skylight : i64,  // per-voxel sky light 0..15 (open-to-sky exposure)
     sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
                      // 0 = full shadow, between = penumbra)
@@ -76,10 +79,15 @@ class LightStore {
     constructor(slots : i32) {
         let hSide : i32 = World::CHUNK_SIZE + 2;
         let vol : i64 = (slots as i64) * (hSide as i64) * (hSide as i64) * (World::HEIGHT as i64);
+        // Zeroed, not merely taken: a slot's volumes are given their real
+        // values by `clearLight` when a chunk lands in it, and until then every
+        // read of them — the mesher's corner average, the renderer's sample —
+        // would be reading whatever the allocator last left there.
         self.vols = LightVolumes {
-            light: Mem::take(vol), skylight: Mem::take(vol), sunlit: Mem::take(vol),
-            skyaccess: Mem::take(vol),
-            bnR: Mem::take(vol), bnG: Mem::take(vol), bnB: Mem::take(vol),
+            lightR: Mem::takeZeroed(vol), lightG: Mem::takeZeroed(vol), lightB: Mem::takeZeroed(vol),
+            skylight: Mem::takeZeroed(vol), sunlit: Mem::takeZeroed(vol),
+            skyaccess: Mem::takeZeroed(vol),
+            bnR: Mem::takeZeroed(vol), bnG: Mem::takeZeroed(vol), bnB: Mem::takeZeroed(vol),
         };
         self.sunCursor = 0;
         self.skyAOcursor = 0;
@@ -310,14 +318,18 @@ class LightEngine : LightSample, LightBaker {
         }
     }
 
-    /** Block-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
-    fn blGetW(self, cell : IVec3) : i32 {
-        return self.lvGetW(self.lights.vols.light, cell);
+    /** Block light per channel (0..15 each) at a world voxel; 0 if unloaded. */
+    fn blGetW(self, cell : IVec3) : ChannelLevels {
+        return ChannelLevels {
+            r: self.lvGetW(self.lights.vols.lightR, cell),
+            g: self.lvGetW(self.lights.vols.lightG, cell),
+            b: self.lvGetW(self.lights.vols.lightB, cell),
+        };
     }
 
-    /** Set block light at a world voxel; flags the slot for re-mesh if changed. */
-    fn blSetW(mut self, cell : IVec3, v : i32) : void {
-        self.lvSetW(self.lights.vols.light, cell, v);
+    /** Set one channel's block light; flags the slot for re-mesh if changed. */
+    fn blSetCh(mut self, vol : i64, cell : IVec3, v : i32) : void {
+        self.lvSetW(vol, cell, v);
     }
 
     /** Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
@@ -498,6 +510,38 @@ class LightEngine : LightSample, LightBaker {
     }
 
     /**
+     * Re-flood ONE block-light channel around an edited cell: remove the level
+     * that was there and everything it fed, re-seed this block's own emission,
+     * then let the six neighbours flow back in.
+     *
+     * A channel at a time, because the flood stacks are shared and because the
+     * channels do not interact: what red does around a torch says nothing about
+     * what blue does, beyond the level each started at.
+     * @param vol   the channel's light volume
+     * @param cell  the edited world voxel
+     * @param had   the level that cell held before the edit
+     * @param emit  the level the block now there emits on this channel
+     */
+    fn refloodChannel(mut self, vol : i64, cell : IVec3, had : i32, emit : i32) : void {
+        self.lights.lqn = 0;
+        self.lights.rqn = 0;
+        self.blSetCh(vol, cell, 0);
+        self.rpush(cell, had + 1);
+        self.floodRemoveCh(vol);
+        if (emit > 0) {
+            self.blSetCh(vol, cell, emit);
+            self.lpush(cell);
+        }
+        self.lpush(ivec3(cell.x + 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x - 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x, cell.y + 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y - 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y, cell.z + 1));
+        self.lpush(ivec3(cell.x, cell.y, cell.z - 1));
+        self.floodAddCh(vol);
+    }
+
+    /**
      * Recompute block + sky light after ANY edit at a world voxel. Clears the
      * light that ran through the cell, re-seeds emission, then re-floods from the
      * cell's neighbours; reconciles the edited column's sky exposure and the
@@ -509,27 +553,14 @@ class LightEngine : LightSample, LightBaker {
         let wx : i32 = cell.x;
         let wy : i32 = cell.y;
         let wz : i32 = cell.z;
-        self.lights.lqn = 0;
-        self.lights.rqn = 0;
-        // 1. Remove the light currently at the cell and everything it fed.
-        let cur : i32 = self.blGetW(cell);
-        self.blSetW(cell, 0);
-        self.rpush(cell, cur + 1);
-        self.floodRemoveCh(self.lights.vols.light);
-        // 2. If the block now there emits light, re-seed it.
-        let emit : i32 = lightEmission(self.worldGet(ivec3(wx, wy, wz)));
-        if (emit > 0) {
-            self.blSetW(cell, emit);
-            self.lpush(cell);
-        }
-        // 3. Let light from the 6 neighbours flow into / around the cell.
-        self.lpush(ivec3(wx + 1, wy, wz));
-        self.lpush(ivec3(wx - 1, wy, wz));
-        self.lpush(ivec3(wx, wy + 1, wz));
-        self.lpush(ivec3(wx, wy - 1, wz));
-        self.lpush(ivec3(wx, wy, wz + 1));
-        self.lpush(ivec3(wx, wy, wz - 1));
-        self.floodAddCh(self.lights.vols.light);
+        // 1..3. Block light, once per channel: clear what ran through the cell,
+        // re-seed this block's own emission, then let the neighbours flow back
+        // in. The three channels share the flood stacks, so they run in turn.
+        let cur : ChannelLevels = self.blGetW(cell);
+        let emit : Emission = emissionOf(self.worldGet(ivec3(wx, wy, wz)));
+        self.refloodChannel(self.lights.vols.lightR, cell, cur.r, emit.r);
+        self.refloodChannel(self.lights.vols.lightG, cell, cur.g, emit.g);
+        self.refloodChannel(self.lights.vols.lightB, cell, cur.b, emit.b);
         // 4. Sky light: reconcile the edited column's vertical exposure — seed a
         // REMOVAL where a cell darkened and an ADD where it brightened — then
         // flood both, so sky light recedes as well as fills.
@@ -600,7 +631,9 @@ class LightEngine : LightSample, LightBaker {
         let base : i64 = (slot as i64) * (n as i64);
         let i : i32 = 0;
         while (i < n) {
-            Mem::putByte(self.lights.vols.light, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.lightR, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.lightG, base + (i as i64), 0);
+            Mem::putByte(self.lights.vols.lightB, base + (i as i64), 0);
             Mem::putByte(self.lights.vols.skylight, base + (i as i64), 0);
             Mem::putByte(self.lights.vols.sunlit, base + (i as i64), 255);
             Mem::putByte(self.lights.vols.skyaccess, base + (i as i64), 255);

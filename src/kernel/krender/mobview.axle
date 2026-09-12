@@ -18,12 +18,12 @@ use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
 use crate::kernel::krender::sky::{ DayState };
 use crate::kernel::krender::raster::{rasterTriTex, rasterTri, shadeLambert, sunExposure, RasterVert, RasterTri, FrameBuf, MipAtlas, Rgb, Band, Camera, Projected};
-use crate::kernel::krender::gamma::{ Gamma };
+use crate::kernel::krender::gamma::{ Gamma, LinRgb };
 use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
 use crate::kernel::kentity::player::Player;
 use crate::kernel::kentity::mobs::MobManager;
 use crate::kernel::kworld::manager::ChunkManager;
-use crate::kernel::seams::{ ActorVisual };
+use crate::kernel::seams::{ ChannelLevels, ActorVisual };
 use crate::configs::atlas::{ Atlas, Tile };
 use crate::configs::light::{ Light };
 use crate::configs::mobs::{ MobKind };
@@ -69,7 +69,7 @@ class MobView {
     obx : i64,      // oriented-box world corners (8 per body part)
     oby : i64,
     obz : i64,
-    mobLight : f64, // ambient factor of the mob currently being drawn
+    mobLight : LinRgb, // ambient light on the mob currently being drawn, per channel
 
     /** Allocate the quad projection scratch and the oriented-box corner buffers. */
     constructor() {
@@ -80,7 +80,7 @@ class MobView {
         self.obx = Mem::take(8 * 8);
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
-        self.mobLight = 1.0;
+        self.mobLight = LinRgb { r: 1.0, g: 1.0, b: 1.0 };
     }
 
     /**
@@ -101,6 +101,18 @@ class MobView {
         Mem::putRealOf(self.csy, k, pr.sy);
         Mem::putRealOf(self.ciz, k, pr.iz);
         self.cvis[k] = 1;
+    }
+
+    /**
+     * Set the light every following quad is drawn in, until the next mob sets
+     * its own. What the torch pass needs: a torch is the SOURCE, so it is not
+     * lit by the room the way an animal standing in it is — left to take the
+     * ambient it would be a black post in the middle of the pool of light it
+     * is casting.
+     * @param l  the light to draw in
+     */
+    pub(crate) fn setLight(mut self, l : LinRgb) : void {
+        self.mobLight = l;
     }
 
     /**
@@ -150,7 +162,8 @@ class MobView {
         // (0.5..1.0) makes every box edge read as a hard seam. Compress it
         // toward bright so adjacent faces blend and the model looks rounded
         // rather than crated.
-        let bright : f64 = (0.80 + 0.20 * self.shadeMob(n.x, n.y, n.z, scene.ds)) * self.mobLight;
+        let shade : f64 = 0.80 + 0.20 * self.shadeMob(n.x, n.y, n.z, scene.ds);
+        let bright : f64 = shade * self.mobLight.g;
         let sx0 : f64 = Mem::realOf(self.csx, 0);
         let sy0 : f64 = Mem::realOf(self.csy, 0);
         let iz0 : f64 = Mem::realOf(self.ciz, 0);
@@ -165,9 +178,9 @@ class MobView {
         let iz3 : f64 = Mem::realOf(self.ciz, 3);
         if (Atlas::USE_MOB_TEXTURES && mat.tile >= 0) {
             // A struck mob glows red: lift the red multiplier, damp green/blue.
-            let tr : f64 = bright;
+            let tr : f64 = shade * self.mobLight.r;
             let tg : f64 = bright;
-            let tb : f64 = bright;
+            let tb : f64 = shade * self.mobLight.b;
             if (mat.hurt) {
                 tr = bright + 0.6;
                 tg = bright * 0.4;
@@ -433,24 +446,27 @@ class MobView {
      * Ambient light factor (0..1) for a mob at world position (mx,my,mz): the
      * brighter of sky×daylight and block light at its cell, through the same
      * exponential curve as terrain, so mobs darken at night / underground and
-     * are lit by nearby torches.
+     * are lit — in the torch's own colour — by nearby torches. Sky and block
+     * light ADD, as they do on terrain; taking the brighter of the two is what
+     * stops a torch from warming an animal the sky already reaches.
      * @param man       the chunk manager (light maps)
      * @param pos       the mob's feet position
      * @param lcurve    the renderer's brightness lookup (lightFalloff^(15-level))
      * @param daylight  the day factor that scales sky light
      * @return ambient light factor in [`Light::MIN`, 1]
      */
-    fn mobLightAt(self, man : ChunkManager, pos : Vec3, lcurve : i64, daylight : f64) : f64 {
-        let wx : i32 = pos.x.floorToInt() as i32;
-        let wy : i32 = (pos.y + 0.5).floorToInt() as i32;
-        let wz : i32 = pos.z.floorToInt() as i32;
-        let skyF : f64 = Mem::realOf(lcurve, man.skGetW(ivec3(wx, wy, wz))) * daylight;
-        let blkF : f64 = Mem::realOf(lcurve, man.blGetW(ivec3(wx, wy, wz)));
-        let cf : f64 = skyF;
-        if (blkF > cf) {
-            cf = blkF;
-        }
-        return Light::MIN + (1.0 - Light::MIN) * cf;
+    fn mobLightAt(self, man : ChunkManager, pos : Vec3, lcurve : i64, daylight : f64) : LinRgb {
+        let cell : IVec3 = ivec3(pos.x.floorToInt() as i32, (pos.y + 0.5).floorToInt() as i32,
+            pos.z.floorToInt() as i32);
+        let skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
+        let blk : ChannelLevels = man.blGetW(cell);
+        let floor : f64 = Light::MIN;
+        let span : f64 = 1.0 - Light::MIN;
+        return LinRgb {
+            r: floor + span * (skyF + Mem::realOf(lcurve, blk.r)),
+            g: floor + span * (skyF + Mem::realOf(lcurve, blk.g)),
+            b: floor + span * (skyF + Mem::realOf(lcurve, blk.b)),
+        };
     }
 
     /**

@@ -694,17 +694,22 @@ class ChunkRenderer {
             let keepK : f64 = Render::SHADOW_KEEP + (1.0 - Render::SHADOW_KEEP) * visK;
             let brightK : f64 = sunExposure(bright, keepK);
 
-            // Per-corner smooth light: sky/block nibbles averaged at bake time,
-            // through the exponential curve (sky dimmed by daylight), times the
-            // per-corner shaded brightness and the AO factor.
-            let lb : i32 = Mem::byteAt(man.faces.flight, (idx * 4 + k) as i64);
-            let skyLk : i32 = (lb >> 4) & 0xF;
-            let blkLk : i32 = lb & 0xF;
+            // Per-corner smooth light: the four nibbles the mesher averaged —
+            // sky, then block red / green / blue — each through the exponential
+            // curve (sky dimmed by daylight), with the corner's shaded
+            // brightness and its ambient occlusion.
+            let lo : i64 = ((idx * 4 + k) * 2) as i64;
+            let lb0 : i32 = Mem::byteAt(man.faces.flight, lo);
+            let lb1 : i32 = Mem::byteAt(man.faces.flight, lo + 1);
             let aok : i32 = Mem::byteAt(man.faces.fao, (idx * 4 + k) as i64);
             let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
             let lit : CornerLight = CornerLight {
-                sky: Mem::realOf(self.lcurve, skyLk) * self.day.daylight * self.skyAOFactor(smp),
-                block: Mem::realOf(self.lcurve, blkLk),
+                sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.day.daylight * self.skyAOFactor(smp),
+                block: LinRgb {
+                    r: Mem::realOf(self.lcurve, lb0 & 0xF),
+                    g: Mem::realOf(self.lcurve, (lb1 >> 4) & 0xF),
+                    b: Mem::realOf(self.lcurve, lb1 & 0xF),
+                },
                 bright: brightK,
                 ao: aoFac,
             };

@@ -13,6 +13,10 @@
 // wall the sky already reaches; it can only fail to. The sum is what a photon
 // count would do, and the tone map at the end of the raster is what keeps a
 // corner that lands over full white from flattening.
+//
+// The block term arrives as a colour rather than a level: the three channels
+// flood the world separately from the source's own per-channel level, so the
+// colour and the reach are the same number and a flame warms as it fades.
 
 use crate::kernel::krender::gamma::{ LinRgb };
 use crate::configs::light::{ Light };
@@ -24,15 +28,16 @@ use crate::configs::light::{ Light };
  */
 struct CornerLight {
     pub(crate) sky : f64,
-    pub(crate) block : f64,
+    pub(crate) block : LinRgb,
     pub(crate) bright : f64,
     pub(crate) ao : f64,
 
     /**
      * The corner's colour: the sky term takes the warm-sun / cool-shade tint
-     * (and the one-bounce colour folded into it), the block term takes the
-     * emitter's own colour, and occlusion darkens the sum. Only the sky half is
-     * shadowed — a torch burns just as brightly on the shaded side of its block.
+     * (and the one-bounce colour folded into it), the block term arrives
+     * already coloured — it is three channels that flooded separately — and
+     * occlusion darkens the sum. Only the sky half is shadowed: a torch burns
+     * just as brightly on the shaded side of its own block.
      * @param tint  the sky term's tint, bounce included
      * @return the corner's light colour
      */
@@ -41,9 +46,9 @@ struct CornerLight {
         let dark : f64 = Light::MIN * self.ao;
         let span : f64 = (1.0 - Light::MIN) * self.ao;
         return LinRgb {
-            r: dark + span * (sun * tint.r + self.block * Light::TORCH_R),
-            g: dark + span * (sun * tint.g + self.block * Light::TORCH_G),
-            b: dark + span * (sun * tint.b + self.block * Light::TORCH_B),
+            r: dark + span * (sun * tint.r + self.block.r),
+            g: dark + span * (sun * tint.g + self.block.g),
+            b: dark + span * (sun * tint.b + self.block.b),
         };
     }
 }

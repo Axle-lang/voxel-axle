@@ -24,6 +24,7 @@ use crate::kernel::kblock::blocks::{ tileFor, isWater, isTransparent, isPartialS
 const MESH_MAX_RUN : i32 = 8;
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::lightstore::{ LightEngine };
+use crate::kernel::seams::{ ChannelLevels };
 use crate::kernel::kworld::manager::ChunkManager;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
@@ -239,11 +240,13 @@ class ChunkMesher : Mesher {
         if (self.ftile[a] != self.ftile[b] || self.frun[a] >= MESH_MAX_RUN) {
             return false;
         }
-        for (k of 0..4) {
-            if (Mem::byteAt(self.flight, (a * 4 + k) as i64)
-                != Mem::byteAt(self.flight, (b * 4 + k) as i64)) {
+        for (k of 0..8) {
+            if (Mem::byteAt(self.flight, (a * 8 + k) as i64)
+                != Mem::byteAt(self.flight, (b * 8 + k) as i64)) {
                 return false;
             }
+        }
+        for (k of 0..4) {
             if (Mem::byteAt(self.fao, (a * 4 + k) as i64)
                 != Mem::byteAt(self.fao, (b * 4 + k) as i64)) {
                 return false;
@@ -324,32 +327,46 @@ class ChunkMesher : Mesher {
             let c2 : IVec3 = ivec3(nb.x + t2x, nb.y + t2y, nb.z + t2z);
             let c3 : IVec3 = ivec3(nb.x + t1x + t2x, nb.y + t1y + t2y, nb.z + t1z + t2z);
 
-            // Smooth light: average sky / block over the non-opaque cells.
+            // Smooth light: average sky and each block channel over the
+            // non-opaque cells.
+            let bl0 : ChannelLevels = self.leng.blGetW(nb);
             let skSum : i32 = self.leng.skGetW(nb);
-            let blSum : i32 = self.leng.blGetW(nb);
+            let rSum : i32 = bl0.r;
+            let gSum : i32 = bl0.g;
+            let bSum : i32 = bl0.b;
             let cnt : i32 = 1;
             let o1 : bool = isOpaque(self.leng.worldGet(c1));
             let o2 : bool = isOpaque(self.leng.worldGet(c2));
             let o3 : bool = isOpaque(self.leng.worldGet(c3));
             if (!o1) {
+                let bl1 : ChannelLevels = self.leng.blGetW(c1);
                 skSum = skSum + self.leng.skGetW(c1);
-                blSum = blSum + self.leng.blGetW(c1);
+                rSum = rSum + bl1.r;
+                gSum = gSum + bl1.g;
+                bSum = bSum + bl1.b;
                 cnt = cnt + 1;
             }
             if (!o2) {
+                let bl2 : ChannelLevels = self.leng.blGetW(c2);
                 skSum = skSum + self.leng.skGetW(c2);
-                blSum = blSum + self.leng.blGetW(c2);
+                rSum = rSum + bl2.r;
+                gSum = gSum + bl2.g;
+                bSum = bSum + bl2.b;
                 cnt = cnt + 1;
             }
             if (!o3) {
+                let bl3 : ChannelLevels = self.leng.blGetW(c3);
                 skSum = skSum + self.leng.skGetW(c3);
-                blSum = blSum + self.leng.blGetW(c3);
+                rSum = rSum + bl3.r;
+                gSum = gSum + bl3.g;
+                bSum = bSum + bl3.b;
                 cnt = cnt + 1;
             }
 
-            let skAvg : i32 = (skSum + cnt / 2) / cnt;
-            let blAvg : i32 = (blSum + cnt / 2) / cnt;
-            Mem::putByte(self.flight, (i * 4 + k) as i64, skAvg * 16 + blAvg);
+            let half : i32 = cnt / 2;
+            let o : i64 = ((i * 4 + k) * 2) as i64;
+            Mem::putByte(self.flight, o, ((skSum + half) / cnt) * 16 + (rSum + half) / cnt);
+            Mem::putByte(self.flight, o + 1, ((gSum + half) / cnt) * 16 + (bSum + half) / cnt);
 
             // Ambient occlusion (0..3): both sides blocked → fully dark corner.
             let s1 : i32 = 0;

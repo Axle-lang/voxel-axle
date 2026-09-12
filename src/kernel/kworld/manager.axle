@@ -29,7 +29,7 @@ use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::ChunkMesher;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample };
+use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -80,7 +80,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
             fx: malloc<i32>(faceCap), fy: malloc<i32>(faceCap), fz: malloc<i32>(faceCap),
             ftile: malloc<i32>(faceCap),
             frun: malloc<i32>(faceCap),
-            flight: Mem::take((faceCap as i64) * 4),
+            flight: Mem::take((faceCap as i64) * 8),
             fao: Mem::take((faceCap as i64) * 4),
         };
         self.torches = TorchField {
@@ -535,8 +535,8 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.flushLightMesh();
     }
 
-    /** Block-light level (0..15) at a world voxel. */
-    fn blGetW(self, cell : IVec3) : i32 {
+    /** Block light per channel (0..15 each) at a world voxel. */
+    fn blGetW(self, cell : IVec3) : ChannelLevels {
         return self.leng.blGetW(cell);
     }
 

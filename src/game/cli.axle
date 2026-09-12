@@ -1,0 +1,169 @@
+// cli — what the command line asks of a run.
+//
+// The game is played with a mouse, but it is also DRIVEN: by a capture
+// script, by a check that must mean the same thing twice, by someone
+// comparing two builds. Every one of those needs the run to be pinned —
+// same world, same view, same hour — because two images of different
+// places compare nothing.
+//
+// So each flag here removes one source of variation:
+//
+//   --snap [ms]            play that long, write voxel.bmp, quit
+//   --at <x> <z>           start around a named column instead of a random one
+//   --look <yaw> <pitch>   pin the view and ignore the mouse for the run
+//   --daytime <0..1>       start the day clock at a named hour
+//   --torch                stand a torch on the ground ahead of the spawn
+//   --physics-check        run the headless physics assertions and exit
+//   --light-check          run the headless coloured-light assertions and exit
+//
+// A reader per flag, each answering with a value rather than setting
+// state, so `main` reads the command line once at the top and never
+// consults it again.
+
+use std::sys::process::{argc, argAt};
+use std::lang::{IndexOutOfBoundsException, ParseException};
+use smalt::Clock;
+use crate::game::start::randomColumn;
+use crate::configs::time::{ Daylight };
+
+/**
+ * The instant a scripted capture is due, in milliseconds after the first
+ * frame, or `0` when `--snap` was not asked for.
+ *
+ * `--snap` on its own waits three seconds, which is long enough for the
+ * spawn view to have streamed in; `--snap <ms>` says how long instead.
+ */
+fn snapDeadline() : i64 {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--snap") {
+                if (i + 1 < argc()) {
+                    let ms : i64 = argAt(i + 1).toI64();
+                    if (ms > 0) {
+                        return ms;
+                    }
+                }
+                return 3000;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return 0;
+        } catch e : ParseException {
+            return 3000;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/**
+/**
+ * The view a scripted capture is framed with, as (pinned, yaw, pitch) in
+ * radians.
+ *
+ * `--look <yaw°> <pitch°>` pins it: the spawn's own yaw is overridden and the
+ * mouse is ignored for the rest of the run, which is the only way two captures
+ * can be compared as images. Yaw 0 faces +Z and grows counter-clockwise;
+ * pitch is positive upward. Without the flag the spawn picks the view and the
+ * mouse drives it, as it always did.
+ * @return whether the view is pinned, and the yaw / pitch it is pinned to
+ */
+fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
+    let toRad : f64 = 3.14159265358979 / 180.0;
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--look" && i + 2 < argc()) {
+                return (true, argAt(i + 1).toF64() * toRad, argAt(i + 2).toF64() * toRad);
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--look wants two angles in degrees; leaving the view free");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return (false, 0.0, 0.0);
+}
+
+/**
+ * The time of day the run starts at, in 0..1 over a full day.
+ *
+ * `--daytime <t>` names one — 0.42 is mid-morning, 0.75 sunset, 0.9 night —
+ * so a capture can be taken at the hour that shows what it is about, instead
+ * of waiting four real minutes for the sky to come round. Anything else keeps
+ * `Daylight::START`.
+ * @return the day phase to start the clock at
+ */
+fn dayTimeArg() : f64 {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--daytime" && i + 1 < argc()) {
+                return argAt(i + 1).toF64();
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--daytime wants a number in 0..1; starting where the config says");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return Daylight::START;
+}
+
+/**
+ * The column this run starts around.
+ *
+ * `--at <x> <z>` names one, so a world worth keeping can be returned to;
+ * anything else is a draw from the monotonic counter, which differs
+ * between runs. The counter rather than the wall clock because it is what
+ * this program already holds, and because a wall clock read twice in the
+ * same second answers twice the same.
+ * @param clock  the monotonic clock, read once for entropy
+ * @return the (x, z) block column to search for a start around
+ */
+fn startColumn(clock : Clock) : (x: i32, z: i32) {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == "--at" && i + 2 < argc()) {
+                return (argAt(i + 1).toI64() as i32, argAt(i + 2).toI64() as i32);
+            }
+        } catch e : IndexOutOfBoundsException {
+            i = argc();
+        } catch e : ParseException {
+            Console::println("--at wants two whole numbers; picking a random start");
+            i = argc();
+        }
+        i = i + 1;
+    }
+    return randomColumn(clock.counter());
+}
+
+/** Whether `--physics-check` was asked for. */
+fn wantsPhysicsCheck() : bool {
+    return hasFlag("--physics-check");
+}
+
+/**
+ * Whether a bare flag is on the command line.
+ * @param flag  the flag to look for, leading dashes included
+ * @return whether it was passed
+ */
+fn hasFlag(flag : string) : bool {
+    let i : i32 = 1;
+    while (i < argc()) {
+        try {
+            if (argAt(i) == flag) {
+                return true;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}

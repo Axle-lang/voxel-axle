@@ -317,13 +317,20 @@ fn keyOf(d : i32, x : i32, y : i32, z : i32) : i64 {
         + ((y as i64) << 51);
 }
 
-/** Whether two faces carry identical baked corner light and AO. */
+/**
+ * Whether two faces carry identical baked corner light and AO — the same test
+ * the mesher merges on, and it has to READ THE SAME BYTES: eight of light per
+ * face (two per corner, sky and block red then block green and blue) against
+ * four of occlusion.
+ */
 fn sameCorners(man : ChunkManager, a : i32, b : i32) : bool {
-    for (k of 0..4) {
-        if (Mem::byteAt(man.faces.flight, (a * 4 + k) as i64)
-            != Mem::byteAt(man.faces.flight, (b * 4 + k) as i64)) {
+    for (k of 0..8) {
+        if (Mem::byteAt(man.faces.flight, (a * 8 + k) as i64)
+            != Mem::byteAt(man.faces.flight, (b * 8 + k) as i64)) {
             return false;
         }
+    }
+    for (k of 0..4) {
         if (Mem::byteAt(man.faces.fao, (a * 4 + k) as i64)
             != Mem::byteAt(man.faces.fao, (b * 4 + k) as i64)) {
             return false;

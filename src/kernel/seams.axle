@@ -109,9 +109,22 @@ struct CornerProbe {
     pub(crate) t2 : IVec3,
 }
 
+/**
+ * Block light at one cell, per channel, each 0..15.
+ *
+ * Three levels rather than one, because a light source has a colour and the
+ * flood carries it: each channel loses a level per block, so a channel that
+ * starts lower also reaches less far, and the light warms as it fades.
+ */
+struct ChannelLevels {
+    pub(crate) r : i32,
+    pub(crate) g : i32,
+    pub(crate) b : i32,
+}
+
 /** Emissive block-light level at a cell. */
 trait BlockLightField {
-    fn blGetW(self, cell : IVec3) : i32;
+    fn blGetW(self, cell : IVec3) : ChannelLevels;
 }
 
 /** Sky-light level + hemispherical sky access (ambient / GI term). */
