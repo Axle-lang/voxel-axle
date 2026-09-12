@@ -1,31 +1,36 @@
-// lightstore — the per-voxel LIGHT data of the chunk ring, split out of
-// ChunkManager.
+// klight::engine — the voxel lighting engine.
 //
-// A LEAF mini-manager (imports only `smalt` + `configs`) holding the
-// per-voxel byte light volumes — block light, sky light, soft sun visibility,
-// hemispherical sky access and the one-bounce coloured tint — all indexed by the
-// shared `VoxStore.voxIdx` layout, plus the block-light flood stacks, the sky-AO
-// hemisphere ray table and the per-slot light/sky-AO dirty + sweep cursors.
+// Owns the light volumes and reads world topology through a shared `VoxStore`
+// plus the chunk-ring ownership arrays, all aliased from the manager: Axle class
+// instances and arrays are references, so the light thread reaches the same
+// voxels the manager does and nothing is copied.
 //
-// `LightEngine` (below) composes one (`self.lights`) and runs the light flood /
-// shadow / sky-AO passes over it; `ChunkManager` in turn composes a LightEngine.
-// This mirrors how the manager composes a `VoxStore`: the light engine aliases
-// the same voxel field + ring ownership the manager holds, so the background
-// light thread reaches the live world with no copy — the data has a focused home.
+// It runs the block-light flood, the sky-light column and its sideways gradient,
+// the directional sun soft-shadow march and the hemispherical sky-access /
+// one-bounce bake, and it satisfies the `LightSample` read capabilities the
+// renderer samples per face corner.
+//
+// One class, and not by preference: a class body cannot span files in Axle. What
+// could leave has left — the storage to `klight::volumes`, the corner average to
+// `klight::sample`, the hour to `klight::daymodel`, the colour to
+// `klight::surface`. What is here is the part that needs the state.
 
 use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
-use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
+use crate::kernel::kmath::narrow::{ floatOf, putFloatOf };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kblock::blocks::{ isOpaque, lightTransmit, emissionOf, albedoFor, Emission };
 use crate::kernel::seams::{ LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels };
-use crate::configs::blocks::{ Block };
-use crate::configs::light::{ Light };
+use crate::kernel::klight::volumes::{ Nibble, nibGet, nibPut, LightVolumes, LightRemoval, HemiRays, HemiHit, LightStore };
+use crate::kernel::klight::sample::{ CornerChunk, chanMean, blend4 };
 use crate::kernel::klight::daymodel::{ SkyBodyLight, activeBody };
 use crate::kernel::ksky::cloud::{ cloudFieldAt };
 use crate::kernel::ksky::cloudlight::{ CloudMap };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
 use crate::configs::time::{ Daylight };
 use crate::configs::world::{ World };
+
 
 /**
  * Threads the priority sun-shadow bake is split over.
@@ -37,232 +42,6 @@ use crate::configs::world::{ World };
  */
 const SUN_BAKE_WORKERS : i32 = 8;
 
-/**
- * A chunk found once for the four cells of a face corner: which slot holds it,
- * and where its origin sits in the world, so the four reads can subtract it
- * rather than divide their way down to it again.
- *
- * `slot` is -1 when the corner straddles a chunk border or the chunk is not
- * loaded, and the origin means nothing then.
- */
-struct CornerChunk {
-    slot : i32,
-    ox : i32,
-    oz : i32,
-}
-
-/**
- * The mean of one channel of four packed bounce tints.
- * @param b0     the corner's own tint
- * @param b1     one step along the first in-plane axis
- * @param b2     one step along the second
- * @param b3     one step along both
- * @param shift  where the channel sits in the packed word
- * @return the channel's mean, 0..255
- */
-fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
-    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
-        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
-}
-
-/**
- * The mean of the four cells meeting at a face corner.
- *
- * The bounce tint averages per channel: packed, its channels would carry each
- * other's overflow and a corner between a green cell and a red one would come
- * out neither.
- * @param s0  the corner's own cell
- * @param s1  one step along the first in-plane axis
- * @param s2  one step along the second
- * @param s3  one step along both
- * @return the averaged terms
- */
-fn blend4(s0 : CornerSample, s1 : CornerSample, s2 : CornerSample, s3 : CornerSample) : CornerSample {
-    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
-    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
-    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
-    return CornerSample {
-        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
-        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
-        bounce: r * 65536 + g * 256 + b,
-    };
-}
-
-/**
- * One entry of the block-light removal stack: a voxel + its old light level.
- *
- * At the width the values need. `x` and `z` are world columns and stay whole
- * words; `y` is a level of the world and a step either side of one, which is
- * a short; a light level is 0..15, which is a byte. The stack holds
- * `Light::QUEUE_CAP` of these, so the four bytes that leaves are a quarter of
- * a megabyte. The x/z pair leads so the short and the byte share the tail
- * word rather than each taking one.
- */
-struct LightRemoval {
-    x : i32,
-    z : i32,
-    y : i16,
-    lvl : i8,
-}
-
-/**
- * One four-bit plane inside a byte volume: the volume, and which half of each
- * byte is this plane's.
- *
- * Block light per channel and sky light are levels 0..15, and a level was
- * stored in a byte of its own — four planes, forty-eight megabytes, half of
- * every byte always zero. Two planes share a byte now; the flood and the
- * readers go through this handle and never see the other half.
- */
-struct Nibble {
-    base : i64,   // the byte volume, in voxIdx layout
-    shift : i32,  // 0 for the low half, 4 for the high
-}
-
-/**
- * The plane's level at a byte offset.
- * @param p    the plane
- * @param off  the cell's voxIdx offset
- * @return the level 0..15
- */
-fn nibGet(p : Nibble, off : i64) : i32 {
-    return (Mem::byteAt(p.base, off) >> p.shift) & 15;
-}
-
-/**
- * Store a level in the plane's half of the byte, leaving the other half as
- * it was. Whole-byte read-modify-write; the two halves of a byte are only ever
- * written by the one thread that runs the floods, so nothing is torn.
- * @param p    the plane
- * @param off  the cell's voxIdx offset
- * @param v    the level 0..15
- */
-fn nibPut(p : Nibble, off : i64, v : i32) : void {
-    let keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
-    Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
-}
-
-/**
- * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
- * block light per CHANNEL and sky light (0..15, two planes to a byte), soft
- * sun visibility + hemispherical sky access (0..255), and the one-bounce
- * coloured indirect tint (r/g/b, 128 = neutral). Grouped so `LightStore`
- * carries one field instead of seven loose pointers.
- */
-struct LightVolumes {
-    lightRG : i64,   // per-voxel block light 0..15, red in the low nibble and
-                     // green in the high: a source floods each channel from its
-                     // own level, so the light carries its colour and its reach
-    lightBS : i64,   // ...blue in the low nibble, and SKY light 0..15 (open-to-
-                     // sky exposure) in the high
-    sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
-                     // 0 = full shadow, between = penumbra)
-    skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (AO / GI)
-    bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
-    bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
-    bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
-
-    /** The red block-light plane. @return its handle */
-    fn red(self) : Nibble { return Nibble { base: self.lightRG, shift: 0 }; }
-
-    /** The green block-light plane. @return its handle */
-    fn green(self) : Nibble { return Nibble { base: self.lightRG, shift: 4 }; }
-
-    /** The blue block-light plane. @return its handle */
-    fn blue(self) : Nibble { return Nibble { base: self.lightBS, shift: 0 }; }
-
-    /** The sky-light plane. @return its handle */
-    fn sky(self) : Nibble { return Nibble { base: self.lightBS, shift: 4 }; }
-}
-
-/** The precomputed upper-hemisphere ray directions used by the sky-AO bake. */
-struct HemiRays {
-    hemiX : i64,
-    hemiY : i64,
-    hemiZ : i64,
-}
-
-/**
- * What one hemisphere ray came back with: how much of the sky it still saw
- * after whatever it crossed, and the colour of the first thing that dimmed it
- * (-1 if nothing did) — the surface the one bounce takes its hue from.
- */
-struct HemiHit {
-    open : f64,
-    albedo : i32,
-}
-
-class LightStore {
-    pub(file) vols : LightVolumes, // the 9 per-voxel light volumes
-    pub(file) rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
-    pub(file) sunCursor : i32,     // round-robin slot index for the throttled shadow refresh
-    pub(file) sunDirty : i8[],     // per-slot "sun shadows never baked here" flag — a slot
-                                   // carrying it jumps the round-robin queue, so a chunk
-                                   // arrives WITH its shadows instead of gaining them a
-                                   // second later as the cursor wanders past
-    pub(file) sunBaked : i64,      // per-slot direction of the light at that slot's last
-                                   // sun bake, three f32 a slot. A slot the light has
-                                   // barely moved over since would measure what it already
-                                   // holds, so it is skipped; the all-zero a slot starts
-                                   // with matches nothing, so a fresh slot always bakes
-    pub(file) skyAOcursor : i32,   // round-robin slot index for the throttled sky-AO bake
-    pub(file) skyAOdirty : i8[],   // per-slot "sky-access needs (re)baking" flag
-    pub(file) ldirty : i8[],       // per-slot "light changed → re-mesh" flag
-    pub(file) lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
-    pub(file) lqn : i32,           // its depth
-    pub(file) rq : LightRemoval[], // block-light removal stack — voxel + its old level
-    pub(file) rqn : i32,           // its depth
-
-    /**
-     * Allocate the per-voxel light volumes (block / sky / sun / sky-access /
-     * bounce), the flood stacks, the per-slot dirty flags and the precomputed
-     * sky-AO hemisphere ray table.
-     * @param slots  the number of ring slots (span * span)
-     */
-    constructor(slots : i32) {
-        let s : i32 = World::CHUNK_SIZE;
-        let vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
-        // Zeroed, not merely taken: a slot's volumes are given their real
-        // values by `clearLight` when a chunk lands in it, and until then every
-        // read of them — the mesher's corner average, the renderer's sample —
-        // would be reading whatever the allocator last left there.
-        self.vols = LightVolumes {
-            lightRG: Mem::takeZeroed(vol), lightBS: Mem::takeZeroed(vol),
-            sunlit: Mem::takeZeroed(vol),
-            skyaccess: Mem::takeZeroed(vol),
-            bnR: Mem::takeZeroed(vol), bnG: Mem::takeZeroed(vol), bnB: Mem::takeZeroed(vol),
-        };
-        self.sunCursor = 0;
-        self.skyAOcursor = 0;
-        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
-        // for the sky-access bake.
-        let m : i32 = Light::SKY_AO_SAMPLES;
-        self.rays = HemiRays {
-            hemiX: Mem::take((m as i64) * 8),
-            hemiY: Mem::take((m as i64) * 8),
-            hemiZ: Mem::take((m as i64) * 8),
-        };
-        let hi : i32 = 0;
-        while (hi < m) {
-            let yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
-            let rr : f64 = (1.0 - yy * yy).sqrt();
-            let th : f64 = (hi as f64) * 2.399963;           // golden angle
-            Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
-            Mem::putRealOf(self.rays.hemiY, hi, yy);
-            Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
-            hi = hi + 1;
-        }
-        self.sunDirty = malloc<i8>(slots);
-        self.sunBaked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
-        self.skyAOdirty = malloc<i8>(slots);
-        self.ldirty = malloc<i8>(slots);
-        let lcap : i32 = Light::QUEUE_CAP;
-        self.lq = malloc<IVec3>(lcap);
-        self.lqn = 0;
-        self.rq = malloc<LightRemoval>(lcap);
-        self.rqn = 0;
-    }
-}
 
 /**
  * The throttled per-frame light bake capability (directional sun soft-shadows +

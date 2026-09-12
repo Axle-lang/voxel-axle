@@ -26,7 +26,7 @@ use smalt::Mem;
 use crate::kernel::kblock::blocks::{ isSolid, isCollidable, boxOf, BlockBox };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
-use crate::kernel::kworld::lightstore::{ LightEngine };
+use crate::kernel::klight::engine::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::ChunkMesher;
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels };

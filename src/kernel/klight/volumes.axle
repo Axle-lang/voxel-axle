@@ -1,0 +1,200 @@
+// klight::volumes — where the light is kept.
+//
+// Five quantities per voxel, and they are kept in different shapes because they
+// are different sizes of answer. Block light is three channels of sixteen levels
+// and sky light a fourth, so four of them share two bytes as nibbles. The sun's
+// visibility, the sky's access and the one-bounce tint are each a whole byte,
+// because they are measurements rather than flood levels and a sixteenth is too
+// coarse for a penumbra.
+//
+// All of them are indexed by `VoxStore::voxIdx`, the SAME layout as the voxels
+// themselves — so a cell's block and a cell's light are one index apart, not one
+// address calculation apart, and the bake can read the world it is lighting for
+// free.
+//
+// The flood stacks live here too. They are shared by all four nibble planes, so
+// the passes that use them must run one at a time; that is a property of the
+// storage and it is stated where the storage is.
+
+use smalt::Mem;
+use crate::kernel::kmath::vec3::{ IVec3 };
+use crate::kernel::kmath::narrow::{ FLOAT_BYTES };
+use crate::configs::light::{ Light };
+use crate::configs::world::{ World };
+
+
+/**
+ * One entry of the block-light removal stack: a voxel + its old light level.
+ *
+ * At the width the values need. `x` and `z` are world columns and stay whole
+ * words; `y` is a level of the world and a step either side of one, which is
+ * a short; a light level is 0..15, which is a byte. The stack holds
+ * `Light::QUEUE_CAP` of these, so the four bytes that leaves are a quarter of
+ * a megabyte. The x/z pair leads so the short and the byte share the tail
+ * word rather than each taking one.
+ */
+struct LightRemoval {
+    pub(crate) x : i32,
+    pub(crate) z : i32,
+    pub(crate) y : i16,
+    pub(crate) lvl : i8,
+}
+
+/**
+ * One four-bit plane inside a byte volume: the volume, and which half of each
+ * byte is this plane's.
+ *
+ * Block light per channel and sky light are levels 0..15, and a level was
+ * stored in a byte of its own — four planes, forty-eight megabytes, half of
+ * every byte always zero. Two planes share a byte now; the flood and the
+ * readers go through this handle and never see the other half.
+ */
+struct Nibble {
+    pub(crate) base : i64,   // the byte volume, in voxIdx layout
+    pub(crate) shift : i32,  // 0 for the low half, 4 for the high
+}
+
+/**
+ * The plane's level at a byte offset.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @return the level 0..15
+ */
+fn nibGet(p : Nibble, off : i64) : i32 {
+    return (Mem::byteAt(p.base, off) >> p.shift) & 15;
+}
+
+/**
+ * Store a level in the plane's half of the byte, leaving the other half as
+ * it was. Whole-byte read-modify-write; the two halves of a byte are only ever
+ * written by the one thread that runs the floods, so nothing is torn.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @param v    the level 0..15
+ */
+fn nibPut(p : Nibble, off : i64, v : i32) : void {
+    let keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
+    Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
+}
+
+/**
+ * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
+ * block light per CHANNEL and sky light (0..15, two planes to a byte), soft
+ * sun visibility + hemispherical sky access (0..255), and the one-bounce
+ * coloured indirect tint (r/g/b, 128 = neutral). Grouped so `LightStore`
+ * carries one field instead of seven loose pointers.
+ */
+struct LightVolumes {
+    pub(crate) lightRG : i64,   // per-voxel block light 0..15, red in the low nibble and
+                     // green in the high: a source floods each channel from its
+                     // own level, so the light carries its colour and its reach
+    pub(crate) lightBS : i64,   // ...blue in the low nibble, and SKY light 0..15 (open-to-
+                     // sky exposure) in the high
+    pub(crate) sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
+                     // 0 = full shadow, between = penumbra)
+    pub(crate) skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (AO / GI)
+    pub(crate) bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
+    pub(crate) bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
+    pub(crate) bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
+
+    /** The red block-light plane. @return its handle */
+    pub(crate) fn red(self) : Nibble { return Nibble { base: self.lightRG, shift: 0 }; }
+
+    /** The green block-light plane. @return its handle */
+    pub(crate) fn green(self) : Nibble { return Nibble { base: self.lightRG, shift: 4 }; }
+
+    /** The blue block-light plane. @return its handle */
+    pub(crate) fn blue(self) : Nibble { return Nibble { base: self.lightBS, shift: 0 }; }
+
+    /** The sky-light plane. @return its handle */
+    pub(crate) fn sky(self) : Nibble { return Nibble { base: self.lightBS, shift: 4 }; }
+}
+
+/** The precomputed upper-hemisphere ray directions used by the sky-AO bake. */
+struct HemiRays {
+    pub(crate) hemiX : i64,
+    pub(crate) hemiY : i64,
+    pub(crate) hemiZ : i64,
+}
+
+/**
+ * What one hemisphere ray came back with: how much of the sky it still saw
+ * after whatever it crossed, and the colour of the first thing that dimmed it
+ * (-1 if nothing did) — the surface the one bounce takes its hue from.
+ */
+struct HemiHit {
+    pub(crate) open : f64,
+    pub(crate) albedo : i32,
+}
+
+class LightStore {
+    pub(crate) vols : LightVolumes, // the 9 per-voxel light volumes
+    pub(crate) rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
+    pub(crate) sunCursor : i32,     // round-robin slot index for the throttled shadow refresh
+    pub(crate) sunDirty : i8[],     // per-slot "sun shadows never baked here" flag — a slot
+                                   // carrying it jumps the round-robin queue, so a chunk
+                                   // arrives WITH its shadows instead of gaining them a
+                                   // second later as the cursor wanders past
+    pub(crate) sunBaked : i64,      // per-slot direction of the light at that slot's last
+                                   // sun bake, three f32 a slot. A slot the light has
+                                   // barely moved over since would measure what it already
+                                   // holds, so it is skipped; the all-zero a slot starts
+                                   // with matches nothing, so a fresh slot always bakes
+    pub(crate) skyAOcursor : i32,   // round-robin slot index for the throttled sky-AO bake
+    pub(crate) skyAOdirty : i8[],   // per-slot "sky-access needs (re)baking" flag
+    pub(crate) ldirty : i8[],       // per-slot "light changed → re-mesh" flag
+    pub(crate) lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
+    pub(crate) lqn : i32,           // its depth
+    pub(crate) rq : LightRemoval[], // block-light removal stack — voxel + its old level
+    pub(crate) rqn : i32,           // its depth
+
+    /**
+     * Allocate the per-voxel light volumes (block / sky / sun / sky-access /
+     * bounce), the flood stacks, the per-slot dirty flags and the precomputed
+     * sky-AO hemisphere ray table.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        let s : i32 = World::CHUNK_SIZE;
+        let vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
+        // Zeroed, not merely taken: a slot's volumes are given their real
+        // values by `clearLight` when a chunk lands in it, and until then every
+        // read of them — the mesher's corner average, the renderer's sample —
+        // would be reading whatever the allocator last left there.
+        self.vols = LightVolumes {
+            lightRG: Mem::takeZeroed(vol), lightBS: Mem::takeZeroed(vol),
+            sunlit: Mem::takeZeroed(vol),
+            skyaccess: Mem::takeZeroed(vol),
+            bnR: Mem::takeZeroed(vol), bnG: Mem::takeZeroed(vol), bnB: Mem::takeZeroed(vol),
+        };
+        self.sunCursor = 0;
+        self.skyAOcursor = 0;
+        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
+        // for the sky-access bake.
+        let m : i32 = Light::SKY_AO_SAMPLES;
+        self.rays = HemiRays {
+            hemiX: Mem::take((m as i64) * 8),
+            hemiY: Mem::take((m as i64) * 8),
+            hemiZ: Mem::take((m as i64) * 8),
+        };
+        let hi : i32 = 0;
+        while (hi < m) {
+            let yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
+            let rr : f64 = (1.0 - yy * yy).sqrt();
+            let th : f64 = (hi as f64) * 2.399963;           // golden angle
+            Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
+            Mem::putRealOf(self.rays.hemiY, hi, yy);
+            Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
+            hi = hi + 1;
+        }
+        self.sunDirty = malloc<i8>(slots);
+        self.sunBaked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
+        self.skyAOdirty = malloc<i8>(slots);
+        self.ldirty = malloc<i8>(slots);
+        let lcap : i32 = Light::QUEUE_CAP;
+        self.lq = malloc<IVec3>(lcap);
+        self.lqn = 0;
+        self.rq = malloc<LightRemoval>(lcap);
+        self.rqn = 0;
+    }
+}

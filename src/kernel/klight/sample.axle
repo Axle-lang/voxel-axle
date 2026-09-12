@@ -1,0 +1,65 @@
+// klight::sample — the four cells a face corner is made of.
+//
+// Smooth lighting reads a corner, not a face: the four cells meeting at a vertex
+// are averaged, and the rasteriser interpolates the four results across the
+// quad. This is the averaging, kept apart from both the bake that fills the
+// cells and the shading that colours the result.
+//
+// The rule the average follows is the one the mesher already follows for the
+// baked levels: a cell that is inside a block is not averaged in. It has no
+// light to report — the bake never writes one — so counting it means counting
+// whatever the slot was cleared to.
+
+use crate::kernel::seams::{ CornerSample };
+
+
+/**
+ * A chunk found once for the four cells of a face corner: which slot holds it,
+ * and where its origin sits in the world, so the four reads can subtract it
+ * rather than divide their way down to it again.
+ *
+ * `slot` is -1 when the corner straddles a chunk border or the chunk is not
+ * loaded, and the origin means nothing then.
+ */
+struct CornerChunk {
+    pub(crate) slot : i32,
+    pub(crate) ox : i32,
+    pub(crate) oz : i32,
+}
+
+/**
+ * The mean of one channel of four packed bounce tints.
+ * @param b0     the corner's own tint
+ * @param b1     one step along the first in-plane axis
+ * @param b2     one step along the second
+ * @param b3     one step along both
+ * @param shift  where the channel sits in the packed word
+ * @return the channel's mean, 0..255
+ */
+fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
+    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
+        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
+}
+
+/**
+ * The mean of the four cells meeting at a face corner.
+ *
+ * The bounce tint averages per channel: packed, its channels would carry each
+ * other's overflow and a corner between a green cell and a red one would come
+ * out neither.
+ * @param s0  the corner's own cell
+ * @param s1  one step along the first in-plane axis
+ * @param s2  one step along the second
+ * @param s3  one step along both
+ * @return the averaged terms
+ */
+fn blend4(s0 : CornerSample, s1 : CornerSample, s2 : CornerSample, s3 : CornerSample) : CornerSample {
+    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+    return CornerSample {
+        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
+        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
+        bounce: r * 65536 + g * 256 + b,
+    };
+}
