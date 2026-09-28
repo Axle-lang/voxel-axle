@@ -162,9 +162,9 @@ fn run() : i32 ! PlatformError {
 
     let man : ChunkManager = new ChunkManager();
     // Inject the game's concrete terrain generator (biome tables + ore / tree
-    // rules — all app content) over the manager's shared voxel store. The kernel
-    // drives it through the `Generator` seam and never names TerrainGen.
-    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
+    // rules — all app content); it fills the voxel store the manager lends it.
+    // The kernel drives it through the `Generator` seam and never names TerrainGen.
+    man.attachGenerator(new TerrainGen(World::SPAN * World::SPAN));
     // Where this run starts. Random unless `--at x z` names a column, and
     // printed either way, so a world worth keeping can be returned to.
     let (startX, startZ) = startColumn(clock);

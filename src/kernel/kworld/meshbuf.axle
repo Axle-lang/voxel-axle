@@ -1,13 +1,14 @@
-// meshbuf — the shared render-mesh buffer layouts, in a leaf so both the world
-// manager (which owns/allocates them), the mesher (which writes them) and the
-// renderer (which reads them) can name the field layout regardless of module
-// order. Plain data: raw `i32[]` / `i64` buffers, no behaviour.
+// meshbuf — the render-mesh buffer layouts and the chunk ring, in a leaf so the
+// mesher (which owns and writes the mesh), the renderer (which reads it) and the
+// world manager and light engine (which share the ring) can name the field
+// layout regardless of module order. Plain data: raw `i32[]` / `i64` buffers,
+// no behaviour.
 
 /**
  * The baked render-mesh faces, one set shared by the whole chunk ring: a
  * per-slot face count plus SoA face attributes — world cell (fx/fy/fz), the
  * packed (dir<<8|tile) and the per-corner smooth light / AO byte volumes. The
- * mesher writes them, the renderer reads them; grouped so ChunkManager holds one
+ * mesher writes them, the renderer reads them; grouped so the mesher holds one
  * field, not seven.
  */
 struct FaceMesh {
@@ -35,10 +36,23 @@ struct TorchField {
     pub(crate) tcount : i16[], // torch count per slot — under MAX_TORCHES_PER_CHUNK
 }
 
-/** The chunk ring's per-slot ownership: chunk coords, loaded flag, collision top. */
-struct ColumnRing {
+/**
+ * The chunk ring's per-slot ownership: which chunk each slot holds, and whether
+ * it holds one. A class rather than a struct because the manager and the light
+ * engine both hold it, as a `Shared<ColumnRing>`.
+ */
+class ColumnRing {
     pub(crate) cxs : i32[],
     pub(crate) czs : i32[],
     pub(crate) loaded : i8[],
-    pub(crate) ctop : i16[],    // per-column highest collidable voxel + 1 (entity physics)
+
+    /**
+     * Allocate the ring's per-slot fields.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        self.cxs = malloc<i32>(slots);
+        self.czs = malloc<i32>(slots);
+        self.loaded = malloc<i8>(slots);
+    }
 }

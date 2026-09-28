@@ -47,11 +47,10 @@ class SkyEngine {
     dome : SkyDome,        // this frame's colour field
     rays : ViewRays,       // …and how a pixel becomes a direction in it
     lastFog : FogTable,    // the view of the fog tables this frame was built with
-    pool : WorkerPool[],   // the render crew, aliased from the Renderer in a one-slot
-                           // array: a class reference cannot be stored, an array can
+    pool : Shared<WorkerPool>, // the render crew, co-owned with the Renderer
     paintPass : i32,       // the sky paint's handle into that pool
-    paintNow : SkyPaintFrame[], // one slot: what the paint is to draw this frame
-    paintSeen : i32[],     // how much sky each band found, one slot per band. The
+    paintNow : Shared<SkyPaintFrame[]>, // one slot: what the paint is to draw this frame
+    paintSeen : Shared<i32[]>, // how much sky each band found, one slot per band. The
                            // cloud march is priced off the total: a deck no pixel
                            // of the window can reach is not worth marching at full
                            // rate, and looking at the floor of a hole was paying
@@ -62,10 +61,9 @@ class SkyEngine {
 
     /**
      * Compose the pieces; nothing is sized until the first `update`.
-     * @param pool  the render crew, aliased in a one-slot array, that the sky
-     *              paint runs its row bands on
+     * @param pool  the render crew the sky paint runs its row bands on
      */
-    constructor(pool : WorkerPool[]) {
+    constructor(own pool : Shared<WorkerPool>) {
         self.cloudSky = new CloudSky();
         self.fogT = new FogTables();
         self.dome = SkyDome {
@@ -80,15 +78,15 @@ class SkyEngine {
             xscale: 0.0, yscale: 0.0, dscale: 0.0,
         };
         self.pool = pool;
-        self.paintNow = malloc<SkyPaintFrame>(1);
-        self.paintSeen = malloc<i32>(SKY_BANDS);
+        self.paintNow = Shared::wrap(malloc<SkyPaintFrame>(1));
+        self.paintSeen = Shared::wrap(malloc<i32>(SKY_BANDS));
         for (i of 0..SKY_BANDS) {
             self.paintSeen[i] = 0;
         }
         // Until the first paint has run, assume the sky is in full view: the
         // deck has to be built before anything can decide it is not worth it.
         self.skyPixels = 0x7FFFFFFF;
-        self.paintPass = pool[0].attach(new SkyPaint(self.paintNow, self.paintSeen));
+        self.paintPass = self.pool.attach(new SkyPaint(self.paintNow, self.paintSeen));
         self.marchUs = 0;
         self.drawUs = 0;
     }
@@ -134,7 +132,7 @@ class SkyEngine {
         let t : i64 = monotonicNanos();
         let deck : CloudDome = self.cloudSky.dome();
         self.paintNow[0] = SkyPaintFrame { dome: self.dome, rays: self.rays, cloud: deck, fb: fb };
-        self.pool[0].run(self.paintPass, SKY_BANDS);
+        self.pool.run(self.paintPass, SKY_BANDS);
         drawCelestial(ds, p, fb, lens, deck);
         let seen : i32 = 0;
         for (i of 0..SKY_BANDS) {

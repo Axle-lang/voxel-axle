@@ -15,29 +15,33 @@
 //
 // Because this is a leaf, both `manager.axle` (which composes a VoxStore) and
 // `treegen.axle` (which carves trees straight into one) depend on it one-way —
-// no import cycle. Axle arrays (`Block[]`/`i32[]`) are references, so writes
-// through a VoxStore handed to a free function mutate the owning ring in place.
+// no import cycle.
+//
+// The field itself is `VoxData`, held as a `Shared<VoxData>`: the manager and
+// the light engine each own a VoxStore, and both views co-own the one field.
 
 use crate::kernel::kmath::vec3::{ IVec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
-class VoxStore {
-    vox : Block[],            // block field: slots × chunkSize² × worldHeight
-    lvl : i8[],               // per-voxel LEVEL, same layout; 0 = the id's default box
-    pub(crate) maxFY : i16[], // per-slot highest-face Y watermark (bounds the mesh/light
-                              // scan) — a level of the world, so under World::HEIGHT
+/**
+ * The voxel field, its level field and the per-slot face-Y watermark.
+ *
+ * The level is one byte a voxel beside the id — a quarter more memory
+ * for the field, and the thing that makes a partial block a piece of
+ * WORLD DATA rather than a function of where it happens to sit. A
+ * height derived from the coordinates cannot be placed, cannot be dug
+ * a layer at a time, and cannot differ between two cells the noise
+ * happens to agree about.
+ */
+class VoxData {
+    pub(crate) vox : Block[],   // block field: slots × chunkSize² × worldHeight
+    pub(crate) lvl : i8[],      // per-voxel LEVEL, same layout; 0 = the id's default box
+    pub(crate) maxFY : i16[],   // per-slot highest-face Y watermark (bounds the mesh/light
+                                // scan) — a level of the world, so under World::HEIGHT
 
     /**
-     * Allocate the voxel field, its level field and the per-slot face-Y
-     * watermark.
-     *
-     * The level is one byte a voxel beside the id — a quarter more memory
-     * for the field, and the thing that makes a partial block a piece of
-     * WORLD DATA rather than a function of where it happens to sit. A
-     * height derived from the coordinates cannot be placed, cannot be dug
-     * a layer at a time, and cannot differ between two cells the noise
-     * happens to agree about.
+     * Allocate the three fields.
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
@@ -45,6 +49,18 @@ class VoxStore {
         self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
         self.lvl = malloc<i8>(slots * s * s * World::HEIGHT);
         self.maxFY = malloc<i16>(slots);
+    }
+}
+
+class VoxStore {
+    data : Shared<VoxData>, // the field, co-owned with every other view
+
+    /**
+     * A view over a voxel field.
+     * @param data  the field this view reads and writes
+     */
+    constructor(own data : Shared<VoxData>) {
+        self.data = data;
     }
 
     /**
@@ -74,7 +90,7 @@ class VoxStore {
         if (local.y >= World::HEIGHT) {
             return Block::Air;
         }
-        return self.vox[self.voxIdx(slot, local.x, local.y, local.z)];
+        return self.data.vox[self.voxIdx(slot, local.x, local.y, local.z)];
     }
 
     /**
@@ -85,11 +101,11 @@ class VoxStore {
      */
     pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
         let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
-        self.vox[at] = id;
+        self.data.vox[at] = id;
         // A write that says nothing about the level clears it, so a cell
         // never inherits the level of whatever used to be there. Zero is
         // "the id's own default box".
-        self.lvl[at] = 0;
+        self.data.lvl[at] = 0;
     }
 
     /**
@@ -106,8 +122,8 @@ class VoxStore {
      */
     pub(crate) fn setVoxLevel(mut self, slot : i32, local : IVec3, own id : Block, level : i32) : void {
         let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
-        self.vox[at] = id;
-        self.lvl[at] = level as i8;
+        self.data.vox[at] = id;
+        self.data.lvl[at] = level as i8;
     }
 
     /**
@@ -120,7 +136,7 @@ class VoxStore {
         if (local.y < 0 || local.y >= World::HEIGHT) {
             return 0;
         }
-        return self.lvl[self.voxIdx(slot, local.x, local.y, local.z)] as i32;
+        return self.data.lvl[self.voxIdx(slot, local.x, local.y, local.z)] as i32;
     }
 
     /**
@@ -144,13 +160,30 @@ class VoxStore {
     }
 
     /**
+     * The slot's highest-face Y watermark: nothing in the slot sits above it.
+     * @param slot  the slot index
+     * @return the highest Y that carries a face
+     */
+    pub(crate) fn faceTop(self, slot : i32) : i32 {
+        return self.data.maxFY[slot] as i32;
+    }
+
+    /**
+     * Drop the slot's highest-face Y watermark to the floor, before a fresh fill.
+     * @param slot  the slot index
+     */
+    pub(crate) fn resetFaceTop(mut self, slot : i32) : void {
+        self.data.maxFY[slot] = 0;
+    }
+
+    /**
      * Raise the slot's highest-face Y watermark to include `y`.
      * @param slot  the slot index
      * @param y     the candidate Y
      */
     pub(crate) fn bumpFY(mut self, slot : i32, y : i32) : void {
-        if (y > (self.maxFY[slot] as i32)) {
-            self.maxFY[slot] = y as i16;
+        if (y > (self.data.maxFY[slot] as i32)) {
+            self.data.maxFY[slot] = y as i16;
         }
     }
 }

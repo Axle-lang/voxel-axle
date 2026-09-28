@@ -84,7 +84,7 @@ const TUNNEL_RUN : i32 = 5;
 fn runLightCheck() : i32 {
     let fails : i32 = 0;
     let man : ChunkManager = new ChunkManager();
-    man.attachGenerator(new TerrainGen(man.store, World::SPAN * World::SPAN));
+    man.attachGenerator(new TerrainGen(World::SPAN * World::SPAN));
     while (man.ensureLoaded(0, 0) > 0) {
     }
 

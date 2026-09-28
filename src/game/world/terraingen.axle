@@ -1,12 +1,12 @@
 // terraingen — the terrain generator, a leaf split out of the world manager.
 //
 // Owns the padded heightmap and the biome registry, and writes voxels straight
-// into the shared VoxStore (aliased from the manager — Axle arrays / classes are
-// references). It fills a chunk's stone / filler / surface bands by depth, water
-// up to sea level, a thin cold-biome snow layer, then stamps deterministic trees
-// (carving delegated to treegen's free functions) and dusts cold canopies with
-// snow. Tree placement is deterministic (treeHash), so a canopy straddling a
-// chunk border is stamped identically from both sides — seamless.
+// into the VoxStore the manager lends each `generate` call. It fills a chunk's
+// stone / filler / surface bands by depth, water up to sea level, a thin
+// cold-biome snow layer, then stamps deterministic trees (carving delegated to
+// treegen's free functions) and dusts cold canopies with snow. Tree placement
+// is deterministic (treeHash), so a canopy straddling a chunk border is stamped
+// identically from both sides — seamless.
 
 use crate::kernel::kworld::manager::Generator;
 use crate::kernel::kworld::noise::{ terrainHeight, temperature, humidity, treeHash, hashI, snowDepth };
@@ -21,19 +21,24 @@ use crate::configs::noise::{ Noise };
 use crate::configs::trees::{ Trees };
 use crate::configs::world::{ World };
 
+/** The chunk being generated: the slot it lands in and its chunk coordinates. */
+struct GenChunk {
+    slot : i32,
+    cx : i32,
+    cz : i32,
+}
+
 class TerrainGen : Generator {
-    store : VoxStore, // shared voxel storage (aliased from the manager)
     hmap : i8[],      // per-slot terrain top (tree-free), owned here — under 128
 
     /**
-     * Allocate the padded heightmap over a shared store. Biome parameters are a
-     * pure lookup (biomes.axle), so there is no per-biome state to own here.
-     * @param store  the shared voxel storage
+     * Allocate the padded heightmap. The voxel store stays the manager's and is
+     * lent per `generate` call. Biome parameters are a pure lookup (biomes.axle),
+     * so there is no per-biome state to own here.
      * @param slots  the number of ring slots (span * span)
      */
-    constructor(own store : VoxStore, slots : i32) {
+    constructor(slots : i32) {
         let s : i32 = World::CHUNK_SIZE;
-        self.store = store;
         self.hmap = malloc<i8>(slots * s * s);
     }
 
@@ -51,13 +56,14 @@ class TerrainGen : Generator {
 
     /**
      * Generate a chunk: heightmap first, then the voxel field + trees.
-     * @param slot  the slot index
-     * @param cx    the chunk x coordinate
-     * @param cz    the chunk z coordinate
+     * @param store  the manager's voxel storage to fill
+     * @param slot   the slot index
+     * @param cx     the chunk x coordinate
+     * @param cz     the chunk z coordinate
      */
-    fn generate(mut self, slot : i32, cx : i32, cz : i32) : void {
+    fn generate(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void {
         self.genHeightmap(slot, cx, cz);
-        self.genVoxels(slot, cx, cz);
+        self.genVoxels(store, slot, cx, cz);
     }
 
     /**
@@ -148,13 +154,14 @@ class TerrainGen : Generator {
     /**
      * Fill the voxel field for a chunk: stone / filler / surface by depth,
      * water up to sea level, a thin cold-biome snow layer, air above; then trees.
-     * @param slot  the slot index
-     * @param cx    the chunk x coordinate
-     * @param cz    the chunk z coordinate
+     * @param store  the voxel storage to fill
+     * @param slot   the slot index
+     * @param cx     the chunk x coordinate
+     * @param cz     the chunk z coordinate
      */
-    fn genVoxels(mut self, slot : i32, cx : i32, cz : i32) : void {
+    fn genVoxels(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
-        self.store.maxFY[slot] = 0;
+        store.resetFaceTop(slot);
         let lz : i32 = 0;
         while (lz < s) {
             let lx : i32 = 0;
@@ -170,7 +177,7 @@ class TerrainGen : Generator {
                 if (h <= World::SEA_LEVEL) {
                     topY = World::SEA_LEVEL;
                 }
-                self.store.bumpFY(slot, topY);
+                store.bumpFY(slot, topY);
                 let ly : i32 = 0;
                 while (ly < World::HEIGHT) {
                     let id : Block = Block::Air;
@@ -189,7 +196,7 @@ class TerrainGen : Generator {
                             id = Block::Ice;
                         }
                     }
-                    self.store.setVoxLocal(slot, ivec3(lx, ly, lz), id);
+                    store.setVoxLocal(slot, ivec3(lx, ly, lz), id);
                     ly = ly + 1;
                 }
                 // Cold-biome ground: a thin, noise-varied snow layer on top of the
@@ -199,7 +206,7 @@ class TerrainGen : Generator {
                     let frac : f64 = snowDepth(wx as f64, wz as f64);
                     if (frac > 0.0) {
                         if (frac >= 0.95) {
-                            self.store.setVoxLocal(slot, ivec3(lx, h, lz), Block::Snow);
+                            store.setVoxLocal(slot, ivec3(lx, h, lz), Block::Snow);
                         } else {
                             // The noise is sampled ONCE, here, and what it says
                             // is stored as the cell's level. Nothing downstream
@@ -207,17 +214,17 @@ class TerrainGen : Generator {
                             // which is what lets it be dug a layer at a time,
                             // and what keeps the world seed out of the collision
                             // path.
-                            self.store.setVoxLevel(slot, ivec3(lx, h, lz),
+                            store.setVoxLevel(slot, ivec3(lx, h, lz),
                                 Block::SnowLayer, levelOfHeight(frac));
                         }
-                        self.store.bumpFY(slot, h);
+                        store.bumpFY(slot, h);
                     }
                 }
                 lx = lx + 1;
             }
             lz = lz + 1;
         }
-        self.stampTrees(slot, cx, cz);
+        self.stampTrees(store, slot, cx, cz);
     }
 
     /**
@@ -225,12 +232,14 @@ class TerrainGen : Generator {
      * margin so canopies straddling a border appear from both sides).
      * Deterministic via `treeHash`, so the two chunks stamp the shared tree
      * identically. Carving lives in treegen.axle; this drives it per-biome.
-     * @param slot  the slot index
-     * @param cx    the chunk x coordinate
-     * @param cz    the chunk z coordinate
+     * @param store  the voxel storage to carve into
+     * @param slot   the slot index
+     * @param cx     the chunk x coordinate
+     * @param cz     the chunk z coordinate
      */
-    fn stampTrees(mut self, slot : i32, cx : i32, cz : i32) : void {
+    fn stampTrees(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
+        let chunk : GenChunk = GenChunk { slot: slot, cx: cx, cz: cz };
         let olz : i32 = 0 - 2;
         while (olz <= s + 1) {
             let olx : i32 = 0 - 2;
@@ -246,10 +255,11 @@ class TerrainGen : Generator {
                     let thr : f64 = bd.treeThresh;
                     thr = thr + (1.0 - thr) * Trees::THIN;
                     if (treeHash(wx as f64, wz as f64) > thr) {
-                        stampTree(self.store, bd.treeKind, bd.treeHt, slot, ivec3(olx, h, olz));
+                        let base : IVec3 = ivec3(olx, h, olz);
+                        stampTree(store, bd.treeKind, bd.treeHt, slot, base);
                         // Cold biomes: dust the canopy with a thin snow cap.
                         if (self.coldBiome(biome)) {
-                            self.snowCapTree(slot, olx, olz, h, bd.treeHt, cx * s, cz * s);
+                            self.snowCapTree(store, chunk, base, bd.treeHt);
                         }
                     }
                 }
@@ -262,17 +272,14 @@ class TerrainGen : Generator {
     /**
      * Dust a freshly-stamped tree's canopy with a thin snow cap: over each column
      * of the tree footprint, drop a single snow block onto the topmost leaf.
-     * @param slot    the slot index
-     * @param olx     the tree origin local x
-     * @param olz     the tree origin local z
-     * @param baseY   the trunk base Y
+     * @param store   the voxel storage holding the canopy
+     * @param chunk   the chunk being generated
+     * @param base    the trunk base, chunk-local x/z and world y
      * @param height  the trunk height
-     * @param cx0     the chunk's world-x origin (cx * chunkSize)
-     * @param cz0     the chunk's world-z origin (cz * chunkSize)
      */
-    fn snowCapTree(mut self, slot : i32, olx : i32, olz : i32, baseY : i32, height : i32, cx0 : i32, cz0 : i32) : void {
+    fn snowCapTree(mut self, store : VoxStore, chunk : GenChunk, base : IVec3, height : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
-        let topSearch : i32 = baseY + height + 4;
+        let topSearch : i32 = base.y + height + 4;
         if (topSearch >= World::HEIGHT) {
             topSearch = World::HEIGHT - 1;
         }
@@ -280,10 +287,10 @@ class TerrainGen : Generator {
         while (dz <= 2) {
             let dx : i32 = 0 - 2;
             while (dx <= 2) {
-                let lx : i32 = olx + dx;
-                let lz : i32 = olz + dz;
+                let lx : i32 = base.x + dx;
+                let lz : i32 = base.z + dz;
                 if (lx >= 0 && lx < s && lz >= 0 && lz < s) {
-                    self.snowCapColumn(slot, lx, lz, baseY, topSearch, cx0, cz0);
+                    self.snowCapColumn(store, chunk, ivec3(lx, base.y, lz), topSearch);
                 }
                 dx = dx + 1;
             }
@@ -295,31 +302,32 @@ class TerrainGen : Generator {
      * Dust one column of the tree footprint: find its topmost leaf and, if the
      * cell above is open and the column's own ground biome is cold, drop a single
      * snow block there (one block per column → a light dusting, not a slab).
-     * @param slot       the slot index
-     * @param lx         local x of the column
-     * @param lz         local z of the column
-     * @param baseY      the trunk base Y (search floor)
+     * @param store      the voxel storage holding the canopy
+     * @param chunk      the chunk being generated
+     * @param floor      the column, chunk-local x/z, at the trunk base y (search floor)
      * @param topSearch  the top of the leaf search (clamped to the world top)
-     * @param cx0        the chunk's world-x origin (cx * chunkSize)
-     * @param cz0        the chunk's world-z origin (cz * chunkSize)
      */
-    fn snowCapColumn(mut self, slot : i32, lx : i32, lz : i32, baseY : i32, topSearch : i32, cx0 : i32, cz0 : i32) : void {
+    fn snowCapColumn(mut self, store : VoxStore, chunk : GenChunk, floor : IVec3, topSearch : i32) : void {
+        let slot : i32 = chunk.slot;
+        let lx : i32 = floor.x;
+        let lz : i32 = floor.z;
+        let baseY : i32 = floor.y;
         // Walk down to the topmost leaf of this column.
         let y : i32 = topSearch;
-        while (y > baseY && !isLeaves(self.store.getVox(slot, ivec3(lx, y, lz)))) {
+        while (y > baseY && !isLeaves(store.getVox(slot, ivec3(lx, y, lz)))) {
             y = y - 1;
         }
         if (y <= baseY) {
             return;   // no leaf in this column
         }
         // The leaf needs open air directly above to hold the snow.
-        if (y + 1 >= World::HEIGHT || self.store.getVox(slot, ivec3(lx, y + 1, lz)) != Block::Air) {
+        if (y + 1 >= World::HEIGHT || store.getVox(slot, ivec3(lx, y + 1, lz)) != Block::Air) {
             return;
         }
         // Only cap columns whose own ground biome is cold, so the canopy snow
         // matches the ground snow.
-        let wx : i32 = cx0 + lx;
-        let wz : i32 = cz0 + lz;
+        let wx : i32 = chunk.cx * World::CHUNK_SIZE + lx;
+        let wz : i32 = chunk.cz * World::CHUNK_SIZE + lz;
         let ch : i32 = self.colHeightWorld(wx, wz);
         let cb : BiomeId = biomeAt(temperature(wx as f64, wz as f64), humidity(wx as f64, wz as f64), ch);
         if (!self.coldBiome(cb)) {
@@ -330,11 +338,11 @@ class TerrainGen : Generator {
             return;
         }
         if (frac >= 0.95) {
-            self.store.setVoxLocal(slot, ivec3(lx, y + 1, lz), Block::Snow);
+            store.setVoxLocal(slot, ivec3(lx, y + 1, lz), Block::Snow);
         } else {
-            self.store.setVoxLevel(slot, ivec3(lx, y + 1, lz),
+            store.setVoxLevel(slot, ivec3(lx, y + 1, lz),
                 Block::SnowLayer, levelOfHeight(frac));
         }
-        self.store.bumpFY(slot, y + 1);
+        store.bumpFY(slot, y + 1);
     }
 }

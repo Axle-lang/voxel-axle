@@ -234,19 +234,19 @@ struct SkyPaintFrame {
  * reading the z-buffer they wrote, so only true sky pixels are ever computed.
  */
 pub(crate) class SkyPaint : Job {
-    now : SkyPaintFrame[],  // one slot: what this frame paints
+    now : Shared<SkyPaintFrame[]>, // one slot: what this frame paints
     // How much sky each band found, one slot per band so no two workers write
     // the same word and no atomic is needed. It is the only thing the frame
     // learns about how much of the window the sky actually reaches — and the
     // cloud march is priced off it, because a deck nobody can see is a deck not
     // worth marching at full rate.
-    seen : i32[],
+    seen : Shared<i32[]>,
 
     /**
      * @param now   the one-slot frame the engine publishes into
      * @param seen  the per-band tally the engine reads back, one slot per band
      */
-    constructor(now : SkyPaintFrame[], seen : i32[]) {
+    constructor(own now : Shared<SkyPaintFrame[]>, own seen : Shared<i32[]>) {
         self.now = now;
         self.seen = seen;
     }

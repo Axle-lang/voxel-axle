@@ -22,12 +22,11 @@
 // on (VoxelQuery / VoxelEdit / LightSample) never moved.
 
 use std::sys::sleep;
-use smalt::Mem;
 use crate::kernel::kblock::blocks::{ isSolid, isCollidable, boxOf, BlockBox };
-use crate::kernel::kworld::voxstore::VoxStore;
-use crate::kernel::kworld::meshbuf::{ FaceMesh, TorchField, ColumnRing };
+use crate::kernel::kworld::voxstore::{ VoxStore, VoxData };
+use crate::kernel::kworld::meshbuf::{ ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };
-use crate::kernel::kworld::chunkmesher::ChunkMesher;
+use crate::kernel::kworld::chunkmesher::{ ChunkMesher, MeshSource };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels };
 use crate::configs::blocks::{ Block };
@@ -45,7 +44,7 @@ use crate::configs::world::{ World };
  * `MobSpawner` in kentity::mob. seams.axle holds only the kernel↔kernel contracts.
  */
 trait Generator {
-    fn generate(mut self, slot : i32, cx : i32, cz : i32) : void;
+    fn generate(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void;
     fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32;
 }
 
@@ -55,59 +54,40 @@ trait Generator {
 //   * LightSample — baked per-voxel light reads the renderer samples per corner
 // It composes the components and delegates; the seam signatures are verbatim.
 class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
-    pub(crate) faces : FaceMesh,     // baked render faces (mesher writes, renderer reads)
-    pub(crate) torches : TorchField, // per-slot torch posts
-    pub(crate) cols : ColumnRing,    // per-slot chunk ownership + collision top
+    pub(crate) cols : Shared<ColumnRing>, // per-slot chunk ownership
     pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
     pub(crate) leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
     gen : dyn Generator[],           // terrain generation seam (concrete impl injected by
                                      // the app), held in a one-slot array: a trait-typed
                                      // field cannot store a class implementer (E0709)
-    mesher : ChunkMesher,            // voxel → face/torch/collision-top mesher
+    pub(crate) mesher : ChunkMesher, // voxel → face/torch/collision-top mesher; owns the
+                                     // mesh the renderer and the physics read
 
     /**
-     * Allocate the slot ring + per-slot face / torch / collision buffers, compose
-     * the voxel store, light engine, generator and mesher, then mark every slot
-     * unloaded.
+     * Compose the slot ring, the voxel store, light engine, generator and
+     * mesher, then mark every slot unloaded.
      */
     constructor() {
         let slots : i32 = World::SPAN * World::SPAN;
-        let faceCap : i32 = slots * World::MAX_FACES_PER_CHUNK;
-        let s : i32 = World::CHUNK_SIZE;
-        let torchCap : i32 = slots * World::MAX_TORCHES_PER_CHUNK;
-        self.faces = FaceMesh {
-            fcount: malloc<i16>(slots),
-            fx: malloc<i8>(faceCap), fy: malloc<i8>(faceCap), fz: malloc<i8>(faceCap),
-            ftile: malloc<i16>(faceCap),
-            frun: malloc<i8>(faceCap),
-            flight: Mem::take((faceCap as i64) * 8),
-            fao: Mem::take(faceCap as i64),
-        };
-        self.torches = TorchField {
-            tx: malloc<i8>(torchCap), ty: malloc<i8>(torchCap), tz: malloc<i8>(torchCap),
-            tcount: malloc<i16>(slots),
-        };
-        self.cols = ColumnRing {
-            cxs: malloc<i32>(slots), czs: malloc<i32>(slots),
-            loaded: malloc<i8>(slots), ctop: malloc<i16>(slots * s * s),
-        };
-        self.store = new VoxStore(slots);
+        // The voxel field and the ring are co-owned with the light engine, which
+        // reads both from its own thread; each side takes its own handle. The
+        // generator and the mesher are lent them per call instead.
+        let field : Shared<VoxData> = new shared VoxData(slots);
+        self.cols = new shared ColumnRing(slots);
+        self.store = new VoxStore(field);
         self.gen = malloc<dyn Generator>(1);
-        // The light engine + generator alias the shared voxel field + ring
-        // ownership; the mesher aliases the face buffers it fills (built last, so
-        // every field it reads is already assigned).
-        self.leng = new LightEngine(self.store, self.cols.loaded, self.cols.cxs, self.cols.czs, slots);
+        self.leng = new LightEngine(new VoxStore(field), self.cols, slots);
         let i : i32 = 0;
         while (i < slots) {
             self.cols.loaded[i] = 0;
             i = i + 1;
         }
-        self.mesher = new ChunkMesher(self);
+        self.mesher = new ChunkMesher(slots);
     }
 
     /**
      * Inject the terrain generator (a `dyn Generator` seam). The app builds the
-     * concrete generator over this manager's shared `store` and attaches it once,
+     * concrete generator, which fills the `store` lent to it, and attaches it once,
      * at startup, before the first `ensureLoaded` — so the kernel never names a
      * concrete generator.
      * @param g  the generator implementation (ownership taken)
@@ -234,7 +214,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
             return World::SEA_LEVEL;
         }
-        return self.cols.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)] as i32;
+        return self.mesher.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)] as i32;
     }
 
     /**
@@ -425,7 +405,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.cols.cxs[slot] = cx;
         self.cols.czs[slot] = cz;
         self.cols.loaded[slot] = 1;
-        self.gen[0].generate(slot, cx, cz);
+        self.gen[0].generate(self.store, slot, cx, cz);
         self.leng.clearLight(slot);
         self.leng.seedSky(slot, cx, cz);
         // Don't mesh here — ensureLoaded meshes in a second pass once every
@@ -444,7 +424,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param cz    the chunk z coordinate
      */
     fn buildMesh(mut self, slot : i32, cx : i32, cz : i32) : void {
-        self.mesher.buildSlot(slot, cx, cz);
+        self.mesher.buildSlot(MeshSource { store: self.store, leng: self.leng }, slot, cx, cz);
     }
 
     /** Re-mesh every slot whose light changed, then re-flag it for a sky-AO bake. */

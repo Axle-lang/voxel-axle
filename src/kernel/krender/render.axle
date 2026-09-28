@@ -62,24 +62,99 @@ const BUILD_WORKERS : i32 = 6;
 const RASTER_BANDS : i32 = 12;
 
 /**
- * The banded fill, as a pass the worker pool can run.
+ * The world-face raster crew: `BUILD_WORKERS` independent components, each
+ * with its own triangle queue and clipping scratch.
  *
- * It reaches its two inputs through ARRAYS, and that is the whole reason it can
- * exist: a pass is attached to the pool once and run every frame after, but
- * Axle will not let a long-lived object remember a borrowed reference, so a
- * per-frame input cannot simply be handed to it. A one-slot array can be held
- * by both the Renderer and the pass, and what the Renderer writes into it
- * before a pass the pass reads during one.
+ * One was not enough for the reason the frame timings gave: the projection /
+ * clip / light pass over eighty-eight thousand faces ran on ONE thread and was
+ * two thirds of the world pass, while the fill it feeds already spread over
+ * twelve. The Renderer, which fills the queues, and the banded fill, which
+ * drains them, both hold the crew as a `Shared<RasterCrew>`.
  */
-class BandFill : Job {
-    crew : ChunkRenderer[],  // the queues to fill from, aliased from the Renderer
-    frame : FrameBuf[],      // one slot: the target this frame, written before the pass
+class RasterCrew {
+    members : ChunkRenderer[],
+
+    /** Build every member of the crew. */
+    constructor() {
+        self.members = malloc<ChunkRenderer>(BUILD_WORKERS as i64);
+        for (i of 0..BUILD_WORKERS) {
+            self.members[i as i64] = new ChunkRenderer();
+        }
+    }
 
     /**
-     * @param crew   the raster crew, aliased
+     * Hand every member this frame's atlas, colour space, fog and light.
+     * @param atlas   the texture atlas mip chain view
+     * @param gam     the colour space the texels are lit in
+     * @param fogT    the fog: the sky's colour behind each pixel, and its depth curve
+     * @param day     the day/night state
+     * @param lcurve  the brightness-curve lookup
+     */
+    pub(crate) fn setFrame(mut self, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
+        for (i of 0..BUILD_WORKERS) {
+            self.members[i as i64].setFrame(atlas, gam, fogT, day, lcurve);
+        }
+    }
+
+    /**
+     * Fill every member's triangle queue, the slots dealt round-robin: member 0
+     * on this thread, the rest on their own.
+     * @param man    chunk manager holding the loaded chunks and baked faces
+     * @param p      player providing the eye position and orientation
+     * @param cam    the camera (eye + orientation + projection width)
+     * @param phase  animation time phase (scrolls flowing-water textures)
+     */
+    pub(crate) fn build(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64) : void {
+        let builders : Task<i32>[5];
+        for (i of 0..5) {
+            builders[i] = spawn buildSlotsJob(self.members[(i + 1) as i64], man, p, cam, phase,
+                i + 1, BUILD_WORKERS);
+        }
+        self.members[0].buildSlots(man, p, cam, phase, 0, BUILD_WORKERS);
+        for (i of 0..5) {
+            let d : i32 = builders[i].join();
+        }
+    }
+
+    /**
+     * Rasterise every member's queue into one column band.
+     * @param fb  the render target
+     * @param x0  the band's first column
+     * @param x1  one past its last
+     */
+    pub(crate) fn fillBand(self, fb : FrameBuf, x0 : i32, x1 : i32) : void {
+        for (i of 0..BUILD_WORKERS) {
+            self.members[i as i64].rasterizeBand(fb, x0, x1);
+        }
+    }
+
+    /** Triangles the crew queued in the last build. */
+    pub(crate) fn triCount(self) : i32 {
+        let n : i32 = 0;
+        for (i of 0..BUILD_WORKERS) {
+            n = n + self.members[i as i64].queuedTris;
+        }
+        return n;
+    }
+}
+
+/**
+ * The banded fill, as a pass the worker pool can run.
+ *
+ * A pass is attached to the pool once and run every frame after, so its
+ * inputs are co-owned with the Renderer: the crew whose queues it drains, and
+ * a one-slot frame the Renderer writes before each pass and the pass reads
+ * during one.
+ */
+class BandFill : Job {
+    crew : Shared<RasterCrew>,  // the queues to fill from, co-owned with the Renderer
+    frame : Shared<FrameBuf[]>, // one slot: the target this frame, written before the pass
+
+    /**
+     * @param crew   the raster crew
      * @param frame  the one-slot render target the Renderer publishes into
      */
-    constructor(crew : ChunkRenderer[], frame : FrameBuf[]) {
+    constructor(own crew : Shared<RasterCrew>, own frame : Shared<FrameBuf[]>) {
         self.crew = crew;
         self.frame = frame;
     }
@@ -97,9 +172,7 @@ class BandFill : Job {
         let bw : i32 = (fb.w + shares - 1) / shares;
         let x0 : i32 = (bw * share).min(fb.w);
         let x1 : i32 = (bw * (share + 1)).min(fb.w);
-        for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64].rasterizeBand(fb, x0, x1);
-        }
+        self.crew.fillBand(fb, x0, x1);
     }
 }
 
@@ -116,17 +189,8 @@ class Renderer {
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
     day : DayLighting,    // owns the day/night colour + brightness cache
-    /**
-     * The world-face raster crew: `BUILD_WORKERS` independent components,
-     * each with its own triangle queue and clipping scratch.
-     *
-     * One was not enough for the reason the frame timings gave: the
-     * projection / clip / light pass over eighty-eight thousand faces ran
-     * on ONE thread and was two thirds of the world pass, while the fill
-     * it feeds already spread over twelve. Crew member 0 is the primary —
-     * the main thread's share — and is where the frame counters live.
-     */
-    crew : ChunkRenderer[],
+    crew : Shared<RasterCrew>, // the world-face raster crew, co-owned with the banded fill
+    fillUs : i64 = 0,          // microseconds spent in the banded fill, accumulated over the run
     sky : SkyEngine,  // everything above the ground: the atmosphere, the cloud
                       // deck, the fog those two agree on, and the backdrop
     bloom : Bloom,   // soft-glow post-process (owns its half-res buffers + jobs)
@@ -136,11 +200,12 @@ class Renderer {
      * The crew the parallel passes run on, started once instead of once a
      * frame. A fan-out of twelve costs ten microseconds here against four
      * hundred and ninety for twelve fresh threads, and the difference is paid
-     * by THIS thread, in the middle of the frame.
+     * by THIS thread, in the middle of the frame. Co-owned with the sky, which
+     * runs its paint on the same crew.
      */
-    pool : WorkerPool[],
-    fillPass : i32,     // the banded fill's handle into the pool
-    frame : FrameBuf[], // one slot: this frame's target, published to the passes
+    pool : Shared<WorkerPool>,
+    fillPass : i32,             // the banded fill's handle into the pool
+    frame : Shared<FrameBuf[]>, // one slot: this frame's target, published to the passes
 
     /**
      * Build a Renderer: set the projection width from config and construct the
@@ -151,19 +216,15 @@ class Renderer {
         self.atlas = new TextureAtlas();
         self.gamma = new GammaTables();
         self.day = new DayLighting();
-        self.crew = malloc<ChunkRenderer>(BUILD_WORKERS as i64);
-        for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64] = new ChunkRenderer();
-        }
+        self.crew = new shared RasterCrew();
         self.bloom = new Bloom();
         self.mobs = new MobView();
         self.sel = new Selection();
         // One fewer than the widest fan-out: the calling thread takes share 0.
-        self.pool = malloc<WorkerPool>(1);
-        self.pool[0] = new WorkerPool(RASTER_BANDS - 1);
-        self.frame = malloc<FrameBuf>(1);
+        self.pool = new shared WorkerPool(RASTER_BANDS - 1);
+        self.frame = Shared::wrap(malloc<FrameBuf>(1));
         self.frame[0] = FrameBuf { pixels: 0, zbuf: 0, w: 0, h: 0 };
-        self.fillPass = self.pool[0].attach(new BandFill(self.crew, self.frame));
+        self.fillPass = self.pool.attach(new BandFill(self.crew, self.frame));
         // Built last: it attaches its own pass to the pool above.
         self.sky = new SkyEngine(self.pool);
     }
@@ -176,7 +237,7 @@ class Renderer {
      * been given back is the one bug none of the checks can catch.
      */
     pub(crate) fn close(mut self) : void {
-        self.pool[0].close();
+        self.pool.close();
     }
 
     /**
@@ -236,37 +297,23 @@ class Renderer {
      */
     pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera,
         phase : f64, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
-        for (i of 0..BUILD_WORKERS) {
-            self.crew[i as i64].setFrame(atlas, gam, fogT, day, lcurve);
-        }
-        let builders : Task<i32>[5];
-        for (i of 0..5) {
-            builders[i] = spawn buildSlotsJob(self.crew[(i + 1) as i64], man, p, cam, phase,
-                i + 1, BUILD_WORKERS);
-        }
-        self.crew[0].buildSlots(man, p, cam, phase, 0, BUILD_WORKERS);
-        for (i of 0..5) {
-            let d : i32 = builders[i].join();
-        }
+        self.crew.setFrame(atlas, gam, fogT, day, lcurve);
+        self.crew.build(man, p, cam, phase);
 
         let tFill : i64 = monotonicNanos();
         self.frame[0] = fb;
-        self.pool[0].run(self.fillPass, RASTER_BANDS);
-        self.crew[0].fillUs = self.crew[0].fillUs + (monotonicNanos() - tFill) / 1000;
+        self.pool.run(self.fillPass, RASTER_BANDS);
+        self.fillUs = self.fillUs + (monotonicNanos() - tFill) / 1000;
     }
 
     /** Triangles the world pass queued in the last frame. */
     pub(crate) fn triCount(self) : i32 {
-        let n : i32 = 0;
-        for (i of 0..BUILD_WORKERS) {
-            n = n + self.crew[i as i64].queuedTris;
-        }
-        return n;
+        return self.crew.triCount();
     }
 
     /** Microseconds the banded fill has taken, accumulated over the run. */
     pub(crate) fn fillMicros(self) : i64 {
-        return self.crew[0].fillUs;
+        return self.fillUs;
     }
 
     /**
@@ -427,18 +474,18 @@ class Renderer {
         while (slot < slots) {
             if (man.cols.loaded[slot] == 1 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
                 let base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
-                let n : i32 = man.torches.tcount[slot];
+                let n : i32 = man.mesher.torches.tcount[slot];
                 let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
                 let oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
                 let ti : i32 = 0;
                 while (ti < n) {
-                    let cx : f64 = ((ox + (man.torches.tx[base + ti] as i32)) as f64) + 0.5;
-                    let cz : f64 = ((oz + (man.torches.tz[base + ti] as i32)) as f64) + 0.5;
+                    let cx : f64 = ((ox + (man.mesher.torches.tx[base + ti] as i32)) as f64) + 0.5;
+                    let cz : f64 = ((oz + (man.mesher.torches.tz[base + ti] as i32)) as f64) + 0.5;
                     let x0 : f64 = cx - hw;
                     let x1 : f64 = cx + hw;
                     let z0 : f64 = cz - hw;
                     let z1 : f64 = cz + hw;
-                    let y0 : f64 = man.torches.ty[base + ti] as f64;
+                    let y0 : f64 = man.mesher.torches.ty[base + ti] as f64;
                     let y1 : f64 = y0 + ht;
                     self.mobs.drawQuad(p, fb, vec3(x1, y0, z1), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(1.0, 0.0, 0.0), mat, scene);
                     self.mobs.drawQuad(p, fb, vec3(x0, y0, z0), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x0, y1, z0), vec3(0.0 - 1.0, 0.0, 0.0), mat, scene);

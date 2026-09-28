@@ -9,14 +9,15 @@
 //
 // `LightEngine` (below) composes one (`self.lights`) and runs the light flood /
 // shadow / sky-AO passes over it; `ChunkManager` in turn composes a LightEngine.
-// This mirrors how the manager composes a `VoxStore`: the light engine aliases
-// the same voxel field + ring ownership the manager holds, so the background
-// light thread reaches the live world with no copy — the data has a focused home.
+// The light engine co-owns the voxel field and the ring ownership with the
+// manager, each as a `Shared` handle, so the background light thread reaches the
+// live world with no copy — the data has a focused home.
 
 use smalt::Mem;
 use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::kernel::kworld::voxstore::VoxStore;
+use crate::kernel::kworld::meshbuf::{ ColumnRing };
 use crate::kernel::kblock::blocks::{ isOpaque, lightTransmit, emissionOf, albedoFor, Emission };
 use crate::kernel::seams::{ LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels };
 use crate::configs::blocks::{ Block };
@@ -276,10 +277,9 @@ trait LightBaker {
  * LightEngine — the voxel LIGHTING engine, lifted whole out of ChunkManager.
  *
  * Owns the LightStore (per-voxel light volumes + flood stacks) and reads world
- * topology through a shared VoxStore plus the chunk-ring ownership arrays
- * (loaded / cxs / czs), all aliased from the manager (Axle arrays / class
- * instances are references, so no data is copied — the light thread reaches the
- * same voxels the manager does). It runs the block-light flood, the sky-light
+ * topology through its own VoxStore view plus the chunk ring (loaded / cxs /
+ * czs), both co-owned with the manager — no data is copied, the light thread
+ * reaches the same voxels the manager does. It runs the block-light flood, the sky-light
  * column + sideways gradient, the directional sun soft-shadow march and the
  * hemispherical sky-access / one-bounce GI bake, and satisfies the LightSample
  * read capabilities (Block/Sky/Sun/Bounce light fields) the renderer samples per
@@ -287,11 +287,9 @@ trait LightBaker {
  * whole lighting system finally has a focused, self-contained home.
  */
 class LightEngine : LightSample, LightBaker {
-    store : VoxStore,             // shared voxel field (aliased from the manager)
+    store : VoxStore,             // this engine's view of the voxel field
     lights : LightStore,          // per-voxel light volumes + flood stacks (owned here)
-    loaded : i8[],                // per-slot loaded flag (aliased)
-    cxs : i32[],                  // per-slot chunk x   (aliased)
-    czs : i32[],                  // per-slot chunk z   (aliased)
+    cols : Shared<ColumnRing>,    // the ring's loaded flags + chunk coords, co-owned
     moment : LightMoment,         // the hour, the clock and the camera column, published
                                   // by the main loop — everything the bake needs about now
     clouds : CloudMap,            // the sun's transmittance through the deck, per column
@@ -299,17 +297,13 @@ class LightEngine : LightSample, LightBaker {
 
     /**
      * Compose the light volumes over a shared voxel field + ring ownership.
-     * @param store   the shared voxel storage
-     * @param loaded  per-slot loaded flag (aliased)
-     * @param cxs     per-slot chunk-x (aliased)
-     * @param czs     per-slot chunk-z (aliased)
-     * @param slots   the number of ring slots (span * span)
+     * @param store  this engine's view of the voxel field
+     * @param cols   the chunk ring, co-owned with the manager
+     * @param slots  the number of ring slots (span * span)
      */
-    constructor(own store : VoxStore, loaded : i8[], cxs : i32[], czs : i32[], slots : i32) {
+    constructor(own store : VoxStore, own cols : Shared<ColumnRing>, slots : i32) {
         self.store = store;
-        self.loaded = loaded;
-        self.cxs = cxs;
-        self.czs = czs;
+        self.cols = cols;
         self.lights = new LightStore(slots);
         self.moment = LightMoment { dayTime: Daylight::START, seconds: 0.0, camX: 0, camZ: 0 };
         self.clouds = new CloudMap();
@@ -344,7 +338,7 @@ class LightEngine : LightSample, LightBaker {
 
     /** True if `slot` currently holds chunk (cx, cz). */
     fn owns(self, slot : i32, cx : i32, cz : i32) : bool {
-        return self.loaded[slot] == 1 && self.cxs[slot] == cx && self.czs[slot] == cz;
+        return self.cols.loaded[slot] == 1 && self.cols.cxs[slot] == cx && self.cols.czs[slot] == cz;
     }
 
     /** Block id at a world voxel; bedrock below 0, air above / unloaded. */
@@ -606,7 +600,7 @@ class LightEngine : LightSample, LightBaker {
             lz = lz + 1;
         }
         self.lights.lqn = 0;
-        let top : i32 = self.store.maxFY[slot] + 1;
+        let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
@@ -932,7 +926,7 @@ class LightEngine : LightSample, LightBaker {
                     ccz = bz;
                     cslot = self.slotFor(bx, bz);
                     cowns = self.owns(cslot, bx, bz);
-                    ctop = self.store.maxFY[cslot];
+                    ctop = self.store.faceTop(cslot);
                 }
                 // A chunk the ring does not hold reads as air, and so does
                 // everything above a chunk's own watermark — nothing solid was
@@ -1090,7 +1084,7 @@ class LightEngine : LightSample, LightBaker {
     fn computeChunkSun(mut self, slot : i32, cx : i32, cz : i32, sun : Vec3, ceil : i32, snap : bool) : void {
         self.markSunBaked(slot, sun);
         let s : i32 = World::CHUNK_SIZE;
-        let top : i32 = self.store.maxFY[slot] + 1;
+        let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
@@ -1186,8 +1180,8 @@ class LightEngine : LightSample, LightBaker {
         let ceil : i32 = 0;
         let j : i32 = 0;
         while (j < World::SPAN * World::SPAN) {
-            if (self.loaded[j] == 1 && self.store.maxFY[j] > ceil) {
-                ceil = self.store.maxFY[j];
+            if (self.cols.loaded[j] == 1 && self.store.faceTop(j) > ceil) {
+                ceil = self.store.faceTop(j);
             }
             j = j + 1;
         }
@@ -1205,7 +1199,7 @@ class LightEngine : LightSample, LightBaker {
         let n : i32 = 0;
         let j : i32 = 0;
         while (j < World::SPAN * World::SPAN) {
-            if (self.loaded[j] == 1 && flags[j] == 1) {
+            if (self.cols.loaded[j] == 1 && flags[j] == 1) {
                 n = n + 1;
             }
             j = j + 1;
@@ -1226,8 +1220,8 @@ class LightEngine : LightSample, LightBaker {
         let slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
-            if (self.loaded[d] == 1 && self.lights.sunDirty[d] == 1) {
-                self.computeChunkSun(d, self.cxs[d], self.czs[d], sun, ceil, true);
+            if (self.cols.loaded[d] == 1 && self.lights.sunDirty[d] == 1) {
+                self.computeChunkSun(d, self.cols.cxs[d], self.cols.czs[d], sun, ceil, true);
                 self.lights.sunDirty[d] = 0;
             }
             d = d + stride;
@@ -1307,8 +1301,8 @@ class LightEngine : LightSample, LightBaker {
                 self.lights.sunCursor = 0;
             }
             guard = guard + 1;
-            if (self.loaded[slot] == 1 && self.sunMovedFor(slot, sun)) {
-                self.computeChunkSun(slot, self.cxs[slot], self.czs[slot], sun, ceil, false);
+            if (self.cols.loaded[slot] == 1 && self.sunMovedFor(slot, sun)) {
+                self.computeChunkSun(slot, self.cols.cxs[slot], self.cols.czs[slot], sun, ceil, false);
                 done = done + 1;
             }
         }
@@ -1536,7 +1530,7 @@ class LightEngine : LightSample, LightBaker {
     fn computeChunkSkyAO(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
         let s : i32 = World::CHUNK_SIZE;
         let m : i32 = Light::SKY_AO_SAMPLES;
-        let top : i32 = self.store.maxFY[slot] + 1;
+        let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
@@ -1635,8 +1629,8 @@ class LightEngine : LightSample, LightBaker {
                 self.lights.skyAOcursor = 0;
             }
             guard = guard + 1;
-            if (self.loaded[slot] == 1 && self.lights.skyAOdirty[slot] == 1) {
-                self.computeChunkSkyAO(slot, self.cxs[slot], self.czs[slot], ceil);
+            if (self.cols.loaded[slot] == 1 && self.lights.skyAOdirty[slot] == 1) {
+                self.computeChunkSkyAO(slot, self.cols.cxs[slot], self.cols.czs[slot], ceil);
                 self.lights.skyAOdirty[slot] = 0;
                 done = done + 1;
             }
@@ -1655,8 +1649,8 @@ class LightEngine : LightSample, LightBaker {
         let slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
-            if (self.loaded[d] == 1 && self.lights.skyAOdirty[d] == 1) {
-                self.computeChunkSkyAO(d, self.cxs[d], self.czs[d], ceil);
+            if (self.cols.loaded[d] == 1 && self.lights.skyAOdirty[d] == 1) {
+                self.computeChunkSkyAO(d, self.cols.cxs[d], self.cols.czs[d], ceil);
                 self.lights.skyAOdirty[d] = 0;
             }
             d = d + stride;

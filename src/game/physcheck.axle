@@ -126,7 +126,7 @@ fn snowyChunk(gen : TerrainGen) : (i32, i32) {
 fn runPhysicsCheck() : i32 {
     let fails : i32 = 0;
     let man : ChunkManager = new ChunkManager();
-    let gen : TerrainGen = new TerrainGen(man.store, World::SPAN * World::SPAN);
+    let gen : TerrainGen = new TerrainGen(World::SPAN * World::SPAN);
     let (cx, cz) = snowyChunk(gen);
     man.attachGenerator(gen);
     let ax : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
@@ -298,7 +298,7 @@ fn surveyFaces(man : ChunkManager) : void {
     let total : i32 = 0;
     for (slot of 0..slots) {
         if (man.cols.loaded[slot] == 1) {
-            total = total + man.faces.fcount[slot];
+            total = total + man.mesher.faces.fcount[slot];
         }
     }
     let index : SlotIndex = new SlotIndex(total * 2);
@@ -307,9 +307,9 @@ fn surveyFaces(man : ChunkManager) : void {
             continue;
         }
         let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
-        for (fi of 0..man.faces.fcount[slot]) {
+        for (fi of 0..man.mesher.faces.fcount[slot]) {
             let i : i32 = base + fi;
-            let d : i64 = ((man.faces.ftile[i] as i32) / 256) as i64;
+            let d : i64 = ((man.mesher.faces.ftile[i] as i32) / 256) as i64;
             byDir[d] = byDir[d] + 1;
             index.put(faceKey(man, i), i);
         }
@@ -331,12 +331,12 @@ fn surveyFaces(man : ChunkManager) : void {
         }
         let interior : bool = ringInterior(man, slot);
         if (interior) {
-            inner = inner + man.faces.fcount[slot];
+            inner = inner + man.mesher.faces.fcount[slot];
         }
         let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
-        for (fi of 0..man.faces.fcount[slot]) {
+        for (fi of 0..man.mesher.faces.fcount[slot]) {
             let i : i32 = base + fi;
-            let d : i32 = (man.faces.ftile[i] as i32) / 256;
+            let d : i32 = (man.mesher.faces.ftile[i] as i32) / 256;
             // The two axes that lie IN the face's plane.
             let ax : i32 = 0;
             let az : i32 = 0;
@@ -349,7 +349,7 @@ fn surveyFaces(man : ChunkManager) : void {
                 ax = 1;
             }
             let j : i32 = index.get(neighbourKey(man, i, ax, ay, az));
-            if (j >= 0 && man.faces.ftile[j] == man.faces.ftile[i]) {
+            if (j >= 0 && man.mesher.faces.ftile[j] == man.mesher.faces.ftile[i]) {
                 geom = geom + 1;
                 if (interior) {
                     innerGeom = innerGeom + 1;
@@ -403,21 +403,21 @@ fn ringInterior(man : ChunkManager, slot : i32) : bool {
 fn faceCell(man : ChunkManager, i : i32) : IVec3 {
     let slot : i32 = i / World::MAX_FACES_PER_CHUNK;
     return ivec3(
-        man.cols.cxs[slot] * World::CHUNK_SIZE + (man.faces.fx[i] as i32),
-        man.faces.fy[i] as i32,
-        man.cols.czs[slot] * World::CHUNK_SIZE + (man.faces.fz[i] as i32));
+        man.cols.cxs[slot] * World::CHUNK_SIZE + (man.mesher.faces.fx[i] as i32),
+        man.mesher.faces.fy[i] as i32,
+        man.cols.czs[slot] * World::CHUNK_SIZE + (man.mesher.faces.fz[i] as i32));
 }
 
 /** A face's identity: its direction and its cell. */
 fn faceKey(man : ChunkManager, i : i32) : i64 {
     let c : IVec3 = faceCell(man, i);
-    return keyOf((man.faces.ftile[i] as i32) / 256, c.x, c.y, c.z);
+    return keyOf((man.mesher.faces.ftile[i] as i32) / 256, c.x, c.y, c.z);
 }
 
 /** The same, for the cell one step along (ax, ay, az). */
 fn neighbourKey(man : ChunkManager, i : i32, ax : i32, ay : i32, az : i32) : i64 {
     let c : IVec3 = faceCell(man, i);
-    return keyOf((man.faces.ftile[i] as i32) / 256, c.x + ax, c.y + ay, c.z + az);
+    return keyOf((man.mesher.faces.ftile[i] as i32) / 256, c.x + ax, c.y + ay, c.z + az);
 }
 
 /** Pack a direction and a world cell into one key. */
@@ -436,11 +436,11 @@ fn keyOf(d : i32, x : i32, y : i32, z : i32) : i64 {
  */
 fn sameCorners(man : ChunkManager, a : i32, b : i32) : bool {
     for (k of 0..8) {
-        if (Mem::byteAt(man.faces.flight, (a * 8 + k) as i64)
-            != Mem::byteAt(man.faces.flight, (b * 8 + k) as i64)) {
+        if (Mem::byteAt(man.mesher.faces.flight, (a * 8 + k) as i64)
+            != Mem::byteAt(man.mesher.faces.flight, (b * 8 + k) as i64)) {
             return false;
         }
     }
     // The four corners' occlusion is one byte, two bits each.
-    return Mem::byteAt(man.faces.fao, a as i64) == Mem::byteAt(man.faces.fao, b as i64);
+    return Mem::byteAt(man.mesher.faces.fao, a as i64) == Mem::byteAt(man.mesher.faces.fao, b as i64);
 }
