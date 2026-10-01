@@ -39,37 +39,44 @@ struct StepTimers {
  * @param timers   the timers as they stood before this step
  * @return the timers after it
  */
-fn stepAudio(man : ChunkManager, p : Player, mobs : MobManager, sfx : AudioManager,
-    moving : bool, sprint : bool, timers : StepTimers) : StepTimers {
+fn stepAudio(
+    man : ChunkManager,
+    p : Player,
+    mobs : MobManager,
+    sfx : AudioManager,
+    moving : bool,
+    sprint : bool,
+    timers : StepTimers
+) : StepTimers {
     let foot : i32 = timers.foot;
     let ambient : i32 = timers.ambient;
 
     if (p.mode == GameMode::Survival && p.onGround && moving && !p.isUnderwater()) {
-        foot = foot - 1;
+        foot--;
         if (foot <= 0) {
-            let under : Block = man.worldGet(ivec3(p.pos.x.floorToInt() as i32,
-                (p.pos.y.floorToInt() as i32) - 1, p.pos.z.floorToInt() as i32));
+            const fx : i32 = p.pos.x.floorToInt() as i32;
+            const fy : i32 = (p.pos.y.floorToInt() as i32) - 1;
+            const fz : i32 = p.pos.z.floorToInt() as i32;
+            const under : Block = man.worldGet(ivec3(fx, fy, fz));
             if (under != Block::Air && under != Block::Water) {
                 sfx.footstep(under, mobs.rand());
             }
-            foot = Audio::FOOT_WALK_FRAMES;
-            if (sprint) {
-                foot = Audio::FOOT_SPRINT_FRAMES;
-            }
+            foot = sprint ? Audio::FOOT_SPRINT_FRAMES : Audio::FOOT_WALK_FRAMES;
         }
     } else {
         foot = 0;
     }
 
     if (p.isUnderwater()) {
-        ambient = ambient - 1;
+        ambient--;
         if (ambient <= 0) {
             sfx.ambientUnderwater(mobs.rand());
-            ambient = Audio::AMBIENT_MIN + (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
+            const jitter : i32 = (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
+            ambient = Audio::AMBIENT_MIN + jitter;
         }
     } else {
         ambient = 0;
     }
 
-    return StepTimers { foot: foot, ambient: ambient };
+    return StepTimers { foot, ambient };
 }

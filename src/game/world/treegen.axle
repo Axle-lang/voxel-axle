@@ -31,7 +31,7 @@ use crate::configs::world::{ World };
  * @param leafId  the leaf block id
  */
 fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
-    let s : i32 = World::CHUNK_SIZE;
+    const s : i32 = World::CHUNK_SIZE;
     if (pos.x < 0 || pos.x >= s || pos.z < 0 || pos.z >= s) {
         return;
     }
@@ -39,7 +39,7 @@ fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
         return;
     }
     if (vs.getVox(slot, pos) == Block::Air) {
-        let v : Block = leafId;
+        const v : Block = leafId;
         vs.setVoxLocal(slot, pos, v);
     }
 }
@@ -53,14 +53,11 @@ fn stampLeafId(vs : VoxStore, slot : i32, pos : IVec3, leafId : Block) : void {
  * @param leafId  the leaf block id
  */
 fn leafLayer(vs : VoxStore, slot : i32, center : IVec3, rad : i32, leafId : Block) : void {
-    let dz : i32 = 0 - rad;
-    while (dz <= rad) {
-        let dx : i32 = 0 - rad;
-        while (dx <= rad) {
-            stampLeafId(vs, slot, ivec3(center.x + dx, center.y, center.z + dz), leafId);
-            dx = dx + 1;
+    for (dz of (-rad)..=rad) {
+        for (dx of (-rad)..=rad) {
+            const cell : IVec3 = ivec3(center.x + dx, center.y, center.z + dz);
+            stampLeafId(vs, slot, cell, leafId);
         }
-        dz = dz + 1;
     }
 }
 
@@ -73,10 +70,8 @@ fn leafLayer(vs : VoxStore, slot : i32, center : IVec3, rad : i32, leafId : Bloc
  * @param woodId  the wood block id
  */
 fn stampTrunk(vs : VoxStore, slot : i32, origin : IVec3, height : i32, woodId : Block) : void {
-    let t : i32 = 0;
-    while (t < height) {
+    for (t of 0..height) {
         vs.setVoxClip(slot, ivec3(origin.x, origin.y + t, origin.z), woodId);
-        t = t + 1;
     }
     vs.bumpFY(slot, origin.y + height + 1);
 }
@@ -98,10 +93,8 @@ fn stampTree(vs : VoxStore, kind : TreeKind, height : i32, slot : i32, origin : 
             return;
         }
         TreeKind::Cactus => {
-            let c : i32 = 0;
-            while (c < height) {
+            for (c of 0..height) {
                 vs.setVoxClip(slot, ivec3(origin.x, origin.y + c, origin.z), Block::Cactus);
-                c = c + 1;
             }
             vs.bumpFY(slot, origin.y + height);
         }
@@ -113,10 +106,8 @@ fn stampTree(vs : VoxStore, kind : TreeKind, height : i32, slot : i32, origin : 
         }
         TreeKind::Bamboo => {
             // A tall, thin bamboo stalk.
-            let t : i32 = 0;
-            while (t < height) {
+            for (t of 0..height) {
                 vs.setVoxClip(slot, ivec3(origin.x, origin.y + t, origin.z), Block::Bamboo);
-                t = t + 1;
             }
             vs.bumpFY(slot, origin.y + height);
         }
@@ -129,13 +120,13 @@ fn stampTree(vs : VoxStore, kind : TreeKind, height : i32, slot : i32, origin : 
         // Oak / birch / jungle / cherry: a bushy round canopy; they differ
         // only in wood / leaf species (the trunk height comes from the biome).
         _ => {
-            let wood : Block = match kind {
+            const wood : Block = match kind {
                 TreeKind::Birch => Block::WoodBirch,
                 TreeKind::Jungle => Block::WoodJungle,
                 TreeKind::Cherry => Block::CherryLog,
                 _ => Block::Wood,
             };
-            let leaf : Block = match kind {
+            const leaf : Block = match kind {
                 TreeKind::Birch => Block::LeavesBirch,
                 TreeKind::Jungle => Block::LeavesJungle,
                 TreeKind::Cherry => Block::CherryLeaves,
@@ -155,9 +146,14 @@ fn stampTree(vs : VoxStore, kind : TreeKind, height : i32, slot : i32, origin : 
  * @param capId   the cap block id (red / brown mushroom block)
  */
 fn stampMushroom(vs : VoxStore, slot : i32, origin : IVec3, height : i32, capId : Block) : void {
-    let cy : i32 = origin.y + height;
-    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 1, capId);
-    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z), capId);
+    const cy : i32 = origin.y + height;
+
+    const cap : IVec3 = ivec3(origin.x, cy, origin.z);
+    leafLayer(vs, slot, cap, 1, capId);
+
+    const dome : IVec3 = ivec3(origin.x, cy + 1, origin.z);
+    stampLeafId(vs, slot, dome, capId);
+
     stampTrunk(vs, slot, origin, height, Block::MushroomStem);
 }
 
@@ -171,16 +167,34 @@ fn stampMushroom(vs : VoxStore, slot : i32, origin : IVec3, height : i32, capId 
  * @param wood    the wood block id
  * @param leaf    the leaf block id
  */
-fn stampBushy(vs : VoxStore, slot : i32, origin : IVec3, height : i32, wood : Block, leaf : Block) : void {
-    let cy : i32 = origin.y + height;
-    leafLayer(vs, slot, ivec3(origin.x, cy - 2, origin.z), 2, leaf);
-    leafLayer(vs, slot, ivec3(origin.x, cy - 1, origin.z), 2, leaf);
-    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 1, leaf);
-    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z), leaf);
-    stampLeafId(vs, slot, ivec3(origin.x + 1, cy + 1, origin.z), leaf);
-    stampLeafId(vs, slot, ivec3(origin.x - 1, cy + 1, origin.z), leaf);
-    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z + 1), leaf);
-    stampLeafId(vs, slot, ivec3(origin.x, cy + 1, origin.z - 1), leaf);
+fn stampBushy(
+    vs : VoxStore,
+    slot : i32,
+    origin : IVec3,
+    height : i32,
+    wood : Block,
+    leaf : Block
+) : void {
+    const cy : i32 = origin.y + height;
+
+    const lowRing : IVec3 = ivec3(origin.x, cy - 2, origin.z);
+    leafLayer(vs, slot, lowRing, 2, leaf);
+    const midRing : IVec3 = ivec3(origin.x, cy - 1, origin.z);
+    leafLayer(vs, slot, midRing, 2, leaf);
+    const topRing : IVec3 = ivec3(origin.x, cy, origin.z);
+    leafLayer(vs, slot, topRing, 1, leaf);
+
+    const crown : IVec3 = ivec3(origin.x, cy + 1, origin.z);
+    stampLeafId(vs, slot, crown, leaf);
+    const crownEast : IVec3 = ivec3(origin.x + 1, cy + 1, origin.z);
+    stampLeafId(vs, slot, crownEast, leaf);
+    const crownWest : IVec3 = ivec3(origin.x - 1, cy + 1, origin.z);
+    stampLeafId(vs, slot, crownWest, leaf);
+    const crownSouth : IVec3 = ivec3(origin.x, cy + 1, origin.z + 1);
+    stampLeafId(vs, slot, crownSouth, leaf);
+    const crownNorth : IVec3 = ivec3(origin.x, cy + 1, origin.z - 1);
+    stampLeafId(vs, slot, crownNorth, leaf);
+
     stampTrunk(vs, slot, origin, height, wood);
 }
 
@@ -192,11 +206,18 @@ fn stampBushy(vs : VoxStore, slot : i32, origin : IVec3, height : i32, wood : Bl
  * @param height  the trunk height
  */
 fn stampSpruce(vs : VoxStore, slot : i32, origin : IVec3, height : i32) : void {
-    let cy : i32 = origin.y + height;
-    leafLayer(vs, slot, ivec3(origin.x, cy - 3, origin.z), 2, Block::LeavesSpruce);
-    leafLayer(vs, slot, ivec3(origin.x, cy - 2, origin.z), 1, Block::LeavesSpruce);
-    leafLayer(vs, slot, ivec3(origin.x, cy - 1, origin.z), 1, Block::LeavesSpruce);
-    stampLeafId(vs, slot, ivec3(origin.x, cy, origin.z), Block::LeavesSpruce);
+    const cy : i32 = origin.y + height;
+
+    const wideRing : IVec3 = ivec3(origin.x, cy - 3, origin.z);
+    leafLayer(vs, slot, wideRing, 2, Block::LeavesSpruce);
+    const lowRing : IVec3 = ivec3(origin.x, cy - 2, origin.z);
+    leafLayer(vs, slot, lowRing, 1, Block::LeavesSpruce);
+    const highRing : IVec3 = ivec3(origin.x, cy - 1, origin.z);
+    leafLayer(vs, slot, highRing, 1, Block::LeavesSpruce);
+
+    const tip : IVec3 = ivec3(origin.x, cy, origin.z);
+    stampLeafId(vs, slot, tip, Block::LeavesSpruce);
+
     stampTrunk(vs, slot, origin, height, Block::WoodSpruce);
 }
 
@@ -208,8 +229,12 @@ fn stampSpruce(vs : VoxStore, slot : i32, origin : IVec3, height : i32) : void {
  * @param height  the trunk height
  */
 fn stampAcacia(vs : VoxStore, slot : i32, origin : IVec3, height : i32) : void {
-    let cy : i32 = origin.y + height;
-    leafLayer(vs, slot, ivec3(origin.x, cy, origin.z), 2, Block::LeavesAcacia);
-    leafLayer(vs, slot, ivec3(origin.x, cy + 1, origin.z), 1, Block::LeavesAcacia);
+    const cy : i32 = origin.y + height;
+
+    const canopy : IVec3 = ivec3(origin.x, cy, origin.z);
+    leafLayer(vs, slot, canopy, 2, Block::LeavesAcacia);
+    const crown : IVec3 = ivec3(origin.x, cy + 1, origin.z);
+    leafLayer(vs, slot, crown, 1, Block::LeavesAcacia);
+
     stampTrunk(vs, slot, origin, height, Block::WoodAcacia);
 }

@@ -45,7 +45,7 @@ class VoxData {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let s : i32 = World::CHUNK_SIZE;
+        const s : i32 = World::CHUNK_SIZE;
         self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
         self.lvl = malloc<i8>(slots * s * s * World::HEIGHT);
         self.maxFY = malloc<i16>(slots);
@@ -72,7 +72,7 @@ class VoxStore {
      * @return the flat offset into `vox` (and into the light byte volumes)
      */
     pub(crate) fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        let s : i32 = World::CHUNK_SIZE;
+        const s : i32 = World::CHUNK_SIZE;
         return slot * (s * s * World::HEIGHT) + (lz * s + lx) * World::HEIGHT + ly;
     }
 
@@ -100,7 +100,7 @@ class VoxStore {
      * @param id     the block id to write
      */
     pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
-        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         self.data.vox[at] = id;
         // A write that says nothing about the level clears it, so a cell
         // never inherits the level of whatever used to be there. Zero is
@@ -120,8 +120,14 @@ class VoxStore {
      * @param id     the block id to write
      * @param level  the block's level, 1..8; 0 for the id's default
      */
-    pub(crate) fn setVoxLevel(mut self, slot : i32, local : IVec3, own id : Block, level : i32) : void {
-        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+    pub(crate) fn setVoxLevel(
+        mut self,
+        slot : i32,
+        local : IVec3,
+        own id : Block,
+        level : i32
+    ) : void {
+        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         self.data.vox[at] = id;
         self.data.lvl[at] = level as i8;
     }
@@ -148,7 +154,7 @@ class VoxStore {
      * @param id     the block id to write
      */
     pub(crate) fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
-        let s : i32 = World::CHUNK_SIZE;
+        const s : i32 = World::CHUNK_SIZE;
         if (local.x < 0 || local.x >= s || local.z < 0 || local.z >= s) {
             return;
         }

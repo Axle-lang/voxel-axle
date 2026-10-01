@@ -15,52 +15,82 @@ use smalt::Scancode;
 
 /** What each key does in this game. */
 pub class Keys {
-    /** Walk forward. */
+    /**
+     * Walk forward.
+     * @return the bound key
+     */
     pub(crate) static fn forward() : Scancode {
         return Scancode::W;
     }
 
-    /** Walk back. */
+    /**
+     * Walk back.
+     * @return the bound key
+     */
     pub(crate) static fn back() : Scancode {
         return Scancode::S;
     }
 
-    /** Strafe left. */
+    /**
+     * Strafe left.
+     * @return the bound key
+     */
     pub(crate) static fn left() : Scancode {
         return Scancode::A;
     }
 
-    /** Strafe right. */
+    /**
+     * Strafe right.
+     * @return the bound key
+     */
     pub(crate) static fn right() : Scancode {
         return Scancode::D;
     }
 
-    /** Jump, swim up, or fly up in creative. */
+    /**
+     * Jump, swim up, or fly up in creative.
+     * @return the bound key
+     */
     pub(crate) static fn up() : Scancode {
         return Scancode::Space;
     }
 
-    /** Fly down in creative. */
+    /**
+     * Fly down in creative.
+     * @return the bound key
+     */
     pub(crate) static fn down() : Scancode {
         return Scancode::LeftShift;
     }
 
-    /** Latch a sprint. */
+    /**
+     * Latch a sprint.
+     * @return the bound key
+     */
     pub(crate) static fn sprint() : Scancode {
         return Scancode::LeftControl;
     }
 
-    /** Half of the game-mode chord. */
+    /**
+     * Half of the game-mode chord.
+     * @return the bound key
+     */
     pub(crate) static fn gameModeA() : Scancode {
         return Scancode::F3;
     }
 
-    /** The other half. */
+    /**
+     * The other half.
+     * @return the bound key
+     */
     pub(crate) static fn gameModeB() : Scancode {
         return Scancode::F4;
     }
 
-    /** Open and close the pause menu. */
+    /**
+     * Open and close the pause menu.
+     * @return the bound key
+     */
     pub(crate) static fn pause() : Scancode {
         return Scancode::Escape;
     }
@@ -72,6 +102,8 @@ pub class Keys {
      * digits are contiguous as scancode *numbers*, but an enum is not an
      * integer here, and a table that says which key it means is the same
      * length as the arithmetic that would hide it.
+     * @param slot  the hotbar slot, 0-based (anything past 7 maps to the 9 key)
+     * @return the number-row key for that slot
      */
     pub(crate) static fn hotbar(slot : i32) : Scancode {
         return match slot {

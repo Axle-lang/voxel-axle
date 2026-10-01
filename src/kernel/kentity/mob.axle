@@ -33,16 +33,41 @@ use crate::kernel::kmath::vec3::{ Vec3, vec3 };
  * same call and dynamic dispatch selects the behaviour.
  */
 trait Brain {
-    fn think(mut self, world : dyn VoxelQuery, player : Player, sfx : AudioManager, sim : BlockSim, rnd : f64) : void;
+    /**
+     * Run this creature's AI for one physics tick.
+     * @param world   the world the mob moves through (read-only voxel query)
+     * @param player  the player, for species that react to it
+     * @param sfx     the audio manager, for species that make sounds while acting
+     * @param sim     the block-update sim, for species that change the world
+     * @param rnd     a fresh pseudo-random value in [0,1)
+     */
+    fn think(
+        mut self,
+        world : dyn VoxelQuery,
+        player : Player,
+        sfx : AudioManager,
+        sim : BlockSim,
+        rnd : f64
+    ) : void;
 }
 
 /** Compétence: the passive graze-and-roam AI shared by the calm animals. */
 trait Wanders {
+    /**
+     * One frame of graze-and-roam.
+     * @param world  the world the mob moves through (read-only voxel query)
+     * @param rnd    a fresh pseudo-random value in [0,1)
+     */
     fn wander(mut self, world : dyn VoxelQuery, rnd : f64) : void;
 }
 
 /** Compétence: bolt directly away from a threat when struck. */
 trait Flees {
+    /**
+     * Start a panic-run directly away from (px, pz).
+     * @param px  x coordinate of the threat
+     * @param pz  z coordinate of the threat
+     */
     fn panicFrom(mut self, px : f64, pz : f64) : void;
 }
 
@@ -53,19 +78,40 @@ trait Flees {
  * `Animated.deathProgress` render seam.)
  */
 trait Mortal {
+    /** Enter the death collapse. */
     fn startDying(mut self) : void;
+
+    /**
+     * Is the death collapse playing?
+     * @return true while dying
+     */
     fn isDying(self) : bool;
+
+    /**
+     * Has the death collapse finished, so the corpse can be removed?
+     * @return true once the collapse is over
+     */
     fn deathDone(self) : bool;
 }
 
 /** Compétence: flash red briefly when struck (melee hit feedback). */
 trait Flashes {
+    /** Start the red hurt flash. */
     fn flashHurt(mut self) : void;
 }
 
 /** Compétence: an idle voice — count down to the next ambient call and re-arm it. */
 trait Vocal {
+    /**
+     * Tick the idle-voice countdown.
+     * @return true if the creature should speak this frame
+     */
     fn wantsVoice(mut self) : bool;
+
+    /**
+     * Re-arm the idle-voice countdown.
+     * @param delay  frames until the next idle voice
+     */
     fn rearmVoice(mut self, delay : i32) : void;
 }
 
@@ -75,6 +121,12 @@ trait Vocal {
  * concrete detonating species (a creeper) lives in the app.
  */
 trait Explodes {
+    /**
+     * Detonate: hurt the player by distance and blast a crater.
+     * @param world   the world the crater is carved from
+     * @param player  the player the blast may hurt
+     * @param sim     the block-update sim woken around the crater
+     */
     fn explode(mut self, world : dyn VoxelQuery, player : Player, sim : BlockSim) : void;
 }
 
@@ -95,6 +147,12 @@ trait Hostile : Explodes {}
  * @param rnd  a fresh pseudo-random value in [0,1) for the species roll
  */
 trait MobSpawner {
+    /**
+     * Roll a species and build one creature.
+     * @param at   where the creature stands, in world space
+     * @param rnd  a fresh pseudo-random value in [0,1) for the species roll
+     * @return the new creature
+     */
     fn create(mut self, at : Vec3, rnd : f64) : Mob;
 }
 
@@ -133,7 +191,14 @@ class Mob : Entity, Actor, Wanders {
     pub(derived) state : MobState,
     pub(derived) timers : AiTimers, // AI countdowns (turn / flee / hurt / death / vocal)
 
-    /** Create a mob at (x, y, z) of the given kind with maxHp hit points. */
+    /**
+     * Create a mob at (x, y, z) of the given kind with maxHp hit points.
+     * @param x      body-centre X
+     * @param y      foot height
+     * @param z      body-centre Z
+     * @param kind   the species tag (ownership taken)
+     * @param maxHp  maximum (and starting) health
+     */
     constructor(x : f64, y : f64, z : f64, own kind : MobKind, maxHp : i32) {
         self.pos = vec3(x, y, z);
         self.velY = 0.0;
@@ -153,7 +218,13 @@ class Mob : Entity, Actor, Wanders {
         self.moving = true;
         self.walkPhase = 0.0;
         self.state = MobState::Alive;
-        self.timers = AiTimers { turnTimer: 0, fleeTimer: 0, hurtTimer: 0, deathTimer: 0, vocalTimer: Audio::MOB_VOCAL_MIN };
+        self.timers = AiTimers {
+            turnTimer: 0,
+            fleeTimer: 0,
+            hurtTimer: 0,
+            deathTimer: 0,
+            vocalTimer: Audio::MOB_VOCAL_MIN,
+        };
         self.speed = Mobs::WANDER_SPEED;
     }
 
@@ -204,7 +275,7 @@ class Mob : Entity, Actor, Wanders {
      * @return the fuse level, or a value below zero when idle
      */
     fn fuseLevel(self) : i32 {
-        return 0 - 1;
+        return -1;
     }
 
     // ── Combat / life-cycle ──
@@ -256,7 +327,7 @@ class Mob : Entity, Actor, Wanders {
         if (self.state == MobState::Alive) {
             return 0.0;
         }
-        let df : f64 = Mobs::DEATH_FRAMES as f64;
+        const df : f64 = Mobs::DEATH_FRAMES as f64;
         return (df - (self.timers.deathTimer as f64)) / df;
     }
 
@@ -271,7 +342,7 @@ class Mob : Entity, Actor, Wanders {
         if (self.state == MobState::Dying) {
             return false;
         }
-        self.timers.vocalTimer = self.timers.vocalTimer - 1;
+        self.timers.vocalTimer--;
         return self.timers.vocalTimer <= 0;
     }
 
@@ -288,9 +359,9 @@ class Mob : Entity, Actor, Wanders {
      * taking the shortest way around the circle.
      */
     fn turnToward(mut self) : void {
-        let d : f64 = wrapAngle(self.targetHeading - self.heading);
-        let rate : f64 = Mobs::TURN_RATE;
-        self.heading = self.heading + clampF64(d, 0.0 - rate, rate);
+        const d : f64 = wrapAngle(self.targetHeading - self.heading);
+        const rate : f64 = Mobs::TURN_RATE;
+        self.heading += clampF64(d, 0.0 - rate, rate);
     }
 
     // ── AI ──
@@ -304,7 +375,14 @@ class Mob : Entity, Actor, Wanders {
      * @param sim     the block-update sim (unused by calm animals)
      * @param rnd     a fresh pseudo-random value in [0,1)
      */
-    fn think(mut self, world : dyn VoxelQuery, player : Player, sfx : AudioManager, sim : BlockSim, rnd : f64) : void {
+    fn think(
+        mut self,
+        world : dyn VoxelQuery,
+        player : Player,
+        sfx : AudioManager,
+        sim : BlockSim,
+        rnd : f64
+    ) : void {
         self.wander(world, rnd);
     }
 
@@ -317,26 +395,27 @@ class Mob : Entity, Actor, Wanders {
      */
     fn wander(mut self, world : dyn VoxelQuery, rnd : f64) : void {
         if (self.timers.hurtTimer > 0) {
-            self.timers.hurtTimer = self.timers.hurtTimer - 1;
+            self.timers.hurtTimer--;
         }
 
         // Dying: stop steering, let gravity settle the body while the
         // collapse animation plays out.
         if (self.state == MobState::Dying) {
             if (self.timers.deathTimer > 0) {
-                self.timers.deathTimer = self.timers.deathTimer - 1;
+                self.timers.deathTimer--;
             }
             self.tick(world, 0.0, 0.0);
             return;
         }
 
         if (self.timers.fleeTimer > 0) {
-            self.timers.fleeTimer = self.timers.fleeTimer - 1;
+            self.timers.fleeTimer--;
         }
-        self.timers.turnTimer = self.timers.turnTimer - 1;
+        self.timers.turnTimer--;
         if (self.timers.turnTimer <= 0 && self.timers.fleeTimer <= 0) {
             self.targetHeading = rnd * TAU;
-            self.timers.turnTimer = Mobs::TURN_EVERY_MIN + (rnd * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
+            const extraFrames : i32 = (rnd * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
+            self.timers.turnTimer = Mobs::TURN_EVERY_MIN + extraFrames;
             if (rnd < Mobs::IDLE_CHANCE) {
                 self.moving = false;
             } else {
@@ -353,11 +432,11 @@ class Mob : Entity, Actor, Wanders {
         }
 
         if (spd > 0.0) {
-            self.walkPhase = self.walkPhase + 0.35;
+            self.walkPhase += 0.35;
         }
 
-        let dx : f64 = self.heading.cos() * spd;
-        let dz : f64 = self.heading.sin() * spd;
+        const dx : f64 = self.heading.cos() * spd;
+        const dz : f64 = self.heading.sin() * spd;
         self.tick(world, dx, dz);
     }
 }

@@ -6,13 +6,6 @@ pub const PI : f64 = 3.14159265358979;
 pub const TAU : f64 = 6.28318530717959;   // 2π
 
 /**
- * Clamp `v` into the inclusive range [lo, hi].
- * @param v   the value
- * @param lo  the lower bound
- * @param hi  the upper bound
- * @return v clamped to [lo, hi]
- */
-/**
  * Linear interpolation from `a` to `b`.
  * @param a  the value at t = 0
  * @param b  the value at t = 1
@@ -36,14 +29,12 @@ pub fn lerp(a : f64, b : f64, t : f64) : f64 {
  * @return the eased fraction in [0, 1]
  */
 pub fn smoothstep(e0 : f64, e1 : f64, x : f64) : f64 {
-    let d : f64 = e1 - e0;
-    if (d > 0.0 - 0.000001 && d < 0.000001) {
-        if (x < e0) {
-            return 0.0;
-        }
-        return 1.0;
+    const d : f64 = e1 - e0;
+    if (d > -0.000001 && d < 0.000001) {
+        return x < e0 ? 0.0 : 1.0;
     }
-    let t : f64 = (x - e0) / d;
+
+    const t : f64 = (x - e0) / d;
     if (t < 0.0) {
         return 0.0;
     }
@@ -53,6 +44,13 @@ pub fn smoothstep(e0 : f64, e1 : f64, x : f64) : f64 {
     return t * t * (3.0 - 2.0 * t);
 }
 
+/**
+ * Clamp `v` into the inclusive range [lo, hi].
+ * @param v   the value
+ * @param lo  the lower bound
+ * @param hi  the upper bound
+ * @return v clamped to [lo, hi]
+ */
 pub fn clampF64(v : f64, lo : f64, hi : f64) : f64 {
     if (v < lo) {
         return lo;
@@ -88,10 +86,10 @@ pub fn clampI32(v : i32, lo : i32, hi : i32) : i32 {
 pub fn wrapAngle(a : f64) : f64 {
     let r : f64 = a;
     while (r > PI) {
-        r = r - TAU;
+        r -= TAU;
     }
     while (r < 0.0 - PI) {
-        r = r + TAU;
+        r += TAU;
     }
     return r;
 }

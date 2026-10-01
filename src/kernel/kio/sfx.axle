@@ -110,12 +110,10 @@ class BankLoader : Closeable {
         if (self.count < self.cap) {
             return;
         }
-        let grown : i32 = self.cap * 2;
+        const grown : i32 = self.cap * 2;
         let wider : SoundBank[] = malloc<SoundBank>(grown as i64);
-        let i : i32 = 0;
-        while (i < self.count) {
+        for (i of 0..self.count) {
             wider[i] = self.banks[i];
-            i = i + 1;
         }
         free(self.banks);
         self.banks = wider;
@@ -128,11 +126,13 @@ class BankLoader : Closeable {
      * The slot rather than the bank, so the caller fills it in place —
      * a returned bank would have to be bound to a local to add clips to,
      * and that local is what `Closeable` refuses.
+     * @param capacity  how many clips the new bank can hold
+     * @return the slot the new bank was stored in
      */
     fn keepNew(mut self, capacity : i32) : i32 {
         self.reserve();
         self.banks[self.count] = new SoundBank(capacity);
-        self.count = self.count + 1;
+        self.count++;
         return self.count - 1;
     }
 
@@ -143,11 +143,9 @@ class BankLoader : Closeable {
      * @return the loaded bank, owned by this loader
      */
     pub(file) fn dir(mut self, rel : string) : SoundBank {
-        let slot : i32 = self.keepNew(BankLoader::VARIANTS);
-        let i : i32 = 1;
-        while (i <= BankLoader::VARIANTS) {
+        const slot : i32 = self.keepNew(BankLoader::VARIANTS);
+        for (i of 1..=BankLoader::VARIANTS) {
             self.banks[slot].add(self.base + rel + "/" + i + ".wav");
-            i = i + 1;
         }
         return self.banks[slot];
     }
@@ -159,7 +157,7 @@ class BankLoader : Closeable {
      * @return the loaded bank, owned by this loader
      */
     pub(file) fn file(mut self, rel : string) : SoundBank {
-        let slot : i32 = self.keepNew(1);
+        const slot : i32 = self.keepNew(1);
         self.banks[slot].add(self.base + rel);
         return self.banks[slot];
     }
@@ -167,6 +165,7 @@ class BankLoader : Closeable {
     /**
      * An empty bank — a cue that is a silent no-op, which is what the
      * creeper has instead of an idle voice.
+     * @return the empty bank, owned by this loader
      */
     pub(file) fn empty(mut self) : SoundBank {
         return self.banks[self.keepNew(1)];
@@ -180,10 +179,8 @@ class BankLoader : Closeable {
      * been freed reads memory nobody owns.
      */
     fn close(self) : void {
-        let i : i32 = 0;
-        while (i < self.count) {
+        for (i of 0..self.count) {
             self.banks[i].close();
-            i = i + 1;
         }
         free(self.banks);
     }
@@ -195,6 +192,11 @@ class BankLoader : Closeable {
  * same level wherever they happen.
  */
 trait Voiced {
+    /**
+     * Play one random variant at a fixed gain.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     */
     fn play(self, mx : Mixer, rnd : f64) : void;
 }
 
@@ -204,6 +206,12 @@ trait Voiced {
  * as the player walks away.
  */
 trait Positional {
+    /**
+     * Play one random variant as a world source at `pos`.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
     fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void;
 }
 
@@ -220,14 +228,31 @@ struct Cue : Voiced, Positional {
     gain : f64,
     range : f64,
 
-    /** Play a random variant at the fixed gain (non-positional). */
+    /**
+     * Play a random variant at the fixed gain (non-positional).
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     */
     fn play(self, mx : Mixer, rnd : f64) : void {
         self.bank.playRand(mx, rnd, self.gain);
     }
 
-    /** Play a random variant at `pos`, attenuated live by listener distance. */
+    /**
+     * Play a random variant at `pos`, attenuated live by listener distance.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
     fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void {
-        self.bank.playRandPos(mx, rnd, self.gain, pos.x, pos.y, pos.z, self.range);
+        self.bank.playRandPos(
+            mx,
+            rnd,
+            self.gain,
+            pos.x,
+            pos.y,
+            pos.z,
+            self.range
+        );
     }
 }
 
@@ -257,6 +282,10 @@ struct MobVoice {
  * live by distance. Implemented by AudioManager, which owns the mixer.
  */
 trait Listener {
+    /**
+     * Publish where the listener stands this frame.
+     * @param at  the listener position, in world space
+     */
     fn setListener(self, at : Vec3) : void;
 }
 
@@ -285,13 +314,19 @@ class AudioManager : Listener, Closeable {
         // so the cues land at the same index the play path reads them by
         // (`material as i32`); variants are auto-discovered 1..8.
         self.materials = malloc<MaterialSound>(Audio::MATERIAL_COUNT);
-        let m : i32 = 0;
-        while (m < Audio::MATERIAL_COUNT) {
+        for (m of 0..Audio::MATERIAL_COUNT) {
             self.materials[m] = MaterialSound {
-                step: Cue { bank: self.banks.dir("step/" + matFolder(m)), gain: Audio::VOL_FOOTSTEP, range: 0.0 },
-                dig: Cue { bank: self.banks.dir("dig/" + matFolder(m)), gain: Audio::VOL_BREAK, range: Audio::BREAK_DIST },
+                step: Cue {
+                    bank: self.banks.dir("step/" + matFolder(m)),
+                    gain: Audio::VOL_FOOTSTEP,
+                    range: 0.0,
+                },
+                dig: Cue {
+                    bank: self.banks.dir("dig/" + matFolder(m)),
+                    gain: Audio::VOL_BREAK,
+                    range: Audio::BREAK_DIST,
+                },
             };
-            m = m + 1;
         }
 
         // The player's own non-positional sounds. The hurt bank is reused
@@ -301,10 +336,20 @@ class AudioManager : Listener, Closeable {
         // name for one resource, which is exactly what the `Closeable`
         // contract refuses (E0511).
         self.playerHurtCue = Cue {
-            bank: self.banks.dir("player/hurt"), gain: Audio::VOL_PLAYER, range: 0.0,
+            bank: self.banks.dir("player/hurt"),
+            gain: Audio::VOL_PLAYER,
+            range: 0.0,
         };
-        self.splashCue = Cue { bank: self.banks.dir("player/splash"), gain: Audio::VOL_PLAYER, range: 0.0 };
-        self.ambientCue = Cue { bank: self.banks.dir("ambient/underwater"), gain: Audio::VOL_AMBIENT, range: 0.0 };
+        self.splashCue = Cue {
+            bank: self.banks.dir("player/splash"),
+            gain: Audio::VOL_PLAYER,
+            range: 0.0,
+        };
+        self.ambientCue = Cue {
+            bank: self.banks.dir("ambient/underwater"),
+            gain: Audio::VOL_AMBIENT,
+            range: 0.0,
+        };
 
         // One positional voice (idle say + hurt cry) per MobKind, at mob gain /
         // range. Sheep / pig / creeper have no dedicated hurt clip, so their hurt
@@ -312,11 +357,23 @@ class AudioManager : Listener, Closeable {
         // so its say cue wraps an empty bank (a silent no-op).
         self.voices = malloc<MobVoice>(5);
         self.voices[MobKind::Chicken as i32] = MobVoice {
-            say: Cue { bank: self.banks.dir("mob/chicken/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
-            hurt: Cue { bank: self.banks.dir("mob/chicken/hurt"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            say: Cue {
+                bank: self.banks.dir("mob/chicken/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.banks.dir("mob/chicken/hurt"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
         self.voices[MobKind::Sheep as i32] = MobVoice {
-            say: Cue { bank: self.banks.dir("mob/sheep/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            say: Cue {
+                bank: self.banks.dir("mob/sheep/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
             hurt: Cue {
                 bank: self.playerHurtCue.bank,
                 gain: Audio::VOL_MOB,
@@ -324,11 +381,23 @@ class AudioManager : Listener, Closeable {
             },
         };
         self.voices[MobKind::Cow as i32] = MobVoice {
-            say: Cue { bank: self.banks.dir("mob/cow/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
-            hurt: Cue { bank: self.banks.dir("mob/cow/hurt"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            say: Cue {
+                bank: self.banks.dir("mob/cow/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.banks.dir("mob/cow/hurt"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
         self.voices[MobKind::Creeper as i32] = MobVoice {
-            say: Cue { bank: self.banks.empty(), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            say: Cue {
+                bank: self.banks.empty(),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
             hurt: Cue {
                 bank: self.playerHurtCue.bank,
                 gain: Audio::VOL_MOB,
@@ -336,7 +405,11 @@ class AudioManager : Listener, Closeable {
             },
         };
         self.voices[MobKind::Pig as i32] = MobVoice {
-            say: Cue { bank: self.banks.dir("mob/pig/say"), gain: Audio::VOL_MOB, range: Audio::MOB_DIST },
+            say: Cue {
+                bank: self.banks.dir("mob/pig/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
             hurt: Cue {
                 bank: self.playerHurtCue.bank,
                 gain: Audio::VOL_MOB,
@@ -346,8 +419,16 @@ class AudioManager : Listener, Closeable {
 
         // The creeper's charge / blast are single bespoke files (not numbered
         // variant folders), so load them directly.
-        self.creeperFuseCue = Cue { bank: self.banks.file("mob/creeper/charge.wav"), gain: Audio::VOL_CREEPER, range: Audio::CREEPER_DIST };
-        self.creeperBlastCue = Cue { bank: self.banks.file("mob/creeper/exploded.wav"), gain: Audio::VOL_CREEPER, range: Audio::CREEPER_DIST };
+        self.creeperFuseCue = Cue {
+            bank: self.banks.file("mob/creeper/charge.wav"),
+            gain: Audio::VOL_CREEPER,
+            range: Audio::CREEPER_DIST,
+        };
+        self.creeperBlastCue = Cue {
+            bank: self.banks.file("mob/creeper/exploded.wav"),
+            gain: Audio::VOL_CREEPER,
+            range: Audio::CREEPER_DIST,
+        };
     }
 
     /**
@@ -445,7 +526,11 @@ class AudioManager : Listener, Closeable {
      * @param rnd      variant selector in [0, 1)
      */
     pub(crate) fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
-        let center : Vec3 = vec3((cell.x as f64) + 0.5, (cell.y as f64) + 0.5, (cell.z as f64) + 0.5);
+        const center : Vec3 = vec3(
+            (cell.x as f64) + 0.5,
+            (cell.y as f64) + 0.5,
+            (cell.z as f64) + 0.5
+        );
         self.emitAt(self.digCue(materialOf(blockId)), rnd, center);
     }
 

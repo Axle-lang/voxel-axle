@@ -53,9 +53,33 @@ struct Projected {
  * world faces, mobs, the selection box and the sky discs each used to open-code.
  */
 trait Projector {
+    /**
+     * Moves a world point into camera space (eye at the origin, looking down +z).
+     * @param world  the point, in world space
+     * @return the point, in camera space
+     */
     fn toCamera(self, world : Vec3) : Vec3;
+
+    /**
+     * Projects a camera-space point onto the screen.
+     * @param cam  the point, in camera space
+     * @return its screen position and depth
+     */
     fn screenOf(self, cam : Vec3) : Projected;
+
+    /**
+     * Projects a world point onto the screen: `toCamera`, then `screenOf`.
+     * @param world  the point, in world space
+     * @return its screen position and depth
+     */
     fn project(self, world : Vec3) : Projected;
+
+    /**
+     * Projects a direction as a point infinitely far away — where a sky body
+     * along it appears, whatever the eye's position.
+     * @param dir  the direction, in world space
+     * @return its screen position
+     */
     fn projectDir(self, dir : Vec3) : Projected;
 }
 
@@ -82,13 +106,17 @@ struct Lens {
  * @return the projection centre and focal length to draw it with
  */
 fn lensFor(renderW : i32, renderH : i32) : Lens {
-    let hh : f64 = (renderH as f64) * 0.5;
-    let half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
+    const hh : f64 = (renderH as f64) * 0.5;
+    const half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
     let t : f64 = half.tan();
     if (t < 0.0001) {
         t = 0.0001;
     }
-    return Lens { hw: (renderW as f64) * 0.5, hh: hh, focal: hh / t };
+    return Lens {
+        hw: (renderW as f64) * 0.5,
+        hh,
+        focal: hh / t,
+    };
 }
 
 /** The framebuffer size one frame is rasterised at. */
@@ -112,20 +140,21 @@ struct Viewport {
 fn viewportFor(winW : i32, winH : i32) : Viewport {
     let w : i32 = winW;
     let h : i32 = winH;
-    let px : i64 = (w as i64) * (h as i64);
-    let cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
+    const px : i64 = (w as i64) * (h as i64);
+    const cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
     if (px > cap) {
-        let k : f64 = ((cap as f64) / (px as f64)).sqrt();
+        const k : f64 = ((cap as f64) / (px as f64)).sqrt();
         w = ((w as f64) * k).floorToInt() as i32;
         h = ((h as f64) * k).floorToInt() as i32;
     }
+
     if (w < Screen::MIN_RENDER_W) {
         w = Screen::MIN_RENDER_W;
     }
     if (h < Screen::MIN_RENDER_H) {
         h = Screen::MIN_RENDER_H;
     }
-    return Viewport { w: w, h: h };
+    return Viewport { w, h };
 }
 
 /**
@@ -149,12 +178,16 @@ struct Camera : Projector {
      * @return the camera-space point (x, y, depth)
      */
     pub(crate) fn toCamera(self, world : Vec3) : Vec3 {
-        let dx : f64 = world.x - self.eye.x;
-        let dy : f64 = world.y - self.eye.y;
-        let dz : f64 = world.z - self.eye.z;
-        let rx : f64 = dx * self.cosy + dz * self.siny;
-        let rz : f64 = (0.0 - dx) * self.siny + dz * self.cosy;
-        return Vec3 { x: rx, y: dy * self.cosp - rz * self.sinp, z: dy * self.sinp + rz * self.cosp };
+        const dx : f64 = world.x - self.eye.x;
+        const dy : f64 = world.y - self.eye.y;
+        const dz : f64 = world.z - self.eye.z;
+        const rx : f64 = dx * self.cosy + dz * self.siny;
+        const rz : f64 = (0.0 - dx) * self.siny + dz * self.cosy;
+        return Vec3 {
+            x: rx,
+            y: dy * self.cosp - rz * self.sinp,
+            z: dy * self.sinp + rz * self.cosp,
+        };
     }
 
     /**
@@ -189,10 +222,10 @@ struct Camera : Projector {
      * @return the projected screen point
      */
     pub(crate) fn projectDir(self, dir : Vec3) : Projected {
-        let rx : f64 = dir.x * self.cosy + dir.z * self.siny;
-        let rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
-        let ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
-        let rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
+        const rx : f64 = dir.x * self.cosy + dir.z * self.siny;
+        const rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
+        const ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
+        const rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
         return Projected {
             sx: self.lens.hw + self.lens.focal * rx / rz2,
             sy: self.lens.hh - self.lens.focal * ry2 / rz2,
@@ -209,6 +242,10 @@ struct Camera : Projector {
  * set of uniform `PostEffect` steps rather than ad-hoc methods.
  */
 trait PostEffect {
+    /**
+     * Blends this effect over the finished frame, in place.
+     * @param fb  the frame's colour and depth buffers
+     */
     fn apply(mut self, fb : FrameBuf) : void;
 }
 
@@ -252,9 +289,12 @@ fn maxf(a : f64, b : f64) : f64 {
  * @return the low and high column, in that order.
  */
 pub(crate) fn columnSpan(sa : f64, sb : f64, sc : f64) : (i16, i16) {
-    let lo : i32 = (minf(sa, minf(sb, sc))).floorToInt() as i32;
-    let hi : i32 = (maxf(sa, maxf(sb, sc))).floorToInt() as i32;
-    return (clampI32(lo, 0 - 1, 32000) as i16, clampI32(hi, 0 - 1, 32000) as i16);
+    const lo : i32 = (minf(sa, minf(sb, sc))).floorToInt() as i32;
+    const hi : i32 = (maxf(sa, maxf(sb, sc))).floorToInt() as i32;
+    return (
+        clampI32(lo, -1, 32000) as i16,
+        clampI32(hi, -1, 32000) as i16
+    );
 }
 
 /**
@@ -281,12 +321,12 @@ fn edge(ax : f64, ay : f64, bx : f64, by : f64, px : f64, py : f64) : f64 {
  * @param fb  the render target (framebuffer + z-buffer + size).
  */
 fn clearDepth(fb : FrameBuf) : void {
-    let zbuf : i64 = fb.zbuf;
-    let n : i32 = fb.w * fb.h;
+    const zbuf : i64 = fb.zbuf;
+    const n : i32 = fb.w * fb.h;
     let i : i32 = 0;
     while (i < n) {
         putFloatOf(zbuf, i, 0.0);
-        i = i + 1;
+        i++;
     }
 }
 
@@ -300,12 +340,12 @@ fn clearDepth(fb : FrameBuf) : void {
  * @param bg  background colour.
  */
 fn clearFrame(fb : FrameBuf, bg : i32) : void {
-    let pixels : i64 = fb.pixels;
-    let n : i32 = fb.w * fb.h;
+    const pixels : i64 = fb.pixels;
+    const n : i32 = fb.w * fb.h;
     let i : i32 = 0;
     while (i < n) {
         Mem::putWordOf(pixels, i, bg);
-        i = i + 1;
+        i++;
     }
     clearDepth(fb);
 }
@@ -325,7 +365,10 @@ fn clearFrame(fb : FrameBuf, bg : i32) : void {
  * @return the averaged channel value in 0..255.
  */
 fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
-    let sum : f64 = gam.decode(a, shift) + gam.decode(b, shift) + gam.decode(c, shift) + gam.decode(d, shift);
+    const sum : f64 = gam.decode(a, shift)
+        + gam.decode(b, shift)
+        + gam.decode(c, shift)
+        + gam.decode(d, shift);
     return (linearToSrgb(sum * 0.25) * 255.0 + 0.5).floorToInt() as i32;
 }
 
@@ -340,9 +383,9 @@ fn mipLevelOffset(level : i32) : i32 {
     let sz : i32 = Atlas::TILE_PX;
     let l : i32 = 0;
     while (l < level) {
-        off = off + Atlas::TILE_COUNT * sz * sz;
-        sz = sz / 2;
-        l = l + 1;
+        off += Atlas::TILE_COUNT * sz * sz;
+        sz /= 2;
+        l++;
     }
     return off;
 }
@@ -356,8 +399,8 @@ fn mipLevelSize(level : i32) : i32 {
     let sz : i32 = Atlas::TILE_PX;
     let l : i32 = 0;
     while (l < level) {
-        sz = sz / 2;
-        l = l + 1;
+        sz /= 2;
+        l++;
     }
     return sz;
 }
@@ -382,45 +425,50 @@ fn mipChainTexels() : i32 {
  * @param gam    the colour space the box filter averages through.
  */
 fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
-    let n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
+    const n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
     let i : i32 = 0;
     while (i < n0) {
         Mem::putWordOf(mips, i, Mem::dwordAt(atlas, (i as i64) * 4));
-        i = i + 1;
+        i++;
     }
+
     let level : i32 = 1;
     let sz : i32 = Atlas::TILE_PX / 2;
     let psz : i32 = Atlas::TILE_PX;
     while (level < Atlas::MIP_LEVELS) {
-        let base : i32 = mipLevelOffset(level);
-        let pbase : i32 = mipLevelOffset(level - 1);
+        const base : i32 = mipLevelOffset(level);
+        const pbase : i32 = mipLevelOffset(level - 1);
         let t : i32 = 0;
         while (t < Atlas::TILE_COUNT) {
             let ty : i32 = 0;
             while (ty < sz) {
                 let tx : i32 = 0;
                 while (tx < sz) {
-                    let i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
-                    let i01 : i32 = i00 + 1;
-                    let i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
-                    let i11 : i32 = i10 + 1;
-                    let c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
-                    let c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
-                    let c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
-                    let c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
-                    let rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
-                    let gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
-                    let bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
-                    Mem::putWordOf(mips, base + (t * sz + ty) * sz + tx, Color::packBytes(rr, gg, bb));
-                    tx = tx + 1;
+                    const i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
+                    const i01 : i32 = i00 + 1;
+                    const i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
+                    const i11 : i32 = i10 + 1;
+                    const c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
+                    const c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
+                    const c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
+                    const c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
+                    const rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
+                    const gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
+                    const bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
+                    Mem::putWordOf(
+                        mips,
+                        base + (t * sz + ty) * sz + tx,
+                        Color::packBytes(rr, gg, bb)
+                    );
+                    tx++;
                 }
-                ty = ty + 1;
+                ty++;
             }
-            t = t + 1;
+            t++;
         }
         psz = sz;
-        sz = sz / 2;
-        level = level + 1;
+        sz /= 2;
+        level++;
     }
 }
 
@@ -505,6 +553,10 @@ struct ScreenScratch {
  * `MipAtlas` snapshot through this seam instead of reaching at the raw pointers.
  */
 trait MipSource {
+    /**
+     * The mip chain, as the rasteriser samples it.
+     * @return the chain's buffer and its per-level offset and size tables
+     */
     fn mip(self) : MipAtlas;
 }
 
@@ -547,40 +599,51 @@ struct TileLevel {
  * @return the weighted sample, as linear light
  */
 fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : LinRgb {
-    let tmax : i32 = lvl.size - 1;
+    const tmax : i32 = lvl.size - 1;
     let tx0 : i32 = fu.floorToInt() as i32;
     let ty0 : i32 = fv.floorToInt() as i32;
-    let fx : f64 = fu - (tx0 as f64);
-    let fy : f64 = fv - (ty0 as f64);
+    const fx : f64 = fu - (tx0 as f64);
+    const fy : f64 = fv - (ty0 as f64);
     let tx1 : i32 = tx0 + 1;
     let ty1 : i32 = ty0 + 1;
     if (wrap) {
-        tx0 = tx0 & tmax;
-        tx1 = tx1 & tmax;
-        ty0 = ty0 & tmax;
-        ty1 = ty1 & tmax;
+        tx0 &= tmax;
+        tx1 &= tmax;
+        ty0 &= tmax;
+        ty1 &= tmax;
     } else {
         tx0 = clampI32(tx0, 0, tmax);
         tx1 = clampI32(tx1, 0, tmax);
         ty0 = clampI32(ty0, 0, tmax);
         ty1 = clampI32(ty1, 0, tmax);
     }
-    let rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
-    let rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
-    let c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
-    let c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
-    let c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
-    let c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
-    let mfx : f64 = 1.0 - fx;
-    let mfy : f64 = 1.0 - fy;
-    let w00 : f64 = mfx * mfy;
-    let w10 : f64 = fx * mfy;
-    let w01 : f64 = mfx * fy;
-    let w11 : f64 = fx * fy;
+
+    const rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
+    const rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
+    const c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
+    const c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
+    const c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
+    const c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
+
+    const mfx : f64 = 1.0 - fx;
+    const mfy : f64 = 1.0 - fy;
+    const w00 : f64 = mfx * mfy;
+    const w10 : f64 = fx * mfy;
+    const w01 : f64 = mfx * fy;
+    const w11 : f64 = fx * fy;
     return LinRgb {
-        r: gam.decode(c00, 16) * w00 + gam.decode(c10, 16) * w10 + gam.decode(c01, 16) * w01 + gam.decode(c11, 16) * w11,
-        g: gam.decode(c00, 8) * w00 + gam.decode(c10, 8) * w10 + gam.decode(c01, 8) * w01 + gam.decode(c11, 8) * w11,
-        b: gam.decode(c00, 0) * w00 + gam.decode(c10, 0) * w10 + gam.decode(c01, 0) * w01 + gam.decode(c11, 0) * w11,
+        r: gam.decode(c00, 16) * w00
+            + gam.decode(c10, 16) * w10
+            + gam.decode(c01, 16) * w01
+            + gam.decode(c11, 16) * w11,
+        g: gam.decode(c00, 8) * w00
+            + gam.decode(c10, 8) * w10
+            + gam.decode(c01, 8) * w01
+            + gam.decode(c11, 8) * w11,
+        b: gam.decode(c00, 0) * w00
+            + gam.decode(c10, 0) * w10
+            + gam.decode(c01, 0) * w01
+            + gam.decode(c11, 0) * w11,
     };
 }
 
@@ -600,58 +663,69 @@ fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : 
  * @param tri    the triangle: 3 RasterVerts + atlas tile index + wrap flag
  * @param atlas  the texture atlas mip chain (buffer + offset / size tables)
  * @param gam    the colour space the texels are lit in
- * @param fogT    the fog: the sky's colour behind each pixel, and how much of it
+ * @param fogT   the fog: the sky's colour behind each pixel, and how much of it
  * @param band   the worker's disjoint screen-column band [x0, x1) to fill
  */
-fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, fogT : FogTable, band : Band) : void {
+fn rasterTriTex(
+    fb : FrameBuf,
+    tri : RasterTri,
+    atlas : MipAtlas,
+    gam : Gamma,
+    fogT : FogTable,
+    band : Band
+) : void {
     // The three vertices, widened once: the queue keeps them at 32 bits, the
     // edge functions and the perspective divide run at 64.
-    let asx : f64 = tri.a.sx as f64;
-    let asy : f64 = tri.a.sy as f64;
-    let aiz : f64 = tri.a.iz as f64;
-    let au : f64 = tri.a.u as f64;
-    let av : f64 = tri.a.v as f64;
-    let atr : f64 = tri.a.tr as f64;
-    let atg : f64 = tri.a.tg as f64;
-    let atb : f64 = tri.a.tb as f64;
-    let bsx : f64 = tri.b.sx as f64;
-    let bsy : f64 = tri.b.sy as f64;
-    let biz : f64 = tri.b.iz as f64;
-    let bu : f64 = tri.b.u as f64;
-    let bv : f64 = tri.b.v as f64;
-    let btr : f64 = tri.b.tr as f64;
-    let btg : f64 = tri.b.tg as f64;
-    let btb : f64 = tri.b.tb as f64;
-    let csx : f64 = tri.c.sx as f64;
-    let csy : f64 = tri.c.sy as f64;
-    let ciz : f64 = tri.c.iz as f64;
-    let cu : f64 = tri.c.u as f64;
-    let cv : f64 = tri.c.v as f64;
-    let ctr : f64 = tri.c.tr as f64;
-    let ctg : f64 = tri.c.tg as f64;
-    let ctb : f64 = tri.c.tb as f64;
-    let tile : i32 = tri.tile as i32;
-    let pixels : i64 = fb.pixels;
-    let zbuf : i64 = fb.zbuf;
-    let w : i32 = fb.w;
-    let h : i32 = fb.h;
-    let wrap : bool = (tri.wrap as i32) != 0;
+    const asx : f64 = tri.a.sx as f64;
+    const asy : f64 = tri.a.sy as f64;
+    const aiz : f64 = tri.a.iz as f64;
+    const au : f64 = tri.a.u as f64;
+    const av : f64 = tri.a.v as f64;
+    const atr : f64 = tri.a.tr as f64;
+    const atg : f64 = tri.a.tg as f64;
+    const atb : f64 = tri.a.tb as f64;
+
+    const bsx : f64 = tri.b.sx as f64;
+    const bsy : f64 = tri.b.sy as f64;
+    const biz : f64 = tri.b.iz as f64;
+    const bu : f64 = tri.b.u as f64;
+    const bv : f64 = tri.b.v as f64;
+    const btr : f64 = tri.b.tr as f64;
+    const btg : f64 = tri.b.tg as f64;
+    const btb : f64 = tri.b.tb as f64;
+
+    const csx : f64 = tri.c.sx as f64;
+    const csy : f64 = tri.c.sy as f64;
+    const ciz : f64 = tri.c.iz as f64;
+    const cu : f64 = tri.c.u as f64;
+    const cv : f64 = tri.c.v as f64;
+    const ctr : f64 = tri.c.tr as f64;
+    const ctg : f64 = tri.c.tg as f64;
+    const ctb : f64 = tri.c.tb as f64;
+
+    const tile : i32 = tri.tile as i32;
+    const pixels : i64 = fb.pixels;
+    const zbuf : i64 = fb.zbuf;
+    const w : i32 = fb.w;
+    const h : i32 = fb.h;
+    const wrap : bool = (tri.wrap as i32) != 0;
+
     // The triangle, atlas, fog and band stay bundled — the rasteriser reads
     // vertices / UV / Gouraud straight off tri.a/tri.b/tri.c (RasterVert).
-    let area : f64 = edge(asx, asy, bsx, bsy, csx, csy);
+    const area : f64 = edge(asx, asy, bsx, bsy, csx, csy);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
-    let inv : f64 = 1.0 / area;
+    const inv : f64 = 1.0 / area;
 
     // Perspective-premultiplied UV (u/z, v/z) per vertex — the working set the
     // gradients and per-pixel sample interpolate.
-    let uw0 : f64 = au * aiz;
-    let vw0 : f64 = av * aiz;
-    let uw1 : f64 = bu * biz;
-    let vw1 : f64 = bv * biz;
-    let uw2 : f64 = cu * ciz;
-    let vw2 : f64 = cv * ciz;
+    const uw0 : f64 = au * aiz;
+    const vw0 : f64 = av * aiz;
+    const uw1 : f64 = bu * biz;
+    const vw1 : f64 = bv * biz;
+    const uw2 : f64 = cu * ciz;
+    const vw2 : f64 = cv * ciz;
 
     // Screen bounding box of the triangle.
     let minx : i32 = (minf(asx, minf(bsx, csx))).floorToInt() as i32;
@@ -670,6 +744,7 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     if (maxy > h - 1) {
         maxy = h - 1;
     }
+
     // Tile clip: this call only fills the column band [bandX0, bandX1) so worker
     // threads own disjoint screen columns (no z-buffer race). A triangle outside
     // the band is rejected here cheaply.
@@ -686,8 +761,9 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     // Incremental edge functions: the three edge values are linear in the
     // pixel centre, so we evaluate them once at the bbox corner and step
     // them by constant deltas instead of recomputing per pixel.
-    let cx0 : f64 = (minx as f64) + 0.5;
-    let cy0 : f64 = (miny as f64) + 0.5;
+    const cx0 : f64 = (minx as f64) + 0.5;
+    const cy0 : f64 = (miny as f64) + 0.5;
+
     // The winding, folded into the edges once instead of into three
     // multiplies at every candidate pixel. A triangle wound the other way
     // gives negative edge values, and the inside test used to ask about the
@@ -698,13 +774,13 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     if (inv < 0.0) {
         sgn = 0.0 - 1.0;
     }
-    let absInv : f64 = inv * sgn;
-    let ax0 : f64 = (csy - bsy) * sgn;
-    let ay0 : f64 = (bsx - csx) * sgn;
-    let ax1 : f64 = (asy - csy) * sgn;
-    let ay1 : f64 = (csx - asx) * sgn;
-    let ax2 : f64 = (bsy - asy) * sgn;
-    let ay2 : f64 = (asx - bsx) * sgn;
+    const absInv : f64 = inv * sgn;
+    const ax0 : f64 = (csy - bsy) * sgn;
+    const ay0 : f64 = (bsx - csx) * sgn;
+    const ax1 : f64 = (asy - csy) * sgn;
+    const ay1 : f64 = (csx - asx) * sgn;
+    const ax2 : f64 = (bsy - asy) * sgn;
+    const ay2 : f64 = (asx - bsx) * sgn;
     let e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0) * sgn;
     let e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0) * sgn;
     let e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0) * sgn;
@@ -713,63 +789,65 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
     // (u/z, v/z, 1/z): linear in screen x/y, so they're constant per triangle.
     // Each pixel derives its UV footprint (du/dx … dv/dy) from these to choose
     // the mip level and the anisotropic tap count.
-    let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * absInv;
-    let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * absInv;
-    let gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * absInv;
-    let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * absInv;
-    let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * absInv;
-    let gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * absInv;
-    let tp : f64 = Atlas::TILE_PX as f64;
-    let maxMip : i32 = Atlas::MIP_LEVELS - 1;
+    const guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * absInv;
+    const gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * absInv;
+    const gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * absInv;
+    const guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * absInv;
+    const gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * absInv;
+    const gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * absInv;
+    const tp : f64 = Atlas::TILE_PX as f64;
+    const maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
-    let tf : f64 = tp;
-    let tbase : i32 = tile * Atlas::TILE_PX;
+    const tf : f64 = tp;
+    const tbase : i32 = tile * Atlas::TILE_PX;
 
     let py : i32 = miny;
     while (py <= maxy) {
         let e0 : f64 = e0row;
         let e1 : f64 = e1row;
         let e2 : f64 = e2row;
-        let rowbase : i32 = py * w;
+        const rowbase : i32 = py * w;
         // Where this scanline sits in the fog grid. Every fogged pixel reads
         // the sky behind it, and the row half of that read is the same all the
         // way across.
-        let fogRow : FogRow = fogT.rowAt(py);
+        const fogRow : FogRow = fogT.rowAt(py);
         let px : i32 = minx;
         while (px <= maxx) {
             if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) {
-                let b0 : f64 = e0 * absInv;
-                let b1 : f64 = e1 * absInv;
-                let b2 : f64 = e2 * absInv;
-                let izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
-                let idx : i64 = (rowbase + px) as i64;
+                const b0 : f64 = e0 * absInv;
+                const b1 : f64 = e1 * absInv;
+                const b2 : f64 = e2 * absInv;
+                const izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
+                const idx : i64 = (rowbase + px) as i64;
                 unsafe {
                     let zp : ptr<f32> = (zbuf + idx * FLOAT_BYTES) as ptr<f32>;
                     if (izp > ((*zp) as f64)) {
-                        let invz : f64 = 1.0 / izp;
-                        let u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
-                        let v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
+                        const invz : f64 = 1.0 / izp;
+                        const u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
+                        const v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
+
                         // Per-pixel UV footprint in full-res texels: the screen-x
                         // and screen-y derivatives of (u,v). Their lengths give
                         // texels-per-pixel along each screen axis; the smaller is
                         // the minor axis (sets the mip), the larger the major
                         // (sets the anisotropic tap count).
-                        let dudx : f64 = (guwx - u * gizx) * invz;
-                        let dvdx : f64 = (gvwx - v * gizx) * invz;
-                        let dudy : f64 = (guwy - u * gizy) * invz;
-                        let dvdy : f64 = (gvwy - v * gizy) * invz;
-                        let exx : f64 = dudx * tp;
-                        let eyx : f64 = dvdx * tp;
-                        let exy : f64 = dudy * tp;
-                        let eyy : f64 = dvdy * tp;
-                        let px2 : f64 = exx * exx + eyx * eyx;
-                        let py2 : f64 = exy * exy + eyy * eyy;
+                        const dudx : f64 = (guwx - u * gizx) * invz;
+                        const dvdx : f64 = (gvwx - v * gizx) * invz;
+                        const dudy : f64 = (guwy - u * gizy) * invz;
+                        const dvdy : f64 = (gvwy - v * gizy) * invz;
+                        const exx : f64 = dudx * tp;
+                        const eyx : f64 = dvdx * tp;
+                        const exy : f64 = dudy * tp;
+                        const eyy : f64 = dvdy * tp;
+                        const px2 : f64 = exx * exx + eyx * eyx;
+                        const py2 : f64 = exy * exy + eyy * eyy;
                         let minor2 : f64 = px2;
                         let major2 : f64 = py2;
                         if (py2 < px2) {
                             minor2 = py2;
                             major2 = px2;
                         }
+
                         let rf : f64 = 0.0;
                         let gf : f64 = 0.0;
                         let bf : f64 = 0.0;
@@ -785,30 +863,41 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                             if (sharp > 16.0) {
                                 sharp = 16.0;
                             }
-                            let rrs : f64 = 0.5 - 0.5 / sharp;
-                            let fu0 : f64 = u * tf;
-                            let fv0 : f64 = v * tf;
-                            let flx : f64 = fu0.floorToInt() as f64;
-                            let cdx0 : f64 = fu0 - flx - 0.5;
+                            const rrs : f64 = 0.5 - 0.5 / sharp;
+                            const fu0 : f64 = u * tf;
+                            const fv0 : f64 = v * tf;
+
+                            const flx : f64 = fu0.floorToInt() as f64;
+                            const cdx0 : f64 = fu0 - flx - 0.5;
                             let ccx0 : f64 = cdx0;
                             if (ccx0 > rrs) {
                                 ccx0 = rrs;
                             } else if (ccx0 < 0.0 - rrs) {
                                 ccx0 = 0.0 - rrs;
                             }
-                            let fu : f64 = flx + (cdx0 - ccx0) * sharp;
-                            let fly : f64 = fv0.floorToInt() as f64;
-                            let cdy0 : f64 = fv0 - fly - 0.5;
+                            const fu : f64 = flx + (cdx0 - ccx0) * sharp;
+
+                            const fly : f64 = fv0.floorToInt() as f64;
+                            const cdy0 : f64 = fv0 - fly - 0.5;
                             let ccy0 : f64 = cdy0;
                             if (ccy0 > rrs) {
                                 ccy0 = rrs;
                             } else if (ccy0 < 0.0 - rrs) {
                                 ccy0 = 0.0 - rrs;
                             }
-                            let fv : f64 = fly + (cdy0 - ccy0) * sharp;
-                            let c : LinRgb = bilinearLin(
-                                TileLevel { mips: atlas.mips, base: 0, size: Atlas::TILE_PX, row: tbase },
-                                fu, fv, wrap, gam
+                            const fv : f64 = fly + (cdy0 - ccy0) * sharp;
+
+                            const c : LinRgb = bilinearLin(
+                                TileLevel {
+                                    mips: atlas.mips,
+                                    base: 0,
+                                    size: Atlas::TILE_PX,
+                                    row: tbase,
+                                },
+                                fu,
+                                fv,
+                                wrap,
+                                gam
                             );
                             rf = c.r;
                             gf = c.g;
@@ -818,22 +907,23 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                             // Mip from the minor axis (with a sharpening bias), then
                             // average N bilinear taps along the major axis so oblique
                             // distant surfaces stay sharp without shimmering.
-                            let m2 : f64 = minor2 * Atlas::MIP_BIAS;
+                            const m2 : f64 = minor2 * Atlas::MIP_BIAS;
                             let mip : i32 = 0;
                             let lim : f64 = 4.0;
                             while (mip < maxMip && m2 >= lim) {
-                                lim = lim * 4.0;
-                                mip = mip + 1;
+                                lim *= 4.0;
+                                mip++;
                             }
-                            let lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
-                            let lvl : TileLevel = TileLevel {
+                            const lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
+                            const lvl : TileLevel = TileLevel {
                                 mips: atlas.mips,
                                 base: Mem::dwordAt(atlas.mipOff, (mip as i64) * 4),
                                 size: lvlSz,
                                 row: tile * lvlSz,
                             };
-                            let lvlF : f64 = lvlSz as f64;
-                            let ratio : f64 = (major2 / minor2).sqrt();
+                            const lvlF : f64 = lvlSz as f64;
+
+                            const ratio : f64 = (major2 / minor2).sqrt();
                             let nN : i32 = (ratio + 0.5).floorToInt() as i32;
                             if (nN < 1) {
                                 nN = 1;
@@ -841,47 +931,56 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                             if (nN > Atlas::MAX_ANISO) {
                                 nN = Atlas::MAX_ANISO;
                             }
+
                             let mju : f64 = dudx;
                             let mjv : f64 = dvdx;
                             if (py2 > px2) {
                                 mju = dudy;
                                 mjv = dvdy;
                             }
+
                             let sr : f64 = 0.0;
                             let sg : f64 = 0.0;
                             let sb : f64 = 0.0;
                             let i : i32 = 0;
                             while (i < nN) {
-                                let tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
-                                let c : LinRgb = bilinearLin(lvl,
-                                    (u + mju * tt) * lvlF - 0.5, (v + mjv * tt) * lvlF - 0.5, wrap, gam);
-                                sr = sr + c.r;
-                                sg = sg + c.g;
-                                sb = sb + c.b;
-                                i = i + 1;
+                                const tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
+                                const c : LinRgb = bilinearLin(
+                                    lvl,
+                                    (u + mju * tt) * lvlF - 0.5,
+                                    (v + mjv * tt) * lvlF - 0.5,
+                                    wrap,
+                                    gam
+                                );
+                                sr += c.r;
+                                sg += c.g;
+                                sb += c.b;
+                                i++;
                             }
-                            let invN : f64 = 1.0 / (nN as f64);
+                            const invN : f64 = 1.0 / (nN as f64);
                             rf = sr * invN;
                             gf = sg * invN;
                             bf = sb * invN;
                         }
+
                         // Gouraud: per-vertex tint interpolated by the
                         // screen-space barycentrics (low-frequency light, so
                         // affine interpolation is fine and cheap).
-                        let trp : f64 = b0 * atr + b1 * btr + b2 * ctr;
-                        let tgp : f64 = b0 * atg + b1 * btg + b2 * ctg;
-                        let tbp : f64 = b0 * atb + b1 * btb + b2 * ctb;
+                        const trp : f64 = b0 * atr + b1 * btr + b2 * ctr;
+                        const tgp : f64 = b0 * atg + b1 * btg + b2 * ctg;
+                        const tbp : f64 = b0 * atb + b1 * btb + b2 * ctb;
                         let r : i32 = gam.encode(rf * trp);
                         let g : i32 = gam.encode(gf * tgp);
                         let bl : i32 = gam.encode(bf * tbp);
+
                         // Aerial perspective: dissolve into the sky THAT IS
                         // THERE, behind this pixel — not into one average colour
                         // for the frame, which is grey against the sun's glow and
                         // too pale against the deep blue away from it.
-                        let fog : f64 = fogT.amount(invz);
+                        const fog : f64 = fogT.amount(invz);
                         if (fog > 0.002) {
-                            let sky : SkyColour = fogT.skyIn(fogRow, px);
-                            let keep : f64 = 1.0 - fog;
+                            const sky : SkyColour = fogT.skyIn(fogRow, px);
+                            const keep : f64 = 1.0 - fog;
                             r = ((r as f64) * keep + sky.r * fog).floorToInt() as i32;
                             g = ((g as f64) * keep + sky.g * fog).floorToInt() as i32;
                             bl = ((bl as f64) * keep + sky.b * fog).floorToInt() as i32;
@@ -892,15 +991,15 @@ fn rasterTriTex(fb : FrameBuf, tri : RasterTri, atlas : MipAtlas, gam : Gamma, f
                     }
                 }
             }
-            e0 = e0 + ax0;
-            e1 = e1 + ax1;
-            e2 = e2 + ax2;
-            px = px + 1;
+            e0 += ax0;
+            e1 += ax1;
+            e2 += ax2;
+            px++;
         }
-        e0row = e0row + ay0;
-        e1row = e1row + ay1;
-        e2row = e2row + ay2;
-        py = py + 1;
+        e0row += ay0;
+        e1row += ay1;
+        e2row += ay2;
+        py++;
     }
 }
 
@@ -923,15 +1022,15 @@ fn rasterTri(fb : FrameBuf,
     x1 : f64, y1 : f64, iz1 : f64,
     x2 : f64, y2 : f64, iz2 : f64,
     color : i32) : void {
-    let pixels : i64 = fb.pixels;
-    let zbuf : i64 = fb.zbuf;
-    let w : i32 = fb.w;
-    let h : i32 = fb.h;
-    let area : f64 = edge(x0, y0, x1, y1, x2, y2);
+    const pixels : i64 = fb.pixels;
+    const zbuf : i64 = fb.zbuf;
+    const w : i32 = fb.w;
+    const h : i32 = fb.h;
+    const area : f64 = edge(x0, y0, x1, y1, x2, y2);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
-    let inv : f64 = 1.0 / area;
+    const inv : f64 = 1.0 / area;
 
     let minx : i32 = (minf(x0, minf(x1, x2))).floorToInt() as i32;
     let maxx : i32 = (maxf(x0, maxf(x1, x2))).floorToInt() as i32;
@@ -952,23 +1051,23 @@ fn rasterTri(fb : FrameBuf,
 
     let py : i32 = miny;
     while (py <= maxy) {
-        let cy : f64 = (py as f64) + 0.5;
+        const cy : f64 = (py as f64) + 0.5;
         let px : i32 = minx;
         while (px <= maxx) {
-            let cx : f64 = (px as f64) + 0.5;
-            let b0 : f64 = edge(x1, y1, x2, y2, cx, cy) * inv;
-            let b1 : f64 = edge(x2, y2, x0, y0, cx, cy) * inv;
-            let b2 : f64 = edge(x0, y0, x1, y1, cx, cy) * inv;
+            const cx : f64 = (px as f64) + 0.5;
+            const b0 : f64 = edge(x1, y1, x2, y2, cx, cy) * inv;
+            const b1 : f64 = edge(x2, y2, x0, y0, cx, cy) * inv;
+            const b2 : f64 = edge(x0, y0, x1, y1, cx, cy) * inv;
             if (b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0) {
-                let iz : f64 = b0 * iz0 + b1 * iz1 + b2 * iz2;
-                let idx : i32 = py * w + px;
+                const iz : f64 = b0 * iz0 + b1 * iz1 + b2 * iz2;
+                const idx : i32 = py * w + px;
                 if (iz > floatOf(zbuf, idx)) {
                     putFloatOf(zbuf, idx, iz);
                     Mem::putWordOf(pixels, idx, color);
                 }
             }
-            px = px + 1;
+            px++;
         }
-        py = py + 1;
+        py++;
     }
 }

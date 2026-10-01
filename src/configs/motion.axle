@@ -27,24 +27,31 @@ class Motion {
     static SWIM_UP_MAX : f64 = 0.085;        // cap on upward swim speed (gentle, no launch)
     static SWIM_DOWN_SPEED : f64 = 0.030;    // Shift: dive thrust per tick
     static WATER_PUSH : f64 = 0.006;         // current strength per level of flow gradient (gentle, clamped ±2)
+
     static FLY_SPEED : f64 = 0.26;           // creative horizontal fly
     static FLY_SPRINT_SPEED : f64 = 0.52;    // creative fly + Ctrl
     static FLY_VERT_SPEED : f64 = 0.30;      // creative up/down
+
     static EYE_HEIGHT : f64 = 1.62;
     static STEP_HEIGHT : f64 = 1.05;
+
     // Max downward drop the body glides over while grounded (step-down assist): a
     // partial-block / snow-level descent eases smoothly instead of a micro
     // free-fall. Kept above the tallest snow layer (0.75) and below a full block
     // (1.0) so real ledges still fall normally.
     static STEP_DOWN_ASSIST : f64 = 0.8;
+
     // Auto-step raises the body instantly (collision is exact); the camera's
     // step-up offset shrinks by this factor each tick so the rise looks smooth
     // instead of snapping. Lower = quicker catch-up.
     static STEP_SMOOTH_DECAY : f64 = 0.6;
+
     static PLAYER_RADIUS : f64 = 0.30;
     static PLAYER_HEIGHT : f64 = 1.80;   // body AABB height for voxel collision
     static MOB_RADIUS : f64 = 0.28;
+
     static MOUSE_SENS : f64 = 0.0024;
+
     // Just short of straight up (89°), not the 83° it was: at 83° the block
     // directly overhead cannot be centred in the crosshair, which is exactly the
     // one you want when you are pillaring up or breaking a ceiling. Not π/2

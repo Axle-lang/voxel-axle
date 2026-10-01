@@ -16,15 +16,18 @@ class Cloud {
     // it spreads cloud into more of the sky rather than making the same clouds
     // heavier — which is what a change in weather actually looks like.
     static COVERAGE : f64 = 0.43;
+
     // The shortest a cloud that exists at all may be, as a fraction of the band.
     // Height is NOT coverage — see `ksky::cloud::heightOf`. Without this floor,
     // thinning the sky to isolated clouds also flattened them, which is the
     // opposite of what isolating them was for.
     static HEIGHT_MIN : f64 = 0.46;
+
     // The width of the shoulder at a cloud's edge, in coverage units. Zero would
     // cut every cloud from paper; this is where it thins out.
     static EDGE_SOFT : f64 = 0.20;
     static EDGE_WIDEN : f64 = 0.55;      // how much wider that shoulder goes where a table cell can no longer resolve it
+
     // How fast the mass thins toward that edge: 1 / the coverage at which a
     // column is at full density. Without it the outline is a step — see
     // `ksky::cloud::densityAtCover`.
@@ -34,6 +37,7 @@ class Cloud {
     // flat, because that is what it physically is — and `THICK_MAX` is how far a
     // cloud may billow above it. How far each one ACTUALLY reaches follows the
     // weather, which is where the random depth comes from.
+    //
     // At the scale a cloud actually is, and this settles three separate
     // complaints at once.
     //
@@ -52,6 +56,7 @@ class Cloud {
     // be refreshed a twelfth at a time and spend the saving on resolution.
     static BASE : f64 = 340.0;
     static THICK_MAX : f64 = 260.0;
+
     // How sharply the mass fades in at its base and out at its top, as a
     // fraction of the band. The base is crisp (a cumulus has a visible floor),
     // the top is soft (it is billowing into clear air).
@@ -65,6 +70,7 @@ class Cloud {
     // wispier, lower is more solid.
     static CONTRAST : f64 = 2.9;
     static THRESHOLD : f64 = 0.47;
+
     // How much harder that level gets toward the base and the top. It BIASES the
     // threshold rather than capping the density, so the profile shapes the mass
     // without ever guaranteeing it — a floor would make every column solid, which
@@ -75,6 +81,7 @@ class Cloud {
     // the whole "becomes opaque" number: at 0.09, five blocks of cloud let about
     // two thirds of the light through and thirty let almost none, so a wisp is
     // bright and a tower is grey.
+    //
     // Sized against the deck's THICKNESS, which is the pairing that matters and
     // the one that was wrong. At 0.42 the local extinction reached 0.04 a block,
     // so light crossing ninety blocks of mass arrived at two percent — every
@@ -87,11 +94,13 @@ class Cloud {
     // kilometres. DETAIL is the volume itself, and it is what the eye reads as
     // "cloud"; flatter in Y than in X/Z, because a cloud's structure is wider
     // than it is tall.
+    //
     // Sized so a cloud is about as wide as it is tall — the proportions of a
     // cumulus. At six hundred blocks across against two hundred and sixty up, the
     // field could only ever make banks; at two hundred and eighty across, it
     // makes towers you see the flanks of.
     static SHAPE_SCALE : f64 = 0.0022;
+
     // Isotropic, deliberately: a cauliflower billows as wide as it rises, and a
     // field that varies faster vertically than horizontally makes pancakes
     // however tall you let the envelope grow.
@@ -122,12 +131,17 @@ class Cloud {
     // overcast SOFT, and an unbounded one would make it flat.
     static AMBIENT_LIFT : f64 = 0.55;
 
+    // How lit the far remainder of a view march is — the part past `MAX_PATH`,
+    // added as its mean. NOT the scatter floor: the floor is what survives deep
+    // inside a mass, and a deck at the horizon is not seen from inside — it is a
+    // flank, lit across its whole face. Using the floor there laid a dark grey
+    // band along the horizon under a bright sky.
+    static FAR_LIT : f64 = 0.62;
+
     // Multiple scattering inside the mass, as a floor on how dark a cloud gets.
     // Pure Beer-Lambert takes a thick cloud to black, and a real one never is:
     // light that entered elsewhere bounces its way out. This is what keeps the
     // deep parts grey rather than sooty.
-    static FAR_LIT : f64 = 0.62;
-
     static SCATTER_FLOOR : f64 = 0.42;
 
     // ── How the deck is lit, at read time ───────────────────────
@@ -135,16 +149,19 @@ class Cloud {
     // cloud base is lit by the dome around it, so this carries the sky's actual
     // colour of the hour — blue at noon, the dusk's pink at dusk.
     static SKY_LIGHT : f64 = 0.55;
+
     // How fast the sky's light dies with the water above a point, and the floor
     // it never drops below: a base is lit from around and below as well.
     static AMB_K : f64 = 0.35;
     static AMB_FLOOR : f64 = 0.30;
+
     // What the ground throws back up into the shadowed bases — small, warm,
     // and only where the sky's light did not reach.
     static GROUND_K : f64 = 0.10;
     static GROUND_R : f64 = 0.62;
     static GROUND_G : f64 = 0.58;
     static GROUND_B : f64 = 0.44;
+
     // The phase function: a strong forward lobe (the rim toward the sun blazes)
     // and a weak back lobe (its asymmetry, negated in use), mixed, and capped so
     // a thin wisp in front of the sun does not white out the frame.
@@ -152,10 +169,12 @@ class Cloud {
     static PHASE_BACK : f64 = 0.15;
     static PHASE_FWD_W : f64 = 0.75;
     static PHASE_MAX : f64 = 3.5;
+
     // How fast the shown table follows a completed march, per frame. Every
     // cell by this same fraction — that is what keeps a change from ever
     // having an edge. 0.12 is nine tenths of the way in eighteen frames.
     static CHASE : f64 = 0.12;
+
     // What the deck costs when nobody can see it.
     //
     // The dome is marched a slice at a time, every frame, whatever is on screen
@@ -172,6 +191,7 @@ class Cloud {
     // in about four seconds.
     static HIDDEN_SKY_PIXELS : i32 = 64;
     static HIDDEN_SLICE_EVERY : i32 = 8;
+
     // Octaves of the 3-D field: the view samples get them all, the light
     // samples fewer, because a path integrates and the finest octave does not
     // survive the integral.
@@ -193,13 +213,9 @@ class Cloud {
     // it back into an evenly grey blob.
     static MAX_LIGHT_PATH : f64 = 95.0;
 
-
     /** Steps the shadow march takes toward the light, over the same capped length. */
     static SUN_STEPS_MIN : i32 = 14;
 
-    // The cloud shadow map: how many blocks across, and how many cells. Coarse
-    // on purpose — a cloud shadow's edge is soft over tens of blocks, so four
-    // blocks a cell is finer than the thing it is sampling.
     // The altitude the shadow march leans from. The map has no per-column
     // ground height, and a ray leaving from y=0 leans half again as far as one
     // leaving the actual surface — which would put every cloud shadow tens of
@@ -212,23 +228,12 @@ class Cloud {
     // to reproduce the answer already in the buffer.
     static MAP_EVERY : i32 = 48;
 
+    // The cloud shadow map: how many blocks across, and how many cells. Coarse
+    // on purpose — a cloud shadow's edge is soft over tens of blocks, so twelve
+    // blocks a cell is finer than the thing it is sampling.
     static MAP_SPAN : i32 = 960;
     static MAP_SIDE : i32 = 80;
 
-    // How far one march step covers, in blocks — a fixed LENGTH, not a fixed
-    // count, and that distinction is the difference between cloud and noise.
-    //
-    // A ray's path through the deck runs from two hundred blocks straight up to
-    // thousands at a grazing angle. Dividing that by a fixed number of steps
-    // means the step length varies with it, so exactly where the path is longest
-    // the sampling is coarsest — and at sixty-nine blocks a step against
-    // seventy-seven-block features, the march was sampling below Nyquist and
-    // returning noise. Worse, a finer table does not hide that; it resolves it.
-    //
-    // At a fixed step, quality is constant: three-and-a-bit samples per feature
-    // wherever the ray points. What varies instead is how many steps a ray takes,
-    // and that is capped — past the cap the remainder is added as its mean, which
-    // is smooth and is what a deck seen edge-on actually looks like.
     // How far the march walks, and in how many steps. The length is CAPPED but
     // continuous; the count is fixed. That pairing is deliberate — see
     // `ksky::clouddome` — because a count derived from the length jumps, and a
@@ -244,17 +249,16 @@ class Cloud {
     // seen edge-on is.
     static MAX_PATH : f64 = 440.0;
     static VIEW_STEPS : i32 = 32;
+
     // The envelope's average fill, for that mean. Not tuned to anything but the
     // profile's own shape — a flat base and a domed top average to about half.
     static MEAN_PROFILE : f64 = 0.45;
     static MEAN_DETAIL : f64 = 0.15;     // the eroded field's own mean, which a cell too coarse to resolve it gets instead
-    // How lit that far remainder is. NOT the scatter floor: the floor is what
-    // survives deep inside a mass, and a deck at the horizon is not seen from
-    // inside — it is a flank, lit across its whole face. Using the floor there
-    // laid a dark grey band along the horizon under a bright sky.
+
     // The flattest direction the table holds. Its outer cells are the horizon,
     // and a ray exactly along it never leaves the band at all.
     static MIN_UP : f64 = 0.016;
+
     // Past this radius² of the disc (under about twenty degrees up), a cell is
     // marched twice along the radius and averaged — see `ksky::clouddome`.
     static HORIZON_SS : f64 = 0.66;

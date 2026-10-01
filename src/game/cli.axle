@@ -37,14 +37,14 @@ use crate::configs::screen::{ Screen };
  *
  * `--snap` on its own waits three seconds, which is long enough for the
  * spawn view to have streamed in; `--snap <ms>` says how long instead.
+ * @return the capture deadline in milliseconds, 0 when no capture is due
  */
 fn snapDeadline() : i64 {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--snap") {
                 if (i + 1 < argc()) {
-                    let ms : i64 = argAt(i + 1).toI64();
+                    const ms : i64 = argAt(i + 1).toI64();
                     if (ms > 0) {
                         return ms;
                     }
@@ -56,7 +56,6 @@ fn snapDeadline() : i64 {
         } catch e : ParseException {
             return 3000;
         }
-        i = i + 1;
     }
     return 0;
 }
@@ -73,12 +72,14 @@ fn snapDeadline() : i64 {
  * @return whether the view is pinned, and the yaw / pitch it is pinned to
  */
 fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
-    let toRad : f64 = 3.14159265358979 / 180.0;
+    const toRad : f64 = 3.14159265358979 / 180.0;
     let i : i32 = 1;
     while (i < argc()) {
         try {
             if (argAt(i) == "--look" && i + 2 < argc()) {
-                return (true, argAt(i + 1).toF64() * toRad, argAt(i + 2).toF64() * toRad);
+                const yaw : f64 = argAt(i + 1).toF64() * toRad;
+                const pitch : f64 = argAt(i + 2).toF64() * toRad;
+                return (true, yaw, pitch);
             }
         } catch e : IndexOutOfBoundsException {
             i = argc();
@@ -86,7 +87,7 @@ fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
             Console::println("--look wants two angles in degrees; leaving the view free");
             i = argc();
         }
-        i = i + 1;
+        i++;
     }
     return (false, 0.0, 0.0);
 }
@@ -113,7 +114,7 @@ fn dayTimeArg() : f64 {
             Console::println("--daytime wants a number in 0..1; starting where the config says");
             i = argc();
         }
-        i = i + 1;
+        i++;
     }
     return Daylight::START;
 }
@@ -134,7 +135,9 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
     while (i < argc()) {
         try {
             if (argAt(i) == "--at" && i + 2 < argc()) {
-                return (argAt(i + 1).toI64() as i32, argAt(i + 2).toI64() as i32);
+                const x : i32 = argAt(i + 1).toI64() as i32;
+                const z : i32 = argAt(i + 2).toI64() as i32;
+                return (x, z);
             }
         } catch e : IndexOutOfBoundsException {
             i = argc();
@@ -142,7 +145,7 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
             Console::println("--at wants two whole numbers; picking a random start");
             i = argc();
         }
-        i = i + 1;
+        i++;
     }
     return randomColumn(clock.counter());
 }
@@ -161,8 +164,8 @@ fn windowSize() : (w: i32, h: i32) {
     while (i < argc()) {
         try {
             if (argAt(i) == "--size" && i + 2 < argc()) {
-                let w : i32 = argAt(i + 1).toI64() as i32;
-                let h : i32 = argAt(i + 2).toI64() as i32;
+                const w : i32 = argAt(i + 1).toI64() as i32;
+                const h : i32 = argAt(i + 2).toI64() as i32;
                 if (w >= 320 && h >= 240) {
                     return (w, h);
                 }
@@ -175,7 +178,7 @@ fn windowSize() : (w: i32, h: i32) {
             Console::println("--size wants two whole numbers; using the configured window");
             i = argc();
         }
-        i = i + 1;
+        i++;
     }
     return (Screen::WINDOW_W, Screen::WINDOW_H);
 }
@@ -203,12 +206,15 @@ fn walkBlocks() : f64 {
             Console::println("--walk wants a number of blocks; standing still");
             i = argc();
         }
-        i = i + 1;
+        i++;
     }
     return 0.0;
 }
 
-/** Whether `--physics-check` was asked for. */
+/**
+ * Whether `--physics-check` was asked for.
+ * @return whether the flag was passed
+ */
 fn wantsPhysicsCheck() : bool {
     return hasFlag("--physics-check");
 }
@@ -219,8 +225,7 @@ fn wantsPhysicsCheck() : bool {
  * @return whether it was passed
  */
 fn hasFlag(flag : string) : bool {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == flag) {
                 return true;
@@ -228,7 +233,6 @@ fn hasFlag(flag : string) : bool {
         } catch e : IndexOutOfBoundsException {
             return false;
         }
-        i = i + 1;
     }
     return false;
 }

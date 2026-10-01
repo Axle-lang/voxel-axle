@@ -36,7 +36,7 @@ class Selection {
      * @return true if the point is in front of the near plane
      */
     fn projCorner(self, cam : Camera, w : Vec3, k : i32) : bool {
-        let pr : Projected = cam.project(w);
+        const pr : Projected = cam.project(w);
         if (pr.cz < Screen::NEAR_PLANE) {
             return false;
         }
@@ -57,25 +57,22 @@ class Selection {
      * @param color  dot color
      */
     fn selDot(self, fb : FrameBuf, px : i32, py : i32, iz : f64, color : i32) : void {
-        let pixels : i64 = fb.pixels;
-        let zbuf : i64 = fb.zbuf;
-        let w : i32 = fb.w;
-        let h : i32 = fb.h;
-        let yy : i32 = py;
-        while (yy <= py + 1) {
-            let xx : i32 = px;
-            while (xx <= px + 1) {
+        const pixels : i64 = fb.pixels;
+        const zbuf : i64 = fb.zbuf;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
+
+        for (yy of py..py + 2) {
+            for (xx of px..px + 2) {
                 if (xx >= 0 && xx < w && yy >= 0 && yy < h) {
-                    let idx : i32 = yy * w + xx;
+                    const idx : i32 = yy * w + xx;
                     // A hair in front of the surface it sits on; well in front of
                     // nothing means a back edge stays hidden.
                     if (iz * 1.004 >= floatOf(zbuf, idx)) {
                         Mem::putWordOf(pixels, idx, color);
                     }
                 }
-                xx = xx + 1;
             }
-            yy = yy + 1;
         }
     }
 
@@ -87,17 +84,19 @@ class Selection {
      * @param color  line color
      */
     fn selEdge(self, fb : FrameBuf, a : i32, b : i32, color : i32) : void {
-        let ax : f64 = Mem::realOf(self.csx, a);
-        let bx : f64 = Mem::realOf(self.csx, b);
+        const ax : f64 = Mem::realOf(self.csx, a);
+        const bx : f64 = Mem::realOf(self.csx, b);
         if (ax < 0.0 - 1.0e8 || bx < 0.0 - 1.0e8) {
             return;
         }
-        let ay : f64 = Mem::realOf(self.csy, a);
-        let by : f64 = Mem::realOf(self.csy, b);
-        let aiz : f64 = Mem::realOf(self.ciz, a);
-        let biz : f64 = Mem::realOf(self.ciz, b);
-        let ddx : f64 = bx - ax;
-        let ddy : f64 = by - ay;
+
+        const ay : f64 = Mem::realOf(self.csy, a);
+        const by : f64 = Mem::realOf(self.csy, b);
+        const aiz : f64 = Mem::realOf(self.ciz, a);
+        const biz : f64 = Mem::realOf(self.ciz, b);
+        const ddx : f64 = bx - ax;
+        const ddy : f64 = by - ay;
+
         let adx : f64 = ddx;
         if (adx < 0.0) {
             adx = 0.0 - adx;
@@ -113,15 +112,14 @@ class Selection {
         if (steps < 1) {
             steps = 1;
         }
-        let inv : f64 = 1.0 / (steps as f64);
-        let i : i32 = 0;
-        while (i <= steps) {
-            let t : f64 = (i as f64) * inv;
-            let px : i32 = (ax + ddx * t).floorToInt() as i32;
-            let py : i32 = (ay + ddy * t).floorToInt() as i32;
-            let iz : f64 = aiz + (biz - aiz) * t;
+
+        const inv : f64 = 1.0 / (steps as f64);
+        for (i of 0..steps + 1) {
+            const t : f64 = (i as f64) * inv;
+            const px : i32 = (ax + ddx * t).floorToInt() as i32;
+            const py : i32 = (ay + ddy * t).floorToInt() as i32;
+            const iz : f64 = aiz + (biz - aiz) * t;
             self.selDot(fb, px, py, iz, color);
-            i = i + 1;
         }
     }
 
@@ -138,19 +136,36 @@ class Selection {
      * @param topH  the block's real height (1.0 full, snowDepth for a thin snow
      *              layer) so the outline hugs the true box, not a cube
      */
-    pub(crate) fn draw(self, p : Player, fb : FrameBuf, lens : Lens, bx : i32, by : i32, bz : i32, topH : f64) : void {
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: lens };
-        let k : i32 = 0;
-        while (k < 8) {
-            let cdx : f64 = (k & 1) as f64;
-            let cdy : f64 = ((k / 2) & 1) as f64 * topH;
-            let cdz : f64 = ((k / 4) & 1) as f64;
-            if (!self.projCorner(cam, vec3((bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz), k)) {
+    pub(crate) fn draw(
+        self,
+        p : Player,
+        fb : FrameBuf,
+        lens : Lens,
+        bx : i32,
+        by : i32,
+        bz : i32,
+        topH : f64
+    ) : void {
+        const cam : Camera = Camera {
+            eye: p.eye,
+            cosy: p.cosy,
+            siny: p.siny,
+            cosp: p.cosp,
+            sinp: p.sinp,
+            lens,
+        };
+
+        for (k of 0..8) {
+            const cdx : f64 = (k & 1) as f64;
+            const cdy : f64 = ((k / 2) & 1) as f64 * topH;
+            const cdz : f64 = ((k / 4) & 1) as f64;
+            const corner : Vec3 = vec3((bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz);
+            if (!self.projCorner(cam, corner, k)) {
                 Mem::putRealOf(self.csx, k, 0.0 - 1.0e9);
             }
-            k = k + 1;
         }
-        let col : i32 = Color::packBytes(36, 38, 44);
+
+        const col : i32 = Color::packBytes(36, 38, 44);
         self.selEdge(fb, 0, 1, col);
         self.selEdge(fb, 2, 3, col);
         self.selEdge(fb, 4, 5, col);

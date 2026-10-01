@@ -26,16 +26,25 @@ pub class Assets {
      * missing atlas leaves the buffer as it was and the world renders
      * with blank textures, which is a game you can still walk around in
      * rather than one that would not start.
+     * @param base   address of the caller-owned buffer to fill
+     * @param bytes  the atlas size the buffer expects
+     * @return how many bytes the last attempted read delivered
      */
     pub(crate) static fn loadAtlas(base : i64, bytes : i64) : i64 {
         let got : i64 = AssetFile::readInto(Assets::ATLAS_FILE, base, bytes);
         if (got == bytes) {
             return got;
         }
+
         got = AssetFile::readInto("../" + Assets::ATLAS_FILE, base, bytes);
         if (got == bytes) {
             return got;
         }
-        return AssetFile::readInto("tests/programs/voxel/" + Assets::ATLAS_FILE, base, bytes);
+
+        return AssetFile::readInto(
+            "tests/programs/voxel/" + Assets::ATLAS_FILE,
+            base,
+            bytes
+        );
     }
 }

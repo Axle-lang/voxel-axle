@@ -72,43 +72,40 @@ fn runBiomeScan() : i32 {
     }
     let land : i32 = 0;
     let total : i32 = 0;
-    let half : i32 = SCAN_SIDE / 2;
-    let iz : i32 = 0 - half;
-    while (iz < half) {
-        let ix : i32 = 0 - half;
-        while (ix < half) {
-            let wx : f64 = (ix * SCAN_STEP) as f64;
-            let wz : f64 = (iz * SCAN_STEP) as f64;
-            let h : i32 = terrainHeight(wx, wz).floorToInt() as i32;
-            let b : BiomeId = biomeAt(temperature(wx, wz), humidity(wx, wz), h);
-            if (tally[b as i32] == 0) {
-                atX[b as i32] = ix * SCAN_STEP;
-                atZ[b as i32] = iz * SCAN_STEP;
+    const half : i32 = SCAN_SIDE / 2;
+    for (iz of -half..half) {
+        for (ix of -half..half) {
+            const wx : f64 = (ix * SCAN_STEP) as f64;
+            const wz : f64 = (iz * SCAN_STEP) as f64;
+            const h : i32 = terrainHeight(wx, wz).floorToInt() as i32;
+            const temp : f64 = temperature(wx, wz);
+            const hum : f64 = humidity(wx, wz);
+            const b : BiomeId = biomeAt(temp, hum, h);
+            const slot : i32 = b as i32;
+            if (tally[slot] == 0) {
+                atX[slot] = ix * SCAN_STEP;
+                atZ[slot] = iz * SCAN_STEP;
             }
-            tally[b as i32] = tally[b as i32] + 1;
-            total = total + 1;
+            tally[slot] = tally[slot] + 1;
+            total++;
             if (b != BiomeId::Ocean && b != BiomeId::FrozenOcean) {
-                land = land + 1;
+                land++;
             }
-            ix = ix + 1;
         }
-        iz = iz + 1;
     }
+
     Console::println("biome scan: ${total} columns, ${SCAN_STEP} blocks apart");
-    let i : i32 = 0;
-    while (i < BIOME_COUNT) {
+    for (i of 0..BIOME_COUNT) {
         if (tally[i] > 0) {
-            let pct : f64 = (tally[i] as f64) * 100.0 / (total as f64);
-            let ofLand : f64 = 0.0;
-            if (land > 0) {
-                ofLand = (tally[i] as f64) * 100.0 / (land as f64);
-            }
+            const pct : f64 = (tally[i] as f64) * 100.0 / (total as f64);
+            const ofLand : f64 = land > 0 ? (tally[i] as f64) * 100.0 / (land as f64) : 0.0;
+            const pctShown : f64 = (pct * 10.0).round() / 10.0;
+            const ofLandShown : f64 = (ofLand * 10.0).round() / 10.0;
             Console::println("  ${biomeName(i)}: ${tally[i]}"
-                + "  (${(pct * 10.0).round() / 10.0}% of all,"
-                + " ${(ofLand * 10.0).round() / 10.0}% of land)"
+                + "  (${pctShown}% of all,"
+                + " ${ofLandShown}% of land)"
                 + "  --at ${atX[i]} ${atZ[i]}");
         }
-        i = i + 1;
     }
     return 0;
 }

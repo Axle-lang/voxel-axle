@@ -63,26 +63,22 @@ fn heartColor(code : i32, filled : bool) : i32 {
  * @param ui    the overlay scale.
  */
 fn drawHeart(f : Frame, x : i32, y : i32, fill : i32, ui : UiScale) : void {
-    let mask : string = heartMask();
-    let r : i32 = 0;
-    while (r < HEART_CELLS) {
-        let y0 : i32 = y + ui.px(r * HEART_PX);
-        let y1 : i32 = y + ui.px((r + 1) * HEART_PX);
-        let c : i32 = 0;
-        while (c < HEART_CELLS) {
-            let code : i32 = mask.byteAt(r * HEART_CELLS + c) - 48;
+    const mask : string = heartMask();
+    for (r of 0..HEART_CELLS) {
+        const y0 : i32 = y + ui.px(r * HEART_PX);
+        const y1 : i32 = y + ui.px((r + 1) * HEART_PX);
+        for (c of 0..HEART_CELLS) {
+            const code : i32 = mask.byteAt(r * HEART_CELLS + c) - 48;
             if (code != 0) {
-                let x0 : i32 = x + ui.px(c * HEART_PX);
-                let x1 : i32 = x + ui.px((c + 1) * HEART_PX);
-                let box : Rect = Rect::make(x0, y0, x1 - x0, y1 - y0);
+                const x0 : i32 = x + ui.px(c * HEART_PX);
+                const x1 : i32 = x + ui.px((c + 1) * HEART_PX);
+                const box : Rect = Rect::make(x0, y0, x1 - x0, y1 - y0);
                 f.fillRect(box, heartColor(code, false));
                 if (fill == 2 || (fill == 1 && c <= 4)) {
                     f.fillRect(box, heartColor(code, true));
                 }
             }
-            c = c + 1;
         }
-        r = r + 1;
     }
 }
 
@@ -96,10 +92,9 @@ fn drawHeart(f : Frame, x : i32, y : i32, fill : i32, ui : UiScale) : void {
  * @param ui     the overlay scale.
  */
 fn drawHealth(f : Frame, x0 : i32, y0 : i32, hp : i32, maxHp : i32, ui : UiScale) : void {
-    let hearts : i32 = maxHp / 2;
-    let step : i32 = ui.px(HEART_CELLS * HEART_PX + 1);
-    let i : i32 = 0;
-    while (i < hearts) {
+    const hearts : i32 = maxHp / 2;
+    const step : i32 = ui.px(HEART_CELLS * HEART_PX + 1);
+    for (i of 0..hearts) {
         let fill : i32 = 0;
         if (hp >= (i + 1) * 2) {
             fill = 2;
@@ -107,7 +102,6 @@ fn drawHealth(f : Frame, x0 : i32, y0 : i32, hp : i32, maxHp : i32, ui : UiScale
             fill = 1;
         }
         drawHeart(f, x0 + i * step, y0, fill, ui);
-        i = i + 1;
     }
 }
 

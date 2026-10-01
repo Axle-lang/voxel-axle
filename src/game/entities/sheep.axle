@@ -4,7 +4,12 @@ use crate::kernel::kentity::mob::Mob;
 use crate::configs::mobs::{ MobKind, Mobs };
 
 class Sheep : Mob {
-    /** Create a sheep at (x, y, z). */
+    /**
+     * Create a sheep at (x, y, z).
+     * @param x  the spawn x coordinate, in world space
+     * @param y  the spawn y coordinate (feet), in world space
+     * @param z  the spawn z coordinate, in world space
+     */
     constructor(x : f64, y : f64, z : f64) {
         super(x, y, z, MobKind::Sheep, Mobs::SHEEP_HP);
         self.speed = Mobs::SHEEP_SPEED;

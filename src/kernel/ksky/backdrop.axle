@@ -17,7 +17,13 @@ use crate::kernel::kmath::narrow::{ floatOf };
 use smalt::Color;
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::ksky::viewray::{ ViewRay };
-use crate::kernel::ksky::atmosphere::{ SkyColour, SkyDome, ViewRays, ViewRow, packSky };
+use crate::kernel::ksky::atmosphere::{
+    SkyColour,
+    SkyDome,
+    ViewRays,
+    ViewRow,
+    packSky
+};
 use crate::kernel::ksky::clouddome::{ CloudDome, CloudSample };
 use crate::kernel::krender::raster::{ FrameBuf, Camera, Lens, Projected };
 use crate::kernel::kentity::player::Player;
@@ -60,9 +66,9 @@ fn discColor(body : SkyBody, dx : f64, dy : f64, radius : f64) : i32 {
  * @return the packed rgb colour for the texel
  */
 fn sunTexel(dx : f64, dy : f64, radius : f64) : i32 {
-    let nd : f64 = (dx * dx + dy * dy).sqrt() / radius;
-    let cg : i32 = (253.0 - 42.0 * nd).floorToInt() as i32;
-    let cb : i32 = (218.0 - 150.0 * nd).floorToInt() as i32;
+    const nd : f64 = (dx * dx + dy * dy).sqrt() / radius;
+    const cg : i32 = (253.0 - 42.0 * nd).floorToInt() as i32;
+    const cb : i32 = (218.0 - 150.0 * nd).floorToInt() as i32;
     return Color::packBytes(255, cg, cb);
 }
 
@@ -74,8 +80,14 @@ fn sunTexel(dx : f64, dy : f64, radius : f64) : i32 {
  * @return the packed rgb colour for the texel
  */
 fn moonTexel(dx : f64, dy : f64, radius : f64) : i32 {
-    let m1 : f64 = ((dx + radius * 0.30) * (dx + radius * 0.30) + (dy + radius * 0.32) * (dy + radius * 0.32)).sqrt();
-    let m2 : f64 = ((dx - radius * 0.36) * (dx - radius * 0.36) + (dy - radius * 0.10) * (dy - radius * 0.10)).sqrt();
+    const ax : f64 = dx + radius * 0.30;
+    const ay : f64 = dy + radius * 0.32;
+    const m1 : f64 = (ax * ax + ay * ay).sqrt();
+
+    const bx : f64 = dx - radius * 0.36;
+    const by : f64 = dy - radius * 0.10;
+    const m2 : f64 = (bx * bx + by * by).sqrt();
+
     if (m1 < radius * 0.26 || m2 < radius * 0.20) {
         return Color::packBytes(198, 206, 220);
     }
@@ -83,32 +95,36 @@ fn moonTexel(dx : f64, dy : f64, radius : f64) : i32 {
 }
 
 /**
- * Draw a celestial disc, where the world has not already drawn. Procedural and FULLY OPAQUE: partial-coverage alpha
- * blending reads the framebuffer back, which over the bright day sky produces a
- * rasteriser striping artifact (red/green hatching) — so every drawn texel is
- * solid, never blended. Hard edge, like Minecraft's sun and moon.
- * @param fb    the render target (framebuffer + size)
- * @param d     the disc's screen centre + radius
- * @param body  which body is being drawn
+ * Draw a celestial disc, where the world has not already drawn. Procedural and
+ * FULLY OPAQUE: partial-coverage alpha blending reads the framebuffer back,
+ * which over the bright day sky produces a rasteriser striping artifact
+ * (red/green hatching) — so every drawn texel is solid, never blended. Hard
+ * edge, like Minecraft's sun and moon.
+ * @param fb     the render target (framebuffer + size)
+ * @param d      the disc's screen centre + radius
+ * @param body   which body is being drawn
+ * @param cloud  the cloud deck, which hides the body where it stands in front
+ * @param dir    the body's sky direction (unit), where the deck is sampled
  */
 fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Vec3) : void {
-    let pixels : i64 = fb.pixels;
-    let zbuf : i64 = fb.zbuf;
-    let w : i32 = fb.w;
-    let h : i32 = fb.h;
-    let x0 : i32 = (d.cx - d.radius).floorToInt() as i32;
-    let x1 : i32 = (d.cx + d.radius).floorToInt() as i32;
-    let y0 : i32 = (d.cy - d.radius).floorToInt() as i32;
-    let y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
-    let r2 : f64 = d.radius * d.radius;
+    const pixels : i64 = fb.pixels;
+    const zbuf : i64 = fb.zbuf;
+    const w : i32 = fb.w;
+    const h : i32 = fb.h;
+    const x0 : i32 = (d.cx - d.radius).floorToInt() as i32;
+    const x1 : i32 = (d.cx + d.radius).floorToInt() as i32;
+    const y0 : i32 = (d.cy - d.radius).floorToInt() as i32;
+    const y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
+    const r2 : f64 = d.radius * d.radius;
+
     let py : i32 = y0;
     while (py <= y1) {
         if (py >= 0 && py < h) {
             let px : i32 = x0;
             while (px <= x1) {
                 if (px >= 0 && px < w) {
-                    let dx : f64 = (px as f64) + 0.5 - d.cx;
-                    let dy : f64 = (py as f64) + 0.5 - d.cy;
+                    const dx : f64 = (px as f64) + 0.5 - d.cx;
+                    const dy : f64 = (py as f64) + 0.5 - d.cy;
                     // Inside the disc, and not behind the world: the body is
                     // drawn after the terrain now, so the terrain's z is what
                     // hides the part of it that has set.
@@ -119,24 +135,39 @@ fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Ve
                         // against the sky already painted underneath rather than
                         // against the disc itself, so there is no read-back of a
                         // pattern to stripe.
-                        let cl : CloudSample = cloud.sample(ViewRay { dx: dir.x, dy: dir.y, dz: dir.z, inv: 1.0 });
+                        const toward : ViewRay = ViewRay {
+                            dx: dir.x,
+                            dy: dir.y,
+                            dz: dir.z,
+                            inv: 1.0,
+                        };
+                        const cl : CloudSample = cloud.sample(toward);
                         if (cl.a > 0.002) {
                             // The sky under the disc already has the cloud in it,
                             // so the body is simply hidden behind that coverage.
-                            let back : i32 = Mem::wordOf(pixels, py * w + px);
-                            let k : f64 = 1.0 - cl.a;
-                            let rr : i32 = ((((c >> 16) & 0xFF) as f64) * k + (((back >> 16) & 0xFF) as f64) * cl.a).floorToInt() as i32;
-                            let gg : i32 = ((((c >> 8) & 0xFF) as f64) * k + (((back >> 8) & 0xFF) as f64) * cl.a).floorToInt() as i32;
-                            let bb : i32 = (((c & 0xFF) as f64) * k + ((back & 0xFF) as f64) * cl.a).floorToInt() as i32;
+                            const back : i32 = Mem::wordOf(pixels, py * w + px);
+                            const k : f64 = 1.0 - cl.a;
+                            const rr : i32 = (
+                                (((c >> 16) & 0xFF) as f64) * k
+                                + (((back >> 16) & 0xFF) as f64) * cl.a
+                            ).floorToInt() as i32;
+                            const gg : i32 = (
+                                (((c >> 8) & 0xFF) as f64) * k
+                                + (((back >> 8) & 0xFF) as f64) * cl.a
+                            ).floorToInt() as i32;
+                            const bb : i32 = (
+                                ((c & 0xFF) as f64) * k
+                                + ((back & 0xFF) as f64) * cl.a
+                            ).floorToInt() as i32;
                             c = rr * 65536 + gg * 256 + bb;
                         }
                         Mem::putWordOf(pixels, py * w + px, c);
                     }
                 }
-                px = px + 1;
+                px++;
             }
         }
-        py = py + 1;
+        py++;
     }
 }
 
@@ -152,13 +183,34 @@ fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Ve
  * @param lens    the frame's projection centre + focal length
  * @param cloud   the cloud deck, which may be in front of the body
  */
-fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, body : SkyBody, lens : Lens, cloud : CloudDome) : void {
-    let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: lens };
-    let pr : Projected = cam.projectDir(dir);
+fn drawSky(
+    p : Player,
+    fb : FrameBuf,
+    dir : Vec3,
+    radius : f64,
+    body : SkyBody,
+    lens : Lens,
+    cloud : CloudDome
+) : void {
+    const cam : Camera = Camera {
+        eye: p.eye,
+        cosy: p.cosy,
+        siny: p.siny,
+        cosp: p.cosp,
+        sinp: p.sinp,
+        lens,
+    };
+    const pr : Projected = cam.projectDir(dir);
     if (pr.cz < 0.05) {
         return;
     }
-    drawDisc(fb, Disc { cx: pr.sx, cy: pr.sy, radius: radius }, body, cloud, dir);
+
+    const disc : Disc = Disc {
+        cx: pr.sx,
+        cy: pr.sy,
+        radius,
+    };
+    drawDisc(fb, disc, body, cloud, dir);
 }
 
 /**
@@ -176,15 +228,23 @@ fn drawSky(p : Player, fb : FrameBuf, dir : Vec3, radius : f64, body : SkyBody, 
  * @param y1     last screen row (exclusive)
  * @return how many pixels of sky this band actually found
  */
-fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : FrameBuf, y0 : i32, y1 : i32) : i32 {
-    let pixels : i64 = fb.pixels;
-    let zbuf : i64 = fb.zbuf;
-    let w : i32 = fb.w;
+fn drawSkyGradientRows(
+    dome : SkyDome,
+    rays : ViewRays,
+    cloud : CloudDome,
+    fb : FrameBuf,
+    y0 : i32,
+    y1 : i32
+) : i32 {
+    const pixels : i64 = fb.pixels;
+    const zbuf : i64 = fb.zbuf;
+    const w : i32 = fb.w;
+
     let seen : i32 = 0;
     let py : i32 = y0;
     while (py < y1) {
-        let vr : ViewRow = rays.row((py as f64) + 0.5);
-        let row : i32 = py * w;
+        const vr : ViewRow = rays.row((py as f64) + 0.5);
+        const row : i32 = py * w;
         let px : i32 = 0;
         while (px < w) {
             // Only where the world left the pixel empty. The sky is painted
@@ -192,20 +252,24 @@ fn drawSkyGradientRows(dome : SkyDome, rays : ViewRays, cloud : CloudDome, fb : 
             // a bicubic cloud read under every blade of grass is a frame's
             // worth of work thrown away.
             if (floatOf(zbuf, row + px) <= 0.0) {
-                let ray : ViewRay = rays.dir(vr, (px as f64) + 0.5);
+                const ray : ViewRay = rays.dir(vr, (px as f64) + 0.5);
                 let c : SkyColour = dome.colourAt(ray);
-                let cl : CloudSample = cloud.sample(ray);
+                const cl : CloudSample = cloud.sample(ray);
                 if (cl.a > 0.002) {
                     // The cloud arrives premultiplied, so it is added, not mixed.
-                    let keep : f64 = 1.0 - cl.a;
-                    c = SkyColour { r: c.r * keep + cl.r, g: c.g * keep + cl.g, b: c.b * keep + cl.b };
+                    const keep : f64 = 1.0 - cl.a;
+                    c = SkyColour {
+                        r: c.r * keep + cl.r,
+                        g: c.g * keep + cl.g,
+                        b: c.b * keep + cl.b,
+                    };
                 }
                 Mem::putWordOf(pixels, row + px, packSky(c, px, py));
-                seen = seen + 1;
+                seen++;
             }
-            px = px + 1;
+            px++;
         }
-        py = py + 1;
+        py++;
     }
     return seen;
 }
@@ -243,6 +307,7 @@ pub(crate) class SkyPaint : Job {
     seen : Shared<i32[]>,
 
     /**
+     * Bind the pass to the slots it shares with the engine.
      * @param now   the one-slot frame the engine publishes into
      * @param seen  the per-band tally the engine reads back, one slot per band
      */
@@ -257,10 +322,18 @@ pub(crate) class SkyPaint : Job {
      * @param shares  how many bands the frame was cut into
      */
     fn run(mut self, share : i32, shares : i32) : void {
-        let f : SkyPaintFrame = self.now[0];
-        let band : i32 = (f.fb.h + shares - 1) / shares;
-        self.seen[share] = drawSkyGradientRows(f.dome, f.rays, f.cloud, f.fb,
-            (band * share).min(f.fb.h), (band * (share + 1)).min(f.fb.h));
+        const f : SkyPaintFrame = self.now[0];
+        const band : i32 = (f.fb.h + shares - 1) / shares;
+        const y0 : i32 = (band * share).min(f.fb.h);
+        const y1 : i32 = (band * (share + 1)).min(f.fb.h);
+        self.seen[share] = drawSkyGradientRows(
+            f.dome,
+            f.rays,
+            f.cloud,
+            f.fb,
+            y0,
+            y1
+        );
     }
 }
 
@@ -269,19 +342,39 @@ pub(crate) class SkyPaint : Job {
  * sky, behind the world. A body is drawn while it is on/above the horizon
  * (terrain naturally occludes the part that dips below). Sizes are a fraction of
  * the frame height so they scale with the window.
- * @param ds  the day/night state (sun direction)
- * @param p   player (camera orientation)
- * @param fb  the render target (framebuffer + size)
- * @param lens  the frame's projection centre + focal length
+ * @param ds     the day/night state (sun direction)
+ * @param p      player (camera orientation)
+ * @param fb     the render target (framebuffer + size)
+ * @param lens   the frame's projection centre + focal length
+ * @param cloud  the cloud deck, which may be in front of either body
  */
 fn drawCelestial(ds : DayState, p : Player, fb : FrameBuf, lens : Lens, cloud : CloudDome) : void {
-    let sunR : f64 = (fb.h as f64) * 0.085;
-    let moonR : f64 = (fb.h as f64) * 0.072;
+    const sunR : f64 = (fb.h as f64) * 0.085;
+    const moonR : f64 = (fb.h as f64) * 0.072;
+
     if (ds.sunY > 0.0 - 0.04) {
-        drawSky(p, fb, vec3(ds.sunX, ds.sunY, ds.sunZ), sunR, SkyBody::Sun, lens, cloud);
+        const sunDir : Vec3 = vec3(ds.sunX, ds.sunY, ds.sunZ);
+        drawSky(
+            p,
+            fb,
+            sunDir,
+            sunR,
+            SkyBody::Sun,
+            lens,
+            cloud
+        );
     }
     if ((0.0 - ds.sunY) > 0.0 - 0.04) {
-        drawSky(p, fb, vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ), moonR, SkyBody::Moon, lens, cloud);
+        const moonDir : Vec3 = vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ);
+        drawSky(
+            p,
+            fb,
+            moonDir,
+            moonR,
+            SkyBody::Moon,
+            lens,
+            cloud
+        );
     }
 }
 

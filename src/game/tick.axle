@@ -20,38 +20,48 @@ use crate::configs::world::{ World };
  * low-urgency systems (maintenance, block sim, chunk streaming) run this tick.
  */
 trait Scheduler {
+    /** Advance the counter by one fixed simulation step. */
     fn advance(mut self) : void;
+
+    /**
+     * Edge-latched: true once per maintenance interval (mob cull + spawn scan).
+     * @return whether the maintenance pass is due this tick
+     */
     fn dueMaintain(mut self) : bool;
+
+    /**
+     * Edge-latched: true once per block-update sim interval.
+     * @return whether the block-update sim is due this tick
+     */
     fn dueSim(mut self) : bool;
+
+    /**
+     * True when the player entered a new chunk (or on the first query).
+     * @param cx  the player's current chunk X
+     * @param cz  the player's current chunk Z
+     * @return whether streaming must run this tick
+     */
     fn dueStream(mut self, cx : i32, cz : i32) : bool;
 }
 
 class TickManager : Scheduler {
-    pub(crate) tick : i32, // monotonic fixed-step counter (advance() once per step)
-    maintainEvery : i32,   // mob cull + spawn-scan cadence, in ticks
-    lastMaintain : i32,    // tick the maintenance pass last fired on
-    simEvery : i32,        // block-update sim cadence, in ticks
-    lastSim : i32,         // tick the sim last stepped on
-    lastCX : i32,          // last player chunk X seen by dueStream
-    lastCZ : i32,          // last player chunk Z seen by dueStream
-    hasLast : i32,         // 0/1 — whether lastC{X,Z} are valid yet
+    pub(crate) tick : i32 = 0,                       // monotonic fixed-step counter (advance() once per step)
+    maintainEvery : i32 = World::MAINTAIN_TICKS,     // mob cull + spawn-scan cadence, in ticks
+    // Bias so the first dueMaintain fires immediately (prompt first spawn).
+    lastMaintain : i32 = -World::MAINTAIN_TICKS,     // tick the maintenance pass last fired on
+    simEvery : i32 = World::SIM_TICKS,               // block-update sim cadence, in ticks
+    lastSim : i32 = 0,                               // tick the sim last stepped on
+    lastCX : i32 = 0,                                // last player chunk X seen by dueStream
+    lastCZ : i32 = 0,                                // last player chunk Z seen by dueStream
+    hasLast : i32 = 0,                               // 0/1 — whether lastC{X,Z} are valid yet
 
     /** Start at tick 0 with the cadences pulled from config. */
     constructor() {
-        self.tick = 0;
-        self.maintainEvery = World::MAINTAIN_TICKS;
-        // Bias so the first dueMaintain fires immediately (prompt first spawn).
-        self.lastMaintain = 0 - World::MAINTAIN_TICKS;
-        self.simEvery = World::SIM_TICKS;
-        self.lastSim = 0;
-        self.lastCX = 0;
-        self.lastCZ = 0;
-        self.hasLast = 0;
     }
 
     /** Advance one fixed simulation step. Call once per physics step. */
     fn advance(mut self) : void {
-        self.tick = self.tick + 1;
+        self.tick++;
     }
 
     /**

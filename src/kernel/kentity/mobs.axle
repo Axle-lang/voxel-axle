@@ -55,7 +55,7 @@ class MobManager {
      * @return the next pseudo-random value in [0,1)
      */
     pub(crate) fn rand(mut self) : f64 {
-        self.rc = self.rc + 1.0;
+        self.rc += 1.0;
         return hash2(self.rc, self.rc * 1.3 + 7.0, Noise::SEED + 4242);
     }
 
@@ -99,34 +99,38 @@ class MobManager {
             return false;
         }
         // Pick a random bearing on the spawn ring around the player (6.2831853 = 2π).
-        let angle : f64 = self.rand() * 6.2831853;
-        let cosA : f64 = angle.cos();
-        let sinA : f64 = angle.sin();
+        const angle : f64 = self.rand() * 6.2831853;
+        const cosA : f64 = angle.cos();
+        const sinA : f64 = angle.sin();
+
         // Spawn out of sight: skip directions inside the camera's forward
         // cone so creatures never pop into existence in front of the player.
-        let fwdx : f64 = 0.0 - player.siny;
-        let fwdz : f64 = player.cosy;
+        const fwdx : f64 = 0.0 - player.siny;
+        const fwdz : f64 = player.cosy;
         if (cosA * fwdx + sinA * fwdz > Mobs::SPAWN_FOV_DOT) {
             return false;
         }
+
         // Distance out: a random radius within the [min, radius] ring band.
-        let ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
-        let ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
-        let worldX : f64 = player.pos.x + cosA * ringRadius;
-        let worldZ : f64 = player.pos.z + sinA * ringRadius;
-        let cellX : i32 = worldX.floorToInt() as i32;
-        let cellZ : i32 = worldZ.floorToInt() as i32;
-        let surfaceY : i32 = world.columnHeight(cellX, cellZ);
+        const ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
+        const ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
+        const worldX : f64 = player.pos.x + cosA * ringRadius;
+        const worldZ : f64 = player.pos.z + sinA * ringRadius;
+        const cellX : i32 = worldX.floorToInt() as i32;
+        const cellZ : i32 = worldZ.floorToInt() as i32;
+        const surfaceY : i32 = world.columnHeight(cellX, cellZ);
         if (surfaceY <= World::SEA_LEVEL) {
             return false;
         }
+
         // Only open, solid ground: reject columns carrying a tree trunk,
         // cactus, giant mushroom or any placed block (the collision surface
         // sits above the bare terrain there), so mobs never spawn up a tree.
         if (world.collisionHeight(cellX, cellZ) > surfaceY) {
             return false;
         }
-        let spawnY : f64 = surfaceY as f64;
+        const spawnY : f64 = surfaceY as f64;
+
         // The app spawner rolls a species (weighted toward the calm animals,
         // creepers kept rare) and builds it. Newborns get a randomised first
         // voice delay so a fresh herd doesn't all vocalise on the same frame (a
@@ -134,7 +138,7 @@ class MobManager {
         let m : Mob = self.spawner[0].create(vec3(worldX, spawnY, worldZ), self.rand());
         m.rearmVoice(self.nextVocalDelay());
         self.actors[self.n] = m;
-        self.n = self.n + 1;
+        self.n++;
         return true;
     }
 
@@ -144,7 +148,8 @@ class MobManager {
      * @return the delay in frames
      */
     fn nextVocalDelay(mut self) : i32 {
-        return Audio::MOB_VOCAL_MIN + (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
+        const extraFrames : i32 = (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
+        return Audio::MOB_VOCAL_MIN + extraFrames;
     }
 
     // ── Population upkeep (cull + respawn) ──
@@ -156,9 +161,9 @@ class MobManager {
      * @return true if the mob should be removed
      */
     fn cull(self, a : dyn Actor, player : Player) : bool {
-        let dx : f64 = a.pos().x - player.pos.x;
-        let dz : f64 = a.pos().z - player.pos.z;
-        let despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
+        const dx : f64 = a.pos().x - player.pos.x;
+        const dz : f64 = a.pos().z - player.pos.z;
+        const despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
         return a.deathDone() || (!a.isDying() && dx * dx + dz * dz > despawn2);
     }
 
@@ -174,22 +179,27 @@ class MobManager {
      * @param sfx     the audio manager for mob voices / creeper sounds
      * @param sim     the block-update sim a creeper blast wakes around its crater
      */
-    pub(crate) fn update(mut self, world : ChunkManager, player : Player, sfx : AudioManager, sim : BlockSim) : void {
-        let i : i32 = 0;
-        while (i < self.n) {
+    pub(crate) fn update(
+        mut self,
+        world : ChunkManager,
+        player : Player,
+        sfx : AudioManager,
+        sim : BlockSim
+    ) : void {
+        for (i of 0..self.n) {
             let a : dyn Actor = self.actors[i];
+
             // ONE virtual call: the concrete species (calm Mob vs. Creeper)
             // supplies its own `think` by dynamic dispatch.
-            a.think(world, player, sfx, sim, self.rand());
+            const roll = self.rand();
+            a.think(world, player, sfx, sim, roll);
+
             // Calm creatures idle-chatter; the hostile creeper (the one species
             // with the Hostile disposition) stays silent while it hunts.
-            if (!(a is Hostile)) {
-                if (a.wantsVoice()) {
-                    sfx.mobSay(a.kind(), a.pos(), self.rand());
-                    a.rearmVoice(self.nextVocalDelay());
-                }
+            if (!(a is Hostile) && a.wantsVoice()) {
+                sfx.mobSay(a.kind(), a.pos(), self.rand());
+                a.rearmVoice(self.nextVocalDelay());
             }
-            i = i + 1;
         }
     }
 
@@ -210,17 +220,17 @@ class MobManager {
         while (j < self.n) {
             if (self.cull(self.actors[j], player)) {
                 free(self.actors[j]);
-                self.n = self.n - 1;
+                self.n--;
                 self.actors[j] = self.actors[self.n];
             } else {
-                j = j + 1;
+                j++;
             }
         }
 
         let tries : i32 = 0;
         while (self.n < Mobs::TARGET_COUNT && tries < 16) {
             self.spawnOne(world, player);
-            tries = tries + 1;
+            tries++;
         }
     }
 
@@ -235,13 +245,20 @@ class MobManager {
      * @param bestD   the current best squared distance to beat
      * @return true if this mob is a closer, in-front, living candidate
      */
-    fn better(self, a : dyn Actor, player : Player, fwdx : f64, fwdz : f64, bestD : f64) : bool {
+    fn better(
+        self,
+        a : dyn Actor,
+        player : Player,
+        fwdx : f64,
+        fwdz : f64,
+        bestD : f64
+    ) : bool {
         if (a.isDying()) {
             return false;
         }
-        let dx : f64 = a.pos().x - player.pos.x;
-        let dz : f64 = a.pos().z - player.pos.z;
-        let d2 : f64 = dx * dx + dz * dz;
+        const dx : f64 = a.pos().x - player.pos.x;
+        const dz : f64 = a.pos().z - player.pos.z;
+        const d2 : f64 = dx * dx + dz * dz;
         if (d2 > bestD) {
             return false;
         }
@@ -256,30 +273,28 @@ class MobManager {
      * @return the struck mob's kind, or -1 if nothing was hit
      */
     pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager) : i32 {
-        let fwdx : f64 = 0.0 - player.siny;
-        let fwdz : f64 = player.cosy;
+        const fwdx : f64 = 0.0 - player.siny;
+        const fwdz : f64 = player.cosy;
         let bestD : f64 = Mobs::ATTACK_RANGE * Mobs::ATTACK_RANGE;
-        let bestIdx : i32 = 0 - 1;
-        let i : i32 = 0;
-        while (i < self.n) {
-            let a : dyn Actor = self.actors[i];
+        let bestIdx : i32 = -1;
+        for (i of 0..self.n) {
+            const a : dyn Actor = self.actors[i];
             if (self.better(a, player, fwdx, fwdz, bestD)) {
-                let dx : f64 = a.pos().x - player.pos.x;
-                let dz : f64 = a.pos().z - player.pos.z;
+                const dx : f64 = a.pos().x - player.pos.x;
+                const dz : f64 = a.pos().z - player.pos.z;
                 bestD = dx * dx + dz * dz;
                 bestIdx = i;
             }
-            i = i + 1;
         }
 
         if (bestIdx < 0) {
-            return 0 - 1;
+            return -1;
         }
         let target : dyn Actor = self.actors[bestIdx];
         target.damage(Mobs::ATTACK_DAMAGE);
         target.flashHurt();
         sfx.mobHurt(target.kind(), target.pos(), self.rand());
-        let kind : i32 = target.kind() as i32;
+        const kind : i32 = target.kind() as i32;
         if (target.isAlive()) {
             target.panicFrom(player.pos.x, player.pos.z);
         } else {

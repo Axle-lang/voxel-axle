@@ -18,12 +18,14 @@ class Daylight {
     // which made night a daylit world turned down — uniform, shadowless, and
     // grey. Night is now dark for the right reason: its light source has set.
     static STARLIGHT : f64 = 0.018;
+
     // And what the moon casts, as a fraction of full sun. Small, but DIRECTIONAL:
     // it runs through the same Lambert term and the same shadow bake, so a wall
     // facing the moon is lit and the one behind it is not, and a tree still lays
     // a shadow. That is the difference between a night you can read and a night
     // that is merely dim.
     static MOON_STRENGTH : f64 = 0.055;
+
     // How fast a body reaches full strength as it climbs off the horizon —
     // 1/sin(elevation at full). At 3.2 that is about eighteen degrees, which is
     // roughly how long a real sunrise takes to stop being a sunrise.
@@ -38,6 +40,7 @@ class Daylight {
                                           // (round-robin → the whole ring refreshes in ~span²/this
                                           // passes, and a cell only moves once per sweep, so the
                                           // sweep's LENGTH is how coarsely the shadow tracks the sun)
+
     // Rays per cell over the sun's disc. What they buy is the penumbra's
     // GRADIENT, so what they are worth follows the disc: six of them were
     // resolving an edge two and a half blocks wide, and the disc is now a
@@ -47,6 +50,7 @@ class Daylight {
     // frame is a tenth cheaper for a picture that sits inside the noise between
     // two runs of the same binary.
     static SUN_SHADOW_SAMPLES : i32 = 3;
+
     // Angular radius of the sun disc the rays spread over, in radians, and the
     // one number that decides whether a shadow has a SHAPE.
     //
@@ -95,9 +99,11 @@ class Daylight {
     static DAY_SKY_R : i32 = 150;
     static DAY_SKY_G : i32 = 198;
     static DAY_SKY_B : i32 = 240;
+
     static NIGHT_SKY_R : i32 = 12;
     static NIGHT_SKY_G : i32 = 16;
     static NIGHT_SKY_B : i32 = 40;
+
     static DUSK_SKY_R : i32 = 235;
     static DUSK_SKY_G : i32 = 128;
     static DUSK_SKY_B : i32 = 70;

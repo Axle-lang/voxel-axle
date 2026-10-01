@@ -61,7 +61,7 @@ class GodRayFX : PostEffect {
         // Eight, as a literal: a fixed-array size must be one — not a
         // `const` and not a `static` field — so the count and the `Task`
         // array below are kept in step by hand.
-        let bh : i32 = (fb.h + 7) / 8;
+        const bh : i32 = (fb.h + 7) / 8;
         let jobs : Task<i32>[7];
         for (i of 0..7) {
             let y0 : i32 = bh * (i + 1);
@@ -74,13 +74,15 @@ class GodRayFX : PostEffect {
             }
             jobs[i] = spawn godRaysJob(self, fb, y0, y1);
         }
+
         let firstEnd : i32 = bh;
         if (firstEnd > fb.h) {
             firstEnd = fb.h;
         }
         self.rows(fb, 0, firstEnd);
+
         for (i of 0..7) {
-            let d : i32 = jobs[i].join();
+            const d : i32 = jobs[i].join();
         }
     }
 
@@ -91,31 +93,44 @@ class GodRayFX : PostEffect {
      * @param y1  last screen row (exclusive)
      */
     pub(crate) fn rows(self, fb : FrameBuf, y0 : i32, y1 : i32) : void {
-        let pixels : i64 = fb.pixels;
-        let zbuf : i64 = fb.zbuf;
-        let w : i32 = fb.w;
-        let h : i32 = fb.h;
-        let invN : f64 = 1.0 / (Render::GOD_RAY_SAMPLES as f64);
-        let cr : f64 = Render::SKY_HALO_R as f64;
-        let cg : f64 = Render::SKY_HALO_G as f64;
-        let cb : f64 = Render::SKY_HALO_B as f64;
+        const pixels : i64 = fb.pixels;
+        const zbuf : i64 = fb.zbuf;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
+        const invN : f64 = 1.0 / (Render::GOD_RAY_SAMPLES as f64);
+        const cr : f64 = Render::SKY_HALO_R as f64;
+        const cg : f64 = Render::SKY_HALO_G as f64;
+        const cb : f64 = Render::SKY_HALO_B as f64;
+
         let y : i32 = y0;
         while (y < y1) {
-            let row : i32 = y * w;
+            const row : i32 = y * w;
             let x : i32 = 0;
             while (x < w) {
-                let illum : f64 = godRayIllum(zbuf, w, h, x, y, self.sun);
+                const illum : f64 = godRayIllum(zbuf, w, h, x, y, self.sun);
                 if (illum > 0.0) {
-                    let f : f64 = illum * invN * self.sun.expo;
-                    let c : i32 = Mem::dwordAt(pixels, (row + x) as i64 * 4);
-                    let r : i32 = clampI32(((c >> 16) & 0xFF) + ((cr * f).floorToInt() as i32), 0, 255);
-                    let g : i32 = clampI32(((c >> 8) & 0xFF) + ((cg * f).floorToInt() as i32), 0, 255);
-                    let b : i32 = clampI32((c & 0xFF) + ((cb * f).floorToInt() as i32), 0, 255);
+                    const f : f64 = illum * invN * self.sun.expo;
+                    const c : i32 = Mem::dwordAt(pixels, (row + x) as i64 * 4);
+                    const r : i32 = clampI32(
+                        ((c >> 16) & 0xFF) + ((cr * f).floorToInt() as i32),
+                        0,
+                        255
+                    );
+                    const g : i32 = clampI32(
+                        ((c >> 8) & 0xFF) + ((cg * f).floorToInt() as i32),
+                        0,
+                        255
+                    );
+                    const b : i32 = clampI32(
+                        (c & 0xFF) + ((cb * f).floorToInt() as i32),
+                        0,
+                        255
+                    );
                     Mem::putWordOf(pixels, row + x, r * 65536 + g * 256 + b);
                 }
-                x = x + 1;
+                x++;
             }
-            y = y + 1;
+            y++;
         }
     }
 }
@@ -143,24 +158,26 @@ class UnderwaterFX : PostEffect {
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
     fn apply(mut self, fb : FrameBuf) : void {
-        let phase : f64 = self.phase;
-        let pixels : i64 = fb.pixels;
-        let zbuf : i64 = fb.zbuf;
-        let w : i32 = fb.w;
-        let h : i32 = fb.h;
-        let fogR : f64 = Water::FOG_R as f64;
-        let fogG : f64 = Water::FOG_G as f64;
-        let fogB : f64 = Water::FOG_B as f64;
+        const phase : f64 = self.phase;
+        const pixels : i64 = fb.pixels;
+        const zbuf : i64 = fb.zbuf;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
+        const fogR : f64 = Water::FOG_R as f64;
+        const fogG : f64 = Water::FOG_G as f64;
+        const fogB : f64 = Water::FOG_B as f64;
+
         let y : i32 = 0;
         while (y < h) {
-            let row : i32 = y * w;
+            const row : i32 = y * w;
             // Vertical half of the caustic pattern — constant across the row.
-            let cy : f64 = ((y as f64) * Water::CAUSTIC_FREQ - phase * 1.3).sin();
+            const cy : f64 = ((y as f64) * Water::CAUSTIC_FREQ - phase * 1.3).sin();
             let x : i32 = 0;
             while (x < w) {
-                let idx : i32 = row + x;
+                const idx : i32 = row + x;
+
                 // Depth fog from the z-buffer: izp = 1/depth (0 = cleared bg).
-                let izp : f64 = floatOf(zbuf, idx);
+                const izp : f64 = floatOf(zbuf, idx);
                 let depth : f64 = Water::FOG_FAR;
                 if (izp > 0.0) {
                     depth = 1.0 / izp;
@@ -169,44 +186,59 @@ class UnderwaterFX : PostEffect {
                 if (fog > 1.0) {
                     fog = 1.0;
                 }
-                fog = fog * Water::FOG_MAX;
-                let caustic : f64 = (((x as f64) * Water::CAUSTIC_FREQ + phase).sin() + cy) * Water::CAUSTIC_AMP;
-                let keep : f64 = 1.0 - fog;
-                let c : i32 = Mem::dwordAt(pixels, (idx as i64) * 4);
-                let r : i32 = clampI32(((((c >> 16) & 0xFF) as f64) * keep + fogR * fog + caustic).floorToInt() as i32, 0, 255);
-                let g : i32 = clampI32(((((c >> 8) & 0xFF) as f64) * keep + fogG * fog + caustic).floorToInt() as i32, 0, 255);
-                let b : i32 = clampI32((((c & 0xFF) as f64) * keep + fogB * fog + caustic).floorToInt() as i32, 0, 255);
+                fog *= Water::FOG_MAX;
+
+                const caustic : f64 =
+                    (((x as f64) * Water::CAUSTIC_FREQ + phase).sin() + cy) * Water::CAUSTIC_AMP;
+                const keep : f64 = 1.0 - fog;
+                const c : i32 = Mem::dwordAt(pixels, (idx as i64) * 4);
+                const r : i32 = clampI32(
+                    ((((c >> 16) & 0xFF) as f64) * keep + fogR * fog + caustic).floorToInt() as i32,
+                    0,
+                    255
+                );
+                const g : i32 = clampI32(
+                    ((((c >> 8) & 0xFF) as f64) * keep + fogG * fog + caustic).floorToInt() as i32,
+                    0,
+                    255
+                );
+                const b : i32 = clampI32(
+                    (((c & 0xFF) as f64) * keep + fogB * fog + caustic).floorToInt() as i32,
+                    0,
+                    255
+                );
                 Mem::putWordOf(pixels, idx, r * 65536 + g * 256 + b);
-                x = x + 1;
+                x++;
             }
-            y = y + 1;
+            y++;
         }
 
         // Rising bubbles: bright motes drifting upward. Each gets its own
         // column, rise speed, phase and size from a per-index hash, so they
         // don't climb in lockstep (no visible grid) and the columns wobble with
         // height instead of forming straight streaks.
-        let nb : i32 = Water::BUBBLE_COUNT;
-        let bcol : i32 = 200 * 65536 + 228 * 256 + 244;
-        let bi : i32 = 0;
-        while (bi < nb) {
-            let hx : i32 = (bi * 1664525 + 1013904223) & 0x7FFFFFFF;
-            let hp : i32 = ((bi + 1) * 22695477 + 13) & 0x7FFFFFFF;
-            let hs : i32 = ((bi + 7) * 40503 + 101) & 0x7FFFFFFF;
+        const nb : i32 = Water::BUBBLE_COUNT;
+        const bcol : i32 = 200 * 65536 + 228 * 256 + 244;
+        for (bi of 0..nb) {
+            const hx : i32 = (bi * 1664525 + 1013904223) & 0x7FFFFFFF;
+            const hp : i32 = ((bi + 1) * 22695477 + 13) & 0x7FFFFFFF;
+            const hs : i32 = ((bi + 7) * 40503 + 101) & 0x7FFFFFFF;
+
             // Per-bubble rise speed (0.5..1.5x) breaks the synchronised motion.
-            let sp : f64 = 0.5 + ((hs % 1000) as f64) * 0.001;
-            let trav : i32 = (phase * Water::BUBBLE_SPEED * sp).floorToInt() as i32;
-            let yy : i32 = h - 1 - (((hp + trav) & 0x7FFFFFFF) % h);
+            const sp : f64 = 0.5 + ((hs % 1000) as f64) * 0.001;
+            const trav : i32 = (phase * Water::BUBBLE_SPEED * sp).floorToInt() as i32;
+            const yy : i32 = h - 1 - (((hp + trav) & 0x7FFFFFFF) % h);
+
             // Column wobbles with height + its own phase → wavy, not a streak.
-            let wob : f64 = (phase * 0.4 + (bi as f64) * 1.7 + (yy as f64) * 0.07).sin() * 3.0;
-            let bx : i32 = (hx % w) + wob.floorToInt() as i32;
+            const wob : f64 = (phase * 0.4 + (bi as f64) * 1.7 + (yy as f64) * 0.07).sin() * 3.0;
+            const bx : i32 = (hx % w) + wob.floorToInt() as i32;
             self.plotBubble(fb, bx, yy, bcol);
+
             // Vary size: about half are a 2-px mote, the rest a single pixel.
             if ((hs & 1) == 0) {
                 self.plotBubble(fb, bx + 1, yy, bcol);
                 self.plotBubble(fb, bx, yy - 1, bcol);
             }
-            bi = bi + 1;
         }
     }
 
@@ -218,17 +250,18 @@ class UnderwaterFX : PostEffect {
      * @param col  bubble colour
      */
     fn plotBubble(self, fb : FrameBuf, x : i32, y : i32, col : i32) : void {
-        let pixels : i64 = fb.pixels;
-        let w : i32 = fb.w;
-        let h : i32 = fb.h;
+        const pixels : i64 = fb.pixels;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
         if (x < 0 || x >= w || y < 0 || y >= h) {
             return;
         }
-        let idx : i32 = y * w + x;
-        let c : i32 = Mem::dwordAt(pixels, (idx as i64) * 4);
-        let r : i32 = (((c >> 16) & 0xFF) + ((col >> 16) & 0xFF)) / 2;
-        let g : i32 = (((c >> 8) & 0xFF) + ((col >> 8) & 0xFF)) / 2;
-        let b : i32 = ((c & 0xFF) + (col & 0xFF)) / 2;
+
+        const idx : i32 = y * w + x;
+        const c : i32 = Mem::dwordAt(pixels, (idx as i64) * 4);
+        const r : i32 = (((c >> 16) & 0xFF) + ((col >> 16) & 0xFF)) / 2;
+        const g : i32 = (((c >> 8) & 0xFF) + ((col >> 8) & 0xFF)) / 2;
+        const b : i32 = ((c & 0xFF) + (col & 0xFF)) / 2;
         Mem::putWordOf(pixels, idx, (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF));
     }
 }
@@ -246,25 +279,27 @@ class UnderwaterFX : PostEffect {
  * @return the accumulated sky illumination (pre-exposure)
  */
 fn godRayIllum(zbuf : i64, w : i32, h : i32, x : i32, y : i32, sun : SunScreen) : f64 {
-    let n : i32 = Render::GOD_RAY_SAMPLES;
-    let invN : f64 = 1.0 / (n as f64);
-    let stepx : f64 = (sun.sunSx - (x as f64)) * invN * Render::GOD_RAY_DENSITY;
-    let stepy : f64 = (sun.sunSy - (y as f64)) * invN * Render::GOD_RAY_DENSITY;
+    const n : i32 = Render::GOD_RAY_SAMPLES;
+    const invN : f64 = 1.0 / (n as f64);
+    const stepx : f64 = (sun.sunSx - (x as f64)) * invN * Render::GOD_RAY_DENSITY;
+    const stepy : f64 = (sun.sunSy - (y as f64)) * invN * Render::GOD_RAY_DENSITY;
+
     let sxp : f64 = x as f64;
     let syp : f64 = y as f64;
     let illum : f64 = 0.0;
     let dec : f64 = 1.0;
     let i : i32 = 0;
     while (i < n) {
-        sxp = sxp + stepx;
-        syp = syp + stepy;
-        let ix : i32 = sxp.floorToInt() as i32;
-        let iy : i32 = syp.floorToInt() as i32;
-        if (ix >= 0 && ix < w && iy >= 0 && iy < h && floatOf(zbuf, (iy * w + ix) as i64) <= 0.0) {
-            illum = illum + dec;   // a sky sample contributes
+        sxp += stepx;
+        syp += stepy;
+        const ix : i32 = sxp.floorToInt() as i32;
+        const iy : i32 = syp.floorToInt() as i32;
+        if (ix >= 0 && ix < w && iy >= 0 && iy < h
+            && floatOf(zbuf, (iy * w + ix) as i64) <= 0.0) {
+            illum += dec;   // a sky sample contributes
         }
-        dec = dec * Render::GOD_RAY_DECAY;
-        i = i + 1;
+        dec *= Render::GOD_RAY_DECAY;
+        i++;
     }
     return illum;
 }
@@ -273,6 +308,10 @@ fn godRayIllum(zbuf : i64, w : i32, h : i32, x : i32, y : i32, sun : SunScreen) 
  * Worker job: god-rays for one horizontal row band, run on its own thread by
  * GodRayFX.apply (spawn → join). A thin wrapper so `spawn` calls a free
  * function (the effect is passed by value).
+ * @param fx  the god-ray effect whose rows are drawn
+ * @param fb  the render target (framebuffer + z-buffer + size)
+ * @param y0  first screen row (inclusive)
+ * @param y1  last screen row (exclusive)
  * @return 0 (Task result unused)
  */
 fn godRaysJob(fx : GodRayFX, fb : FrameBuf, y0 : i32, y1 : i32) : i32 {

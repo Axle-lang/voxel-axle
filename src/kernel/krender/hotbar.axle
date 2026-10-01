@@ -42,16 +42,17 @@ fn hotbarPanelH(ui : UiScale) : i32 {
  * @param size   box side length.
  */
 fn drawTileIcon(f : Frame, atlas : i64, tile : i32, x : i32, y : i32, size : i32) : void {
-    let tp : i32 = Atlas::TILE_PX;
+    const tp : i32 = Atlas::TILE_PX;
+
     // Nearest-neighbour, because an icon is a block face and a blurred
     // block face stops reading as the block. `Frame::blit` is the 1:1
     // path and does not fit; `plot` carries the clip, which is what keeps
     // an icon at the edge of a resized frame from writing past the row.
     for (py of 0..size) {
-        let ty : i32 = py * tp / size;
-        let row : i32 = (tile * tp + ty) * tp;
+        const ty : i32 = py * tp / size;
+        const row : i32 = (tile * tp + ty) * tp;
         for (px of 0..size) {
-            let tx : i32 = px * tp / size;
+            const tx : i32 = px * tp / size;
             f.plot(x + px, y + py, Mem::wordOf(atlas, (row + tx) as i64));
         }
     }
@@ -67,30 +68,44 @@ fn drawTileIcon(f : Frame, atlas : i64, tile : i32, x : i32, y : i32, size : i32
  * @param selected  index of the active hotbar slot.
  * @param ui        the overlay scale.
  */
-fn drawHotbar(f : Frame, x0 : i32, y0 : i32, atlas : i64, hotbar : Block[], selected : i32, ui : UiScale) : void {
-    let cell : i32 = ui.px(Hotbar::CELL);
-    let pad : i32 = ui.px(Hotbar::PAD);
-    let n : i32 = Hotbar::SIZE;
-    let panelW : i32 = hotbarPanelW(ui);
-    let panelH : i32 = hotbarPanelH(ui);
-    let edge : i32 = ui.px(2);   // the outer keyline, the ring, and the icon's inset
+fn drawHotbar(
+    f : Frame,
+    x0 : i32,
+    y0 : i32,
+    atlas : i64,
+    hotbar : Block[],
+    selected : i32,
+    ui : UiScale
+) : void {
+    const cell : i32 = ui.px(Hotbar::CELL);
+    const pad : i32 = ui.px(Hotbar::PAD);
+    const n : i32 = Hotbar::SIZE;
+    const panelW : i32 = hotbarPanelW(ui);
+    const panelH : i32 = hotbarPanelH(ui);
+    const edge : i32 = ui.px(2);   // the outer keyline, the ring, and the icon's inset
 
-    f.fillRect(Rect::make(x0 - edge, y0 - edge, panelW + 2 * edge, panelH + 2 * edge), Color::packBytes(12, 12, 16));
+    const keyline : Rect = Rect::make(x0 - edge, y0 - edge, panelW + 2 * edge, panelH + 2 * edge);
+    f.fillRect(keyline, Color::packBytes(12, 12, 16));
     f.fillRect(Rect::make(x0, y0, panelW, panelH), Color::packBytes(28, 28, 34));
 
-    let i : i32 = 0;
-    while (i < n) {
-        let cx : i32 = x0 + pad + i * (cell + pad);
-        let cy : i32 = y0 + pad;
+    for (i of 0..n) {
+        const cx : i32 = x0 + pad + i * (cell + pad);
+        const cy : i32 = y0 + pad;
         f.fillRect(Rect::make(cx, cy, cell, cell), Color::packBytes(48, 48, 56));
-        drawTileIcon(f, atlas, tileFor(hotbar[i], FaceDir::Top), cx + edge, cy + edge, cell - 2 * edge);
-        i = i + 1;
+        drawTileIcon(
+            f,
+            atlas,
+            tileFor(hotbar[i], FaceDir::Top),
+            cx + edge,
+            cy + edge,
+            cell - 2 * edge
+        );
     }
 
     // White ring around the active slot.
-    let sx : i32 = x0 + pad + selected * (cell + pad);
-    let sy : i32 = y0 + pad;
-    let white : i32 = Color::packBytes(255, 255, 255);
+    const sx : i32 = x0 + pad + selected * (cell + pad);
+    const sy : i32 = y0 + pad;
+    const white : i32 = Color::packBytes(255, 255, 255);
     f.fillRect(Rect::make(sx - edge, sy - edge, cell + 2 * edge, edge), white);
     f.fillRect(Rect::make(sx - edge, sy + cell, cell + 2 * edge, edge), white);
     f.fillRect(Rect::make(sx - edge, sy - edge, edge, cell + 2 * edge), white);

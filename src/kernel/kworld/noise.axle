@@ -20,9 +20,28 @@ use crate::configs::world::{ World };
  * @return the continentalness value in [0,1)
  */
 fn continentalness(wx : f64, wz : f64) : f64 {
-    let wxx : f64 = wx + (fbm(wx * Noise::WARP_SCALE, wz * Noise::WARP_SCALE, Noise::SEED + 11, 2) - 0.5) * 34.0;
-    let wzz : f64 = wz + (fbm(wx * Noise::WARP_SCALE + 9.0, wz * Noise::WARP_SCALE + 9.0, Noise::SEED + 23, 2) - 0.5) * 34.0;
-    return fbm(wxx * Noise::CONT_SCALE, wzz * Noise::CONT_SCALE, Noise::SEED, 3);
+    const warpX : f64 = fbm(
+        wx * Noise::WARP_SCALE,
+        wz * Noise::WARP_SCALE,
+        Noise::SEED + 11,
+        2
+    );
+    const wxx : f64 = wx + (warpX - 0.5) * 34.0;
+
+    const warpZ : f64 = fbm(
+        wx * Noise::WARP_SCALE + 9.0,
+        wz * Noise::WARP_SCALE + 9.0,
+        Noise::SEED + 23,
+        2
+    );
+    const wzz : f64 = wz + (warpZ - 0.5) * 34.0;
+
+    return fbm(
+        wxx * Noise::CONT_SCALE,
+        wzz * Noise::CONT_SCALE,
+        Noise::SEED,
+        3
+    );
 }
 
 /**
@@ -33,7 +52,12 @@ fn continentalness(wx : f64, wz : f64) : f64 {
  * @return the erosion value in [0,1)
  */
 fn erosion(wx : f64, wz : f64) : f64 {
-    return fbm(wx * Noise::EROSION_SCALE + 53.0, wz * Noise::EROSION_SCALE - 29.0, Noise::SEED + 333, 3);
+    return fbm(
+        wx * Noise::EROSION_SCALE + 53.0,
+        wz * Noise::EROSION_SCALE - 29.0,
+        Noise::SEED + 333,
+        3
+    );
 }
 
 /**
@@ -45,7 +69,12 @@ fn erosion(wx : f64, wz : f64) : f64 {
  * @return the ridge value in [0,1)
  */
 fn ridge(wx : f64, wz : f64) : f64 {
-    let w : f64 = fbm(wx * Noise::WEIRD_SCALE + 7.0, wz * Noise::WEIRD_SCALE + 31.0, Noise::SEED + 777, 4);
+    const w : f64 = fbm(
+        wx * Noise::WEIRD_SCALE + 7.0,
+        wz * Noise::WEIRD_SCALE + 31.0,
+        Noise::SEED + 777,
+        4
+    );
     let r : f64 = 2.0 * w - 1.0;
     if (r < 0.0) {
         r = 0.0 - r;
@@ -66,16 +95,24 @@ fn ridge(wx : f64, wz : f64) : f64 {
  * @return the terrain surface height in blocks
  */
 fn terrainHeight(wx : f64, wz : f64) : f64 {
-    let cont : f64 = continentalness(wx, wz);
-    let hills : f64 = fbm(wx * Noise::HILL_SCALE, wz * Noise::HILL_SCALE, Noise::SEED + 99, 3);
-    let sea : f64 = World::SEA_LEVEL as f64;
-    let ocean : f64 = Noise::OCEAN_LEVEL;
+    const cont : f64 = continentalness(wx, wz);
+    const hills : f64 = fbm(
+        wx * Noise::HILL_SCALE,
+        wz * Noise::HILL_SCALE,
+        Noise::SEED + 99,
+        3
+    );
+    const sea : f64 = World::SEA_LEVEL as f64;
+    const ocean : f64 = Noise::OCEAN_LEVEL;
+
     if (cont < ocean) {
         // Ocean basin: a coherent sea floor, deeper toward open water.
-        let d : f64 = (ocean - cont) / ocean;
+        const d : f64 = (ocean - cont) / ocean;
         return sea - 1.0 - d * 22.0 - hills * 4.0;
     }
-    let land : f64 = (cont - ocean) / (1.0 - ocean);   // 0 (coast) .. 1 (deep inland)
+
+    const land : f64 = (cont - ocean) / (1.0 - ocean);   // 0 (coast) .. 1 (deep inland)
+
     // Base elevation spline: gentle coast, rising to an inland plateau.
     let base : f64 = 0.0;
     if (land < 0.30) {
@@ -85,16 +122,18 @@ fn terrainHeight(wx : f64, wz : f64) : f64 {
     } else {
         base = 18.0 + ((land - 0.62) / 0.38) * 16.0;   // up to ~34 above sea
     }
+
     // Erosion → relief amplitude: high erosion flattens (plains/plateaus), low
     // erosion unleashes tall jagged relief. Cubed so most land is calm and only
     // the least-eroded regions become real mountains.
-    let ero : f64 = erosion(wx, wz);
+    const ero : f64 = erosion(wx, wz);
     let amp : f64 = 1.0 - ero;
     amp = amp * amp * amp;
+
     // Ridged peaks & valleys, plus rolling hills, scaled by the amplitude.
-    let pv : f64 = ridge(wx, wz);
-    let mountains : f64 = pv * amp * 58.0;
-    let rolling : f64 = (hills - 0.5) * (6.0 + amp * 22.0);
+    const pv : f64 = ridge(wx, wz);
+    const mountains : f64 = pv * amp * 58.0;
+    const rolling : f64 = (hills - 0.5) * (6.0 + amp * 22.0);
     let h : f64 = sea + 2.0 + base + mountains + rolling;
     if (h < sea + 1.0) {
         h = sea + 1.0;
@@ -109,7 +148,12 @@ fn terrainHeight(wx : f64, wz : f64) : f64 {
  * @return the temperature value in [0,1)
  */
 fn temperature(wx : f64, wz : f64) : f64 {
-    return fbm(wx * Noise::TEMP_SCALE, wz * Noise::TEMP_SCALE, Noise::SEED + 555, 2);
+    return fbm(
+        wx * Noise::TEMP_SCALE,
+        wz * Noise::TEMP_SCALE,
+        Noise::SEED + 555,
+        2
+    );
 }
 
 /**
@@ -119,7 +163,12 @@ fn temperature(wx : f64, wz : f64) : f64 {
  * @return the humidity value in [0,1)
  */
 fn humidity(wx : f64, wz : f64) : f64 {
-    return fbm(wx * Noise::HUMID_SCALE + 41.0, wz * Noise::HUMID_SCALE - 17.0, Noise::SEED + 808, 2);
+    return fbm(
+        wx * Noise::HUMID_SCALE + 41.0,
+        wz * Noise::HUMID_SCALE - 17.0,
+        Noise::SEED + 808,
+        2
+    );
 }
 
 /**
@@ -133,7 +182,13 @@ fn humidity(wx : f64, wz : f64) : f64 {
  * @return the snow depth fraction in [0,1]
  */
 fn snowDepth(wx : f64, wz : f64) : f64 {
-    let n : f64 = fbm(wx * Noise::SNOW_SCALE + 71.0, wz * Noise::SNOW_SCALE - 53.0, Noise::SEED + 1212, 3);
+    const n : f64 = fbm(
+        wx * Noise::SNOW_SCALE + 71.0,
+        wz * Noise::SNOW_SCALE - 53.0,
+        Noise::SEED + 1212,
+        3
+    );
+
     // Patchy bare ground (low noise) and the odd full block (high noise); the
     // middle band quantises into 6 discrete levels (1/8 .. 6/8 of a block) so
     // the depth visibly steps from spot to spot like Minecraft's snow layers.
@@ -143,12 +198,13 @@ fn snowDepth(wx : f64, wz : f64) : f64 {
     if (n > 0.95) {
         return 1.0;
     }
-    let t : f64 = (n - 0.30) / 0.65;                     // 0..1 across the layered band
+
+    const t : f64 = (n - 0.30) / 0.65;                   // 0..1 across the layered band
     let lvl : i32 = 1 + ((t * 6.0).floorToInt() as i32); // 1..6
     if (lvl > 6) {
         lvl = 6;
     }
-    return (lvl as f64) * 0.125;                 // 0.125 .. 0.75
+    return (lvl as f64) * 0.125;                         // 0.125 .. 0.75
 }
 
 /**

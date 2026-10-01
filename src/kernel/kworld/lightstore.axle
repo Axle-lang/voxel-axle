@@ -18,8 +18,20 @@ use crate::kernel::kmath::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::kernel::kmath::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::kernel::kworld::voxstore::VoxStore;
 use crate::kernel::kworld::meshbuf::{ ColumnRing };
-use crate::kernel::kblock::blocks::{ isOpaque, lightTransmit, emissionOf, albedoFor, Emission };
-use crate::kernel::seams::{ LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels };
+use crate::kernel::kblock::blocks::{
+    isOpaque,
+    lightTransmit,
+    emissionOf,
+    albedoFor,
+    Emission
+};
+use crate::kernel::seams::{
+    LightSample,
+    LightMoment,
+    CornerProbe,
+    CornerSample,
+    ChannelLevels
+};
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
 use crate::kernel::klight::daymodel::{ SkyBodyLight, activeBody };
@@ -78,10 +90,16 @@ fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
  * @param s3  one step along both
  * @return the averaged terms
  */
-fn blend4(s0 : CornerSample, s1 : CornerSample, s2 : CornerSample, s3 : CornerSample) : CornerSample {
-    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
-    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
-    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+fn blend4(
+    s0 : CornerSample,
+    s1 : CornerSample,
+    s2 : CornerSample,
+    s3 : CornerSample
+) : CornerSample {
+    const r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    const g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    const b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+
     return CornerSample {
         sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
         sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
@@ -139,7 +157,7 @@ fn nibGet(p : Nibble, off : i64) : i32 {
  * @param v    the level 0..15
  */
 fn nibPut(p : Nibble, off : i64, v : i32) : void {
-    let keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
+    const keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
     Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
 }
 
@@ -163,17 +181,37 @@ struct LightVolumes {
     bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
     bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
 
-    /** The red block-light plane. @return its handle */
-    fn red(self) : Nibble { return Nibble { base: self.lightRG, shift: 0 }; }
+    /**
+     * The red block-light plane.
+     * @return its handle
+     */
+    fn red(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 0 };
+    }
 
-    /** The green block-light plane. @return its handle */
-    fn green(self) : Nibble { return Nibble { base: self.lightRG, shift: 4 }; }
+    /**
+     * The green block-light plane.
+     * @return its handle
+     */
+    fn green(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 4 };
+    }
 
-    /** The blue block-light plane. @return its handle */
-    fn blue(self) : Nibble { return Nibble { base: self.lightBS, shift: 0 }; }
+    /**
+     * The blue block-light plane.
+     * @return its handle
+     */
+    fn blue(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 0 };
+    }
 
-    /** The sky-light plane. @return its handle */
-    fn sky(self) : Nibble { return Nibble { base: self.lightBS, shift: 4 }; }
+    /**
+     * The sky-light plane.
+     * @return its handle
+     */
+    fn sky(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 4 };
+    }
 }
 
 /** The precomputed upper-hemisphere ray directions used by the sky-AO bake. */
@@ -221,43 +259,48 @@ class LightStore {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        let s : i32 = World::CHUNK_SIZE;
-        let vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
+        const s : i32 = World::CHUNK_SIZE;
+        const vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
+
         // Zeroed, not merely taken: a slot's volumes are given their real
         // values by `clearLight` when a chunk lands in it, and until then every
         // read of them — the mesher's corner average, the renderer's sample —
         // would be reading whatever the allocator last left there.
         self.vols = LightVolumes {
-            lightRG: Mem::takeZeroed(vol), lightBS: Mem::takeZeroed(vol),
+            lightRG: Mem::takeZeroed(vol),
+            lightBS: Mem::takeZeroed(vol),
             sunlit: Mem::takeZeroed(vol),
             skyaccess: Mem::takeZeroed(vol),
-            bnR: Mem::takeZeroed(vol), bnG: Mem::takeZeroed(vol), bnB: Mem::takeZeroed(vol),
+            bnR: Mem::takeZeroed(vol),
+            bnG: Mem::takeZeroed(vol),
+            bnB: Mem::takeZeroed(vol),
         };
         self.sunCursor = 0;
         self.skyAOcursor = 0;
+
         // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
         // for the sky-access bake.
-        let m : i32 = Light::SKY_AO_SAMPLES;
+        const m : i32 = Light::SKY_AO_SAMPLES;
         self.rays = HemiRays {
             hemiX: Mem::take((m as i64) * 8),
             hemiY: Mem::take((m as i64) * 8),
             hemiZ: Mem::take((m as i64) * 8),
         };
-        let hi : i32 = 0;
-        while (hi < m) {
-            let yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
-            let rr : f64 = (1.0 - yy * yy).sqrt();
-            let th : f64 = (hi as f64) * 2.399963;           // golden angle
+        for (hi of 0..m) {
+            const yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
+            const rr : f64 = (1.0 - yy * yy).sqrt();
+            const th : f64 = (hi as f64) * 2.399963;           // golden angle
             Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
             Mem::putRealOf(self.rays.hemiY, hi, yy);
             Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
-            hi = hi + 1;
         }
+
         self.sunDirty = malloc<i8>(slots);
         self.sunBaked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
         self.skyAOdirty = malloc<i8>(slots);
         self.ldirty = malloc<i8>(slots);
-        let lcap : i32 = Light::QUEUE_CAP;
+
+        const lcap : i32 = Light::QUEUE_CAP;
         self.lq = malloc<IVec3>(lcap);
         self.lqn = 0;
         self.rq = malloc<LightRemoval>(lcap);
@@ -270,6 +313,10 @@ class LightStore {
  * hemispherical sky-access / one-bounce GI), run by the background light thread.
  */
 trait LightBaker {
+    /**
+     * One pass of the throttled bake: refresh the sun shadows and drain any
+     * pending sky-access / bounce work.
+     */
     fn stepBake(mut self) : void;
 }
 
@@ -305,43 +352,74 @@ class LightEngine : LightSample, LightBaker {
         self.store = store;
         self.cols = cols;
         self.lights = new LightStore(slots);
-        self.moment = LightMoment { dayTime: Daylight::START, seconds: 0.0, camX: 0, camZ: 0 };
+        self.moment = LightMoment {
+            dayTime: Daylight::START,
+            seconds: 0.0,
+            camX: 0,
+            camZ: 0,
+        };
         self.clouds = new CloudMap();
         self.lightRunning = new AtomicBoolean(true);
     }
 
     // ── Grid / topology helpers ─────────────────────────────────
 
-    /** Floor division of `a` by `b` (toward negative infinity). */
+    /**
+     * Floor division of `a` by `b` (toward negative infinity).
+     * @param a  the dividend
+     * @param b  the divisor
+     * @return the floored quotient
+     */
     fn floorDiv(self, a : i32, b : i32) : i32 {
         let q : i32 = a / b;
         if (a - q * b < 0) {
-            q = q - 1;
+            q--;
         }
         return q;
     }
 
-    /** Wrap a chunk coordinate into [0, span) for slot addressing. */
+    /**
+     * Wrap a chunk coordinate into [0, span) for slot addressing.
+     * @param v  the chunk coordinate
+     * @return the coordinate wrapped into [0, span)
+     */
     fn wrap(self, v : i32) : i32 {
-        let s : i32 = World::SPAN;
+        const s : i32 = World::SPAN;
         let m : i32 = v - (v / s) * s;
         if (m < 0) {
-            m = m + s;
+            m += s;
         }
         return m;
     }
 
-    /** Slot index for chunk coords (cx, cz). */
+    /**
+     * Slot index for chunk coords (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     * @return the ring slot that chunk maps to
+     */
     fn slotFor(self, cx : i32, cz : i32) : i32 {
         return self.wrap(cz) * World::SPAN + self.wrap(cx);
     }
 
-    /** True if `slot` currently holds chunk (cx, cz). */
+    /**
+     * True if `slot` currently holds chunk (cx, cz).
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @return whether the slot is loaded with exactly that chunk
+     */
     fn owns(self, slot : i32, cx : i32, cz : i32) : bool {
-        return self.cols.loaded[slot] == 1 && self.cols.cxs[slot] == cx && self.cols.czs[slot] == cz;
+        return self.cols.loaded[slot] == 1
+            && self.cols.cxs[slot] == cx
+            && self.cols.czs[slot] == cz;
     }
 
-    /** Block id at a world voxel; bedrock below 0, air above / unloaded. */
+    /**
+     * Block id at a world voxel; bedrock below 0, air above / unloaded.
+     * @param cell  the world voxel
+     * @return the block id there
+     */
     pub(crate) fn worldGet(self, cell : IVec3) : Block {
         if (cell.y < 0) {
             return Block::Stone;
@@ -349,10 +427,11 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y >= World::HEIGHT) {
             return Block::Air;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return Block::Air;
         }
@@ -380,10 +459,11 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y >= World::HEIGHT) {
             return Block::Air;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return Block::Stone;
         }
@@ -404,10 +484,11 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 0;
         }
@@ -416,20 +497,31 @@ class LightEngine : LightSample, LightBaker {
 
     // ── Per-slot mesh-dirty bridge (read back by the manager's flush) ──
 
-    /** Flag a slot's light as changed so the manager re-meshes it. */
+    /**
+     * Flag a slot's light as changed so the manager re-meshes it.
+     * @param slot  the slot index
+     */
     pub(crate) fn markDirty(mut self, slot : i32) : void {
         self.lights.ldirty[slot] = 1;
     }
 
-    /** Flag a chunk dirty, but only if it is currently loaded at (cx, cz). */
+    /**
+     * Flag a chunk dirty, but only if it is currently loaded at (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
     pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
-        let slot : i32 = self.slotFor(cx, cz);
+        const slot : i32 = self.slotFor(cx, cz);
         if (self.owns(slot, cx, cz)) {
             self.lights.ldirty[slot] = 1;
         }
     }
 
-    /** Consume a slot's dirty flag: return whether it was set, clearing it. */
+    /**
+     * Consume a slot's dirty flag: return whether it was set, clearing it.
+     * @param slot  the slot index
+     * @return whether the flag was set
+     */
     pub(crate) fn takeDirty(mut self, slot : i32) : bool {
         if (self.lights.ldirty[slot] == 1) {
             self.lights.ldirty[slot] = 0;
@@ -443,6 +535,7 @@ class LightEngine : LightSample, LightBaker {
      * hemispherical sky access, and the sun shadows too — the round-robin would
      * reach the slot eventually, but "eventually" is a second, and a block the
      * player just placed should cast its shadow as it lands.
+     * @param slot  the slot index
      */
     pub(crate) fn flagSkyAO(mut self, slot : i32) : void {
         self.lights.skyAOdirty[slot] = 1;
@@ -462,14 +555,17 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 0;
         }
-        return nibGet(p, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return nibGet(p, off);
     }
 
     /**
@@ -496,16 +592,18 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return;
         }
-        let lx : i32 = cell.x - cx * s;
-        let lz : i32 = cell.z - cz * s;
-        let off : i64 = self.store.voxIdx(slot, lx, cell.y, lz) as i64;
+
+        const lx : i32 = cell.x - cx * s;
+        const lz : i32 = cell.z - cz * s;
+        const off : i64 = self.store.voxIdx(slot, lx, cell.y, lz) as i64;
         if (nibGet(p, off) != v) {
             nibPut(p, off, v);
             self.lights.ldirty[slot] = 1;
@@ -524,7 +622,11 @@ class LightEngine : LightSample, LightBaker {
         }
     }
 
-    /** Block light per channel (0..15 each) at a world voxel; 0 if unloaded. */
+    /**
+     * Block light per channel (0..15 each) at a world voxel; 0 if unloaded.
+     * @param cell  the world voxel
+     * @return the red, green and blue block-light levels
+     */
     fn blGetW(self, cell : IVec3) : ChannelLevels {
         return ChannelLevels {
             r: self.lvGetW(self.lights.vols.red(), cell),
@@ -533,17 +635,30 @@ class LightEngine : LightSample, LightBaker {
         };
     }
 
-    /** Set one channel's block light; flags the slot for re-mesh if changed. */
+    /**
+     * Set one channel's block light; flags the slot for re-mesh if changed.
+     * @param p     the channel's plane
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
     fn blSetCh(mut self, p : Nibble, cell : IVec3, v : i32) : void {
         self.lvSetW(p, cell, v);
     }
 
-    /** Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range. */
+    /**
+     * Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range.
+     * @param cell  the world voxel
+     * @return the sky-light level 0..15
+     */
     fn skGetW(self, cell : IVec3) : i32 {
         return self.lvGetW(self.lights.vols.sky(), cell);
     }
 
-    /** Set sky light at a world voxel; flags the slot for re-mesh if changed. */
+    /**
+     * Set sky light at a world voxel; flags the slot for re-mesh if changed.
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
     fn skSetW(mut self, cell : IVec3, v : i32) : void {
         self.lvSetW(self.lights.vols.sky(), cell, v);
     }
@@ -555,28 +670,29 @@ class LightEngine : LightSample, LightBaker {
      * @param wz  world z
      */
     fn skyColumn(mut self, wx : i32, wz : i32) : void {
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(wx, s);
-        let cz : i32 = self.floorDiv(wz, s);
-        let slot : i32 = self.slotFor(cx, cz);
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return;
         }
-        let lx : i32 = wx - cx * s;
-        let lz : i32 = wz - cz * s;
+
+        const lx : i32 = wx - cx * s;
+        const lz : i32 = wz - cz * s;
         let lit : i32 = 15;
         let y : i32 = World::HEIGHT - 1;
         while (y >= 0) {
             if (lit > 0 && isOpaque(self.store.getVox(slot, ivec3(lx, y, lz)))) {
                 lit = 0;
             }
-            let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
-            let sky : Nibble = self.lights.vols.sky();
+            const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+            const sky : Nibble = self.lights.vols.sky();
             if (nibGet(sky, off) != lit) {
                 nibPut(sky, off, lit);
                 self.lights.ldirty[slot] = 1;
             }
-            y = y - 1;
+            y--;
         }
     }
 
@@ -589,35 +705,39 @@ class LightEngine : LightSample, LightBaker {
      * @param cz    the chunk z coordinate
      */
     pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
-        let s : i32 = World::CHUNK_SIZE;
+        const s : i32 = World::CHUNK_SIZE;
         let lz : i32 = 0;
         while (lz < s) {
             let lx : i32 = 0;
             while (lx < s) {
                 self.skyColumn(cx * s + lx, cz * s + lz);
-                lx = lx + 1;
+                lx++;
             }
-            lz = lz + 1;
+            lz++;
         }
+
         self.lights.lqn = 0;
         let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
+
         let bz : i32 = 0;
         while (bz < s) {
             let bx : i32 = 0;
             while (bx < s) {
                 let by : i32 = 0;
                 while (by <= top) {
-                    if (nibGet(self.lights.vols.sky(), self.store.voxIdx(slot, bx, by, bz) as i64) == 15) {
+                    const sky : Nibble = self.lights.vols.sky();
+                    const off : i64 = self.store.voxIdx(slot, bx, by, bz) as i64;
+                    if (nibGet(sky, off) == 15) {
                         self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
                     }
-                    by = by + 1;
+                    by++;
                 }
-                bx = bx + 1;
+                bx++;
             }
-            bz = bz + 1;
+            bz++;
         }
         self.floodAddCh(self.lights.vols.sky());
     }
@@ -646,9 +766,9 @@ class LightEngine : LightSample, LightBaker {
      */
     fn floodAddCh(mut self, p : Nibble) : void {
         while (self.lights.lqn > 0) {
-            self.lights.lqn = self.lights.lqn - 1;
-            let entry : IVec3 = self.lights.lq[self.lights.lqn];
-            let lv : i32 = self.lvGetW(p, entry);
+            self.lights.lqn--;
+            const entry : IVec3 = self.lights.lq[self.lights.lqn];
+            const lv : i32 = self.lvGetW(p, entry);
             if (lv > 1) {
                 self.trySpreadCh(p, ivec3(entry.x + 1, entry.y, entry.z), lv);
                 self.trySpreadCh(p, ivec3(entry.x - 1, entry.y, entry.z), lv);
@@ -669,7 +789,7 @@ class LightEngine : LightSample, LightBaker {
      * @param lvl        the level being removed from the parent cell
      */
     fn tryRemoveCh(mut self, p : Nibble, neighbour : IVec3, lvl : i32) : void {
-        let nl : i32 = self.lvGetW(p, neighbour);
+        const nl : i32 = self.lvGetW(p, neighbour);
         if (nl != 0) {
             if (nl < lvl) {
                 self.lvSetW(p, neighbour, 0);
@@ -687,10 +807,10 @@ class LightEngine : LightSample, LightBaker {
      */
     fn floodRemoveCh(mut self, p : Nibble) : void {
         while (self.lights.rqn > 0) {
-            self.lights.rqn = self.lights.rqn - 1;
-            let entry : LightRemoval = self.lights.rq[self.lights.rqn];
-            let ey : i32 = entry.y as i32;
-            let lvl : i32 = entry.lvl as i32;
+            self.lights.rqn--;
+            const entry : LightRemoval = self.lights.rq[self.lights.rqn];
+            const ey : i32 = entry.y as i32;
+            const lvl : i32 = entry.lvl as i32;
             self.tryRemoveCh(p, ivec3(entry.x + 1, ey, entry.z), lvl);
             self.tryRemoveCh(p, ivec3(entry.x - 1, ey, entry.z), lvl);
             self.tryRemoveCh(p, ivec3(entry.x, ey + 1, entry.z), lvl);
@@ -700,24 +820,38 @@ class LightEngine : LightSample, LightBaker {
         }
     }
 
-    /** Push a cell onto the (shared block/sky) light add-stack; dropped if full. */
+    /**
+     * Push a cell onto the (shared block/sky) light add-stack; dropped if full.
+     * @param cell  the world voxel to push
+     */
     fn lpush(mut self, cell : IVec3) : void {
         if (self.lights.lqn >= Light::QUEUE_CAP) {
             return;
         }
-        self.lights.lq[self.lights.lqn] = IVec3 { x: cell.x, y: cell.y, z: cell.z };
-        self.lights.lqn = self.lights.lqn + 1;
+        self.lights.lq[self.lights.lqn] = IVec3 {
+            x: cell.x,
+            y: cell.y,
+            z: cell.z,
+        };
+        self.lights.lqn++;
     }
 
-    /** Push a cell plus its old level onto the light removal-stack; dropped if full. */
+    /**
+     * Push a cell plus its old level onto the light removal-stack; dropped if full.
+     * @param cell  the world voxel to push
+     * @param lvl   the level it held before removal
+     */
     fn rpush(mut self, cell : IVec3, lvl : i32) : void {
         if (self.lights.rqn >= Light::QUEUE_CAP) {
             return;
         }
         self.lights.rq[self.lights.rqn] = LightRemoval {
-            x: cell.x, z: cell.z, y: cell.y as i16, lvl: lvl as i8
+            x: cell.x,
+            z: cell.z,
+            y: cell.y as i16,
+            lvl: lvl as i8,
         };
-        self.lights.rqn = self.lights.rqn + 1;
+        self.lights.rqn++;
     }
 
     /**
@@ -739,10 +873,12 @@ class LightEngine : LightSample, LightBaker {
         self.blSetCh(p, cell, 0);
         self.rpush(cell, had + 1);
         self.floodRemoveCh(p);
+
         if (emit > 0) {
             self.blSetCh(p, cell, emit);
             self.lpush(cell);
         }
+
         self.lpush(ivec3(cell.x + 1, cell.y, cell.z));
         self.lpush(ivec3(cell.x - 1, cell.y, cell.z));
         self.lpush(ivec3(cell.x, cell.y + 1, cell.z));
@@ -761,37 +897,39 @@ class LightEngine : LightSample, LightBaker {
      * @param cell  the edited world voxel
      */
     pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
-        let wx : i32 = cell.x;
-        let wy : i32 = cell.y;
-        let wz : i32 = cell.z;
+        const wx : i32 = cell.x;
+        const wy : i32 = cell.y;
+        const wz : i32 = cell.z;
+
         // 1..3. Block light, once per channel: clear what ran through the cell,
         // re-seed this block's own emission, then let the neighbours flow back
         // in. The three channels share the flood stacks, so they run in turn.
-        let cur : ChannelLevels = self.blGetW(cell);
-        let emit : Emission = emissionOf(self.worldGet(ivec3(wx, wy, wz)));
+        const cur : ChannelLevels = self.blGetW(cell);
+        const emit : Emission = emissionOf(self.worldGet(ivec3(wx, wy, wz)));
         self.refloodChannel(self.lights.vols.red(), cell, cur.r, emit.r);
         self.refloodChannel(self.lights.vols.green(), cell, cur.g, emit.g);
         self.refloodChannel(self.lights.vols.blue(), cell, cur.b, emit.b);
+
         // 4. Sky light: reconcile the edited column's vertical exposure — seed a
         // REMOVAL where a cell darkened and an ADD where it brightened — then
         // flood both, so sky light recedes as well as fills.
         self.lights.lqn = 0;
         self.lights.rqn = 0;
-        let scx : i32 = self.floorDiv(wx, World::CHUNK_SIZE);
-        let scz : i32 = self.floorDiv(wz, World::CHUNK_SIZE);
-        let sslot : i32 = self.slotFor(scx, scz);
+        const scx : i32 = self.floorDiv(wx, World::CHUNK_SIZE);
+        const scz : i32 = self.floorDiv(wz, World::CHUNK_SIZE);
+        const sslot : i32 = self.slotFor(scx, scz);
         if (self.owns(sslot, scx, scz)) {
-            let slx : i32 = wx - scx * World::CHUNK_SIZE;
-            let slz : i32 = wz - scz * World::CHUNK_SIZE;
+            const slx : i32 = wx - scx * World::CHUNK_SIZE;
+            const slz : i32 = wz - scz * World::CHUNK_SIZE;
             let lit : i32 = 15;
             let cy : i32 = World::HEIGHT - 1;
             while (cy >= 0) {
                 if (lit > 0 && isOpaque(self.store.getVox(sslot, ivec3(slx, cy, slz)))) {
                     lit = 0;
                 }
-                let coff : i64 = self.store.voxIdx(sslot, slx, cy, slz) as i64;
-                let sky : Nibble = self.lights.vols.sky();
-                let oldv : i32 = nibGet(sky, coff);
+                const coff : i64 = self.store.voxIdx(sslot, slx, cy, slz) as i64;
+                const sky : Nibble = self.lights.vols.sky();
+                const oldv : i32 = nibGet(sky, coff);
                 if (oldv > lit) {
                     nibPut(sky, coff, lit);
                     self.lights.ldirty[sslot] = 1;
@@ -801,10 +939,11 @@ class LightEngine : LightSample, LightBaker {
                     self.lights.ldirty[sslot] = 1;
                     self.lpush(ivec3(wx, cy, wz));
                 }
-                cy = cy - 1;
+                cy--;
             }
         }
         self.floodRemoveCh(self.lights.vols.sky());
+
         // Also seed the add from the edited cell + its 6 neighbours, so the
         // sideways sky gradient flows into a newly opened space even when the
         // edit doesn't change the column.
@@ -816,19 +955,28 @@ class LightEngine : LightSample, LightBaker {
         self.lpush(ivec3(wx, wy, wz + 1));
         self.lpush(ivec3(wx, wy, wz - 1));
         self.floodAddCh(self.lights.vols.sky());
+
         // A border face is baked from the NEIGHBOUR chunk's light, which didn't
         // change — re-flag the edited chunk plus any border neighbour so their
         // shared faces re-bake with the final light.
-        let ecs : i32 = World::CHUNK_SIZE;
-        let ecx : i32 = self.floorDiv(wx, ecs);
-        let ecz : i32 = self.floorDiv(wz, ecs);
-        let elx : i32 = wx - ecx * ecs;
-        let elz : i32 = wz - ecz * ecs;
+        const ecs : i32 = World::CHUNK_SIZE;
+        const ecx : i32 = self.floorDiv(wx, ecs);
+        const ecz : i32 = self.floorDiv(wz, ecs);
+        const elx : i32 = wx - ecx * ecs;
+        const elz : i32 = wz - ecz * ecs;
         self.markDirtyAt(ecx, ecz);
-        if (elx == 0) { self.markDirtyAt(ecx - 1, ecz); }
-        if (elx == ecs - 1) { self.markDirtyAt(ecx + 1, ecz); }
-        if (elz == 0) { self.markDirtyAt(ecx, ecz - 1); }
-        if (elz == ecs - 1) { self.markDirtyAt(ecx, ecz + 1); }
+        if (elx == 0) {
+            self.markDirtyAt(ecx - 1, ecz);
+        }
+        if (elx == ecs - 1) {
+            self.markDirtyAt(ecx + 1, ecz);
+        }
+        if (elz == 0) {
+            self.markDirtyAt(ecx, ecz - 1);
+        }
+        if (elz == ecs - 1) {
+            self.markDirtyAt(ecx, ecz + 1);
+        }
     }
 
     /**
@@ -838,20 +986,22 @@ class LightEngine : LightSample, LightBaker {
      * @param slot  the slot index
      */
     pub(crate) fn clearLight(mut self, slot : i32) : void {
-        let s : i32 = World::CHUNK_SIZE;
-        let n : i32 = s * s * World::HEIGHT;
-        let base : i64 = (slot as i64) * (n as i64);
+        const s : i32 = World::CHUNK_SIZE;
+        const n : i32 = s * s * World::HEIGHT;
+        const base : i64 = (slot as i64) * (n as i64);
         let i : i32 = 0;
         while (i < n) {
-            Mem::putByte(self.lights.vols.lightRG, base + (i as i64), 0);
-            Mem::putByte(self.lights.vols.lightBS, base + (i as i64), 0);
-            Mem::putByte(self.lights.vols.sunlit, base + (i as i64), 255);
-            Mem::putByte(self.lights.vols.skyaccess, base + (i as i64), 255);
-            Mem::putByte(self.lights.vols.bnR, base + (i as i64), 128);
-            Mem::putByte(self.lights.vols.bnG, base + (i as i64), 128);
-            Mem::putByte(self.lights.vols.bnB, base + (i as i64), 128);
-            i = i + 1;
+            const at : i64 = base + (i as i64);
+            Mem::putByte(self.lights.vols.lightRG, at, 0);
+            Mem::putByte(self.lights.vols.lightBS, at, 0);
+            Mem::putByte(self.lights.vols.sunlit, at, 255);
+            Mem::putByte(self.lights.vols.skyaccess, at, 255);
+            Mem::putByte(self.lights.vols.bnR, at, 128);
+            Mem::putByte(self.lights.vols.bnG, at, 128);
+            Mem::putByte(self.lights.vols.bnB, at, 128);
+            i++;
         }
+
         self.lights.skyAOdirty[slot] = 1;
         self.lights.sunDirty[slot] = 1;
     }
@@ -868,14 +1018,17 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 255;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 255;
         }
-        return Mem::byteAt(self.lights.vols.sunlit, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return Mem::byteAt(self.lights.vols.sunlit, off);
     }
 
     /**
@@ -895,32 +1048,34 @@ class LightEngine : LightSample, LightBaker {
      * @return the surviving fraction of sunlight, 0..1
      */
     fn sunRayTransmit(self, cell : IVec3, dir : Vec3, ceil : i32) : f64 {
-        let s : i32 = World::CHUNK_SIZE;
-        let ox : f64 = (cell.x as f64) + 0.5;
-        let oy : f64 = (cell.y as f64) + 0.5;
-        let oz : f64 = (cell.z as f64) + 0.5;
+        const s : i32 = World::CHUNK_SIZE;
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
         let through : f64 = 1.0;
         let t : f64 = 0.5;
+
         // The chunk the last step landed in, and what it took to find it. A step
         // is six tenths of a block and a chunk is sixteen across, so twenty-odd
         // consecutive steps share a chunk: asking the ring which slot holds it
         // once per chunk instead of once per step is the same answer, found far
         // less often. An impossible column to start, so the first step resolves.
-        let ccx : i32 = 0 - 1000000;
-        let ccz : i32 = 0 - 1000000;
+        let ccx : i32 = -1000000;
+        let ccz : i32 = -1000000;
         let cslot : i32 = 0;
         let cowns : bool = false;
         let ctop : i32 = 0;
+
         while (t < Daylight::SUN_SHADOW_REACH) {
-            let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
                 return through;
             }
             if (cy >= 0 && cy < World::HEIGHT) {
-                let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
-                let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
-                let bx : i32 = self.floorDiv(cx, s);
-                let bz : i32 = self.floorDiv(cz, s);
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const bx : i32 = self.floorDiv(cx, s);
+                const bz : i32 = self.floorDiv(cz, s);
                 if (bx != ccx || bz != ccz) {
                     ccx = bx;
                     ccz = bz;
@@ -933,16 +1088,17 @@ class LightEngine : LightSample, LightBaker {
                 // ever written up there. Air passes the whole ray, so neither
                 // case is worth a fetch.
                 if (cowns && cy <= ctop) {
-                    let tr : f64 = lightTransmit(self.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s)));
+                    const hit : Block = self.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s));
+                    const tr : f64 = lightTransmit(hit);
                     if (tr < 1.0) {
-                        through = through * tr;
+                        through *= tr;
                         if (through < 0.02) {
                             return 0.0;
                         }
                     }
                 }
             }
-            t = t + 0.6;
+            t += 0.6;
         }
         return through;
     }
@@ -966,14 +1122,16 @@ class LightEngine : LightSample, LightBaker {
         if (n == 1) {
             return (total * 255.0).floorToInt() as i32;
         }
+
         let ux : f64 = 0.0;
         let uy : f64 = 1.0;
         let uz : f64 = 0.0;
-        if (dir.y > 0.9 || dir.y < 0.0 - 0.9) {
+        if (dir.y > 0.9 || dir.y < -0.9) {
             ux = 1.0;
             uy = 0.0;
             uz = 0.0;
         }
+
         let tx : f64 = uy * dir.z - uz * dir.y;
         let ty : f64 = uz * dir.x - ux * dir.z;
         let tz : f64 = ux * dir.y - uy * dir.x;
@@ -981,12 +1139,14 @@ class LightEngine : LightSample, LightBaker {
         if (tl < 0.000001) {
             tl = 0.000001;
         }
-        tx = tx / tl;
-        ty = ty / tl;
-        tz = tz / tl;
-        let bx : f64 = dir.y * tz - dir.z * ty;
-        let by : f64 = dir.z * tx - dir.x * tz;
-        let bz : f64 = dir.x * ty - dir.y * tx;
+        tx /= tl;
+        ty /= tl;
+        tz /= tl;
+
+        const bx : f64 = dir.y * tz - dir.z * ty;
+        const by : f64 = dir.z * tx - dir.x * tz;
+        const bz : f64 = dir.x * ty - dir.y * tx;
+
         // The disc is sampled over its AREA, on a golden-angle spiral, and the
         // SAME pattern in every cell. It used to be a ring, rotated by a hash of
         // the cell — which decorrelates neighbours, and with six rays over a
@@ -994,24 +1154,25 @@ class LightEngine : LightSample, LightBaker {
         // cells disagree by a sixth for no reason in the world. One fixed
         // pattern makes the penumbra a gradient again, and an even spread over
         // the disc weights the middle of the sun like the sun does.
-        let r : f64 = Daylight::SUN_DISC_ANGLE;
+        const r : f64 = Daylight::SUN_DISC_ANGLE;
         let cnt : i32 = 1;
         let i : i32 = 1;
         while (i < n) {
-            let u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
-            let ang : f64 = (i as f64) * 2.399963;
-            let ox : f64 = ang.cos() * r * u;
-            let oy : f64 = ang.sin() * r * u;
-            let dx : f64 = dir.x + tx * ox + bx * oy;
-            let dy : f64 = dir.y + ty * ox + by * oy;
-            let dz : f64 = dir.z + tz * ox + bz * oy;
+            const u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
+            const ang : f64 = (i as f64) * 2.399963;
+            const ox : f64 = ang.cos() * r * u;
+            const oy : f64 = ang.sin() * r * u;
+            const dx : f64 = dir.x + tx * ox + bx * oy;
+            const dy : f64 = dir.y + ty * ox + by * oy;
+            const dz : f64 = dir.z + tz * ox + bz * oy;
             let dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
             if (dl < 0.000001) {
                 dl = 0.000001;
             }
-            total = total + self.sunRayTransmit(cell, vec3(dx / dl, dy / dl, dz / dl), ceil);
-            cnt = cnt + 1;
-            i = i + 1;
+            const ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
+            total += self.sunRayTransmit(cell, ray, ceil);
+            cnt++;
+            i++;
         }
         return (total * 255.0 / (cnt as f64)).floorToInt() as i32;
     }
@@ -1033,19 +1194,30 @@ class LightEngine : LightSample, LightBaker {
      * @param lx    local x (the skirt makes -1 and CHUNK_SIZE readable)
      * @param y     the world y
      * @param lz    local z
+     * @param wx    the world x of the same cell
+     * @param wz    the world z of the same cell
      * @return whether a block sits within the cell's 3×3×3 neighbourhood
      */
-    fn nearSolid(self, slot : i32, lx : i32, y : i32, lz : i32, wx : i32, wz : i32) : bool {
+    fn nearSolid(
+        self,
+        slot : i32,
+        lx : i32,
+        y : i32,
+        lz : i32,
+        wx : i32,
+        wz : i32
+    ) : bool {
         // Inside the chunk the neighbours are this slot's own cells; on its
         // border one step crosses into another chunk, and only then is the
         // slot lookup paid.
-        let s : i32 = World::CHUNK_SIZE;
-        let inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
-        let dz : i32 = 0 - 1;
+        const s : i32 = World::CHUNK_SIZE;
+        const inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
+
+        let dz : i32 = -1;
         while (dz <= 1) {
-            let dx : i32 = 0 - 1;
+            let dx : i32 = -1;
             while (dx <= 1) {
-                let dy : i32 = 0 - 1;
+                let dy : i32 = -1;
                 while (dy <= 1) {
                     let b : Block = Block::Air;
                     if (inner) {
@@ -1056,11 +1228,11 @@ class LightEngine : LightSample, LightBaker {
                     if (b != Block::Air) {
                         return true;
                     }
-                    dy = dy + 1;
+                    dy++;
                 }
-                dx = dx + 1;
+                dx++;
             }
-            dz = dz + 1;
+            dz++;
         }
         return false;
     }
@@ -1081,13 +1253,23 @@ class LightEngine : LightSample, LightBaker {
      * @param ceil  tallest terrain Y over loaded chunks
      * @param snap  write the measurement outright rather than gliding toward it
      */
-    fn computeChunkSun(mut self, slot : i32, cx : i32, cz : i32, sun : Vec3, ceil : i32, snap : bool) : void {
+    fn computeChunkSun(
+        mut self,
+        slot : i32,
+        cx : i32,
+        cz : i32,
+        sun : Vec3,
+        ceil : i32,
+        snap : bool
+    ) : void {
         self.markSunBaked(slot, sun);
-        let s : i32 = World::CHUNK_SIZE;
+
+        const s : i32 = World::CHUNK_SIZE;
         let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
+
         let lz : i32 = 0;
         while (lz < s) {
             let lx : i32 = 0;
@@ -1095,24 +1277,29 @@ class LightEngine : LightSample, LightBaker {
                 // What the cloud deck leaves of the sun over this column. Once
                 // per column, not per cell: the deck is a hundred blocks up, so
                 // it shades a whole column alike.
-                let cloudT : f64 = self.clouds.transmit((cx * s + lx) as f64, (cz * s + lz) as f64);
+                const cloudT : f64 = self.clouds.transmit(
+                    (cx * s + lx) as f64,
+                    (cz * s + lz) as f64
+                );
                 let y : i32 = 0;
                 while (y <= top) {
-                    let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+                    const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
                         && nibGet(self.lights.vols.sky(), off) > 0
                         && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
-                        let v : i32 = ((self.sunRaySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil) as f64) * cloudT).floorToInt() as i32;
+                        const cell : IVec3 = ivec3(cx * s + lx, y, cz * s + lz);
+                        const soft : i32 = self.sunRaySoft(cell, sun, ceil);
+                        let v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
                         if (!snap) {
                             v = self.glideTo(Mem::byteAt(self.lights.vols.sunlit, off), v);
                         }
                         Mem::putByte(self.lights.vols.sunlit, off, v);
                     }
-                    y = y + 1;
+                    y++;
                 }
-                lx = lx + 1;
+                lx++;
             }
-            lz = lz + 1;
+            lz++;
         }
     }
 
@@ -1122,7 +1309,7 @@ class LightEngine : LightSample, LightBaker {
      * @param sun   the light direction the bake used (unit)
      */
     fn markSunBaked(mut self, slot : i32, sun : Vec3) : void {
-        let o : i64 = (slot as i64) * 3;
+        const o : i64 = (slot as i64) * 3;
         putFloatOf(self.lights.sunBaked, o, sun.x);
         putFloatOf(self.lights.sunBaked, o + 1, sun.y);
         putFloatOf(self.lights.sunBaked, o + 2, sun.z);
@@ -1140,8 +1327,8 @@ class LightEngine : LightSample, LightBaker {
      * @return true when the slot is worth baking again
      */
     fn sunMovedFor(self, slot : i32, sun : Vec3) : bool {
-        let o : i64 = (slot as i64) * 3;
-        let dot : f64 = floatOf(self.lights.sunBaked, o) * sun.x
+        const o : i64 = (slot as i64) * 3;
+        const dot : f64 = floatOf(self.lights.sunBaked, o) * sun.x
             + floatOf(self.lights.sunBaked, o + 1) * sun.y
             + floatOf(self.lights.sunBaked, o + 2) * sun.z;
         return dot < Daylight::SUN_STILL_COS;
@@ -1157,16 +1344,17 @@ class LightEngine : LightSample, LightBaker {
      * @return where the cell moves to this sweep
      */
     fn glideTo(self, old : i32, v : i32) : i32 {
-        let dv : i32 = v - old;
+        const dv : i32 = v - old;
         if (dv == 0) {
             return v;
         }
+
         let stepv : i32 = ((dv as f64) * Daylight::SUN_GLIDE).floorToInt() as i32;
         if (dv > 0 && stepv < 1) {
             stepv = 1;
         }
-        if (dv < 0 && stepv > 0 - 1) {
-            stepv = 0 - 1;
+        if (dv < 0 && stepv > -1) {
+            stepv = -1;
         }
         return old + stepv;
     }
@@ -1178,12 +1366,10 @@ class LightEngine : LightSample, LightBaker {
      */
     fn terrainCeil(self) : i32 {
         let ceil : i32 = 0;
-        let j : i32 = 0;
-        while (j < World::SPAN * World::SPAN) {
+        for (j of 0..World::SPAN * World::SPAN) {
             if (self.cols.loaded[j] == 1 && self.store.faceTop(j) > ceil) {
                 ceil = self.store.faceTop(j);
             }
-            j = j + 1;
         }
         return ceil;
     }
@@ -1197,12 +1383,10 @@ class LightEngine : LightSample, LightBaker {
      */
     fn dirtyCount(self, flags : i8[]) : i32 {
         let n : i32 = 0;
-        let j : i32 = 0;
-        while (j < World::SPAN * World::SPAN) {
+        for (j of 0..World::SPAN * World::SPAN) {
             if (self.cols.loaded[j] == 1 && flags[j] == 1) {
-                n = n + 1;
+                n++;
             }
-            j = j + 1;
         }
         return n;
     }
@@ -1217,14 +1401,21 @@ class LightEngine : LightSample, LightBaker {
      * @param ceil    tallest terrain Y over loaded chunks
      */
     pub(file) fn bakeDirtySun(mut self, first : i32, stride : i32, sun : Vec3, ceil : i32) : void {
-        let slots : i32 = World::SPAN * World::SPAN;
+        const slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
             if (self.cols.loaded[d] == 1 && self.lights.sunDirty[d] == 1) {
-                self.computeChunkSun(d, self.cols.cxs[d], self.cols.czs[d], sun, ceil, true);
+                self.computeChunkSun(
+                    d,
+                    self.cols.cxs[d],
+                    self.cols.czs[d],
+                    sun,
+                    ceil,
+                    true
+                );
                 self.lights.sunDirty[d] = 0;
             }
-            d = d + stride;
+            d += stride;
         }
     }
 
@@ -1251,17 +1442,19 @@ class LightEngine : LightSample, LightBaker {
      * @param budget   max already-baked chunks to refresh this call
      */
     fn stepSunShadows(mut self, dayTime : f64, budget : i32) : void {
-        let body : SkyBodyLight = activeBody(dayTime);
+        const body : SkyBodyLight = activeBody(dayTime);
+
         // Nothing is casting anything worth baking — the handover at the horizon.
         // The maps keep whatever they last held, which is what the light they are
         // about is doing too.
         if (body.strength < 0.002) {
             return;
         }
-        let sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
-        let slots : i32 = World::SPAN * World::SPAN;
-        let ceil : i32 = self.terrainCeil();
-        let fresh : i32 = self.dirtyCount(self.lights.sunDirty);
+
+        const sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = self.terrainCeil();
+        const fresh : i32 = self.dirtyCount(self.lights.sunDirty);
         if (fresh > SUN_BAKE_WORKERS) {
             // A whole ring at once — the start of a run, or a teleport — is about
             // a second of rays. Done on this one thread, that second is exactly
@@ -1280,30 +1473,39 @@ class LightEngine : LightSample, LightBaker {
             }
             self.bakeDirtySun(0, SUN_BAKE_WORKERS, sun, ceil);
             for (i of 0..7) {
-                let r : i32 = crew[i].join();
+                const r : i32 = crew[i].join();
             }
         } else if (fresh > 0) {
             // A chunk or two walked into: less work than starting the threads
             // that would share it.
             self.bakeDirtySun(0, 1, sun, ceil);
         }
+
         // A ring that just filled has already cost a full bake this call; the
         // refresh can wait for the next one rather than doubling that spike.
         if (fresh >= budget) {
             return;
         }
+
         let done : i32 = 0;
         let guard : i32 = 0;
         while (done < budget && guard < slots) {
-            let slot : i32 = self.lights.sunCursor;
-            self.lights.sunCursor = self.lights.sunCursor + 1;
+            const slot : i32 = self.lights.sunCursor;
+            self.lights.sunCursor++;
             if (self.lights.sunCursor >= slots) {
                 self.lights.sunCursor = 0;
             }
-            guard = guard + 1;
+            guard++;
             if (self.cols.loaded[slot] == 1 && self.sunMovedFor(slot, sun)) {
-                self.computeChunkSun(slot, self.cols.cxs[slot], self.cols.czs[slot], sun, ceil, false);
-                done = done + 1;
+                self.computeChunkSun(
+                    slot,
+                    self.cols.cxs[slot],
+                    self.cols.czs[slot],
+                    sun,
+                    ceil,
+                    false
+                );
+                done++;
             }
         }
     }
@@ -1320,14 +1522,17 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 255;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 255;
         }
-        return Mem::byteAt(self.lights.vols.skyaccess, self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64);
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return Mem::byteAt(self.lights.vols.skyaccess, off);
     }
 
     /**
@@ -1341,14 +1546,23 @@ class LightEngine : LightSample, LightBaker {
      */
     fn cellSample(self, cell : IVec3) : CornerSample {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
         }
         return self.cellIn(slot, cell.x - cx * s, cell.y, cell.z - cz * s);
     }
@@ -1363,9 +1577,14 @@ class LightEngine : LightSample, LightBaker {
      */
     fn cellIn(self, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
         if (y < 0 || y >= World::HEIGHT) {
-            return CornerSample { sun: 255, sky: 255, bounce: 0x808080 };
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
         }
-        let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+
+        const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
         return CornerSample {
             sun: Mem::byteAt(self.lights.vols.sunlit, off),
             sky: Mem::byteAt(self.lights.vols.skyaccess, off),
@@ -1388,18 +1607,27 @@ class LightEngine : LightSample, LightBaker {
      *         the chunk is not loaded
      */
     fn cornerSlot(self, b : IVec3, c3 : IVec3) : CornerChunk {
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(b.x, s);
-        let cz : i32 = self.floorDiv(b.z, s);
-        let miss : CornerChunk = CornerChunk { slot: 0 - 1, ox: 0, oz: 0 };
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(b.x, s);
+        const cz : i32 = self.floorDiv(b.z, s);
+        const miss : CornerChunk = CornerChunk {
+            slot: -1,
+            ox: 0,
+            oz: 0,
+        };
         if (cx != self.floorDiv(c3.x, s) || cz != self.floorDiv(c3.z, s)) {
             return miss;
         }
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return miss;
         }
-        return CornerChunk { slot: slot, ox: cx * s, oz: cz * s };
+        return CornerChunk {
+            slot,
+            ox: cx * s,
+            oz: cz * s,
+        };
     }
 
     /**
@@ -1413,26 +1641,32 @@ class LightEngine : LightSample, LightBaker {
      * @return the averaged sample at that corner
      */
     fn cornerSample(self, probe : CornerProbe) : CornerSample {
-        let b : IVec3 = probe.base;
-        let t1 : IVec3 = probe.t1;
-        let t2 : IVec3 = probe.t2;
-        let c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
-        let c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
-        let c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+        const b : IVec3 = probe.base;
+        const t1 : IVec3 = probe.t1;
+        const t2 : IVec3 = probe.t2;
+        const c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
+        const c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
+        const c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+
         // Four cells one step apart are in one chunk unless the corner sits on
         // a border, and this is read at every corner of every quad in the
         // frame. Finding the chunk once, where they share it, is the same four
         // reads without four walks down the ring to reach them.
-        let cc : CornerChunk = self.cornerSlot(b, c3);
+        const cc : CornerChunk = self.cornerSlot(b, c3);
         if (cc.slot < 0) {
-            return blend4(self.cellSample(b), self.cellSample(c1),
-                self.cellSample(c2), self.cellSample(c3));
+            return blend4(
+                self.cellSample(b),
+                self.cellSample(c1),
+                self.cellSample(c2),
+                self.cellSample(c3)
+            );
         }
         return blend4(
             self.cellIn(cc.slot, b.x - cc.ox, b.y, b.z - cc.oz),
             self.cellIn(cc.slot, c1.x - cc.ox, c1.y, c1.z - cc.oz),
             self.cellIn(cc.slot, c2.x - cc.ox, c2.y, c2.z - cc.oz),
-            self.cellIn(cc.slot, c3.x - cc.ox, c3.y, c3.z - cc.oz));
+            self.cellIn(cc.slot, c3.x - cc.ox, c3.y, c3.z - cc.oz)
+        );
     }
 
     /**
@@ -1443,7 +1677,7 @@ class LightEngine : LightSample, LightBaker {
      * @return the packed byte (0..255, 128 = ×1.0)
      */
     fn bounceByte(self, ratio : f64, occ : f64) : i32 {
-        let f : f64 = 1.0 + (ratio - 1.0) * occ;
+        const f : f64 = 1.0 + (ratio - 1.0) * occ;
         let v : i32 = (f * 128.0).floorToInt() as i32;
         if (v < 0) {
             v = 0;
@@ -1464,15 +1698,19 @@ class LightEngine : LightSample, LightBaker {
         if (cell.y < 0 || cell.y >= World::HEIGHT) {
             return 0x808080;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(cell.x, s);
-        let cz : i32 = self.floorDiv(cell.z, s);
-        let slot : i32 = self.slotFor(cx, cz);
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 0x808080;
         }
-        let off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
-        return (Mem::byteAt(self.lights.vols.bnR, off) << 16) | (Mem::byteAt(self.lights.vols.bnG, off) << 8) | Mem::byteAt(self.lights.vols.bnB, off);
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return (Mem::byteAt(self.lights.vols.bnR, off) << 16)
+            | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
+            | Mem::byteAt(self.lights.vols.bnB, off);
     }
 
     /**
@@ -1487,33 +1725,34 @@ class LightEngine : LightSample, LightBaker {
      * @return the surviving sky fraction and the packed albedo that dimmed it (-1 if none)
      */
     fn skyHemiHit(self, cell : IVec3, dir : Vec3, ceil : i32) : HemiHit {
-        let ox : f64 = (cell.x as f64) + 0.5;
-        let oy : f64 = (cell.y as f64) + 0.5;
-        let oz : f64 = (cell.z as f64) + 0.5;
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
         let through : f64 = 1.0;
-        let col : i32 = 0 - 1;
+        let col : i32 = -1;
         let t : f64 = 0.6;
+
         while (t < Light::SKY_AO_REACH) {
-            let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
                 return HemiHit { open: through, albedo: col };
             }
             if (cy >= 0 && cy < World::HEIGHT) {
-                let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
-                let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
-                let hb : Block = self.worldGet(ivec3(cx, cy, cz));
-                let tr : f64 = lightTransmit(hb);
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const hb : Block = self.worldGet(ivec3(cx, cy, cz));
+                const tr : f64 = lightTransmit(hb);
                 if (tr < 1.0) {
                     if (col < 0) {
                         col = albedoFor(hb);
                     }
-                    through = through * tr;
+                    through *= tr;
                     if (through < 0.02) {
                         return HemiHit { open: 0.0, albedo: col };
                     }
                 }
             }
-            t = t + 0.7;
+            t += 0.7;
         }
         return HemiHit { open: through, albedo: col };
     }
@@ -1528,24 +1767,25 @@ class LightEngine : LightSample, LightBaker {
      * @param ceil  tallest terrain Y over loaded chunks
      */
     fn computeChunkSkyAO(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
-        let s : i32 = World::CHUNK_SIZE;
-        let m : i32 = Light::SKY_AO_SAMPLES;
+        const s : i32 = World::CHUNK_SIZE;
+        const m : i32 = Light::SKY_AO_SAMPLES;
         let top : i32 = self.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
+
         let lz : i32 = 0;
         while (lz < s) {
             let lx : i32 = 0;
             while (lx < s) {
                 let y : i32 = 0;
                 while (y <= top) {
-                    let off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+                    const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
                         && nibGet(self.lights.vols.sky(), off) > 0
                         && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
-                        let wx : i32 = cx * s + lx;
-                        let wz : i32 = cz * s + lz;
+                        const wx : i32 = cx * s + lx;
+                        const wz : i32 = cz * s + lz;
                         // A ray now comes back with a FRACTION of the sky rather
                         // than a yes or no, so the escaped share and the bounce
                         // weight are both sums of what each ray lost, not counts
@@ -1557,28 +1797,35 @@ class LightEngine : LightSample, LightBaker {
                         let ab : f64 = 0.0;
                         let r : i32 = 0;
                         while (r < m) {
-                            let dir : Vec3 = vec3(Mem::realOf(self.lights.rays.hemiX, r), Mem::realOf(self.lights.rays.hemiY, r), Mem::realOf(self.lights.rays.hemiZ, r));
-                            let hit : HemiHit = self.skyHemiHit(ivec3(wx, y, wz), dir, ceil);
-                            esc = esc + hit.open;
+                            const dir : Vec3 = vec3(
+                                Mem::realOf(self.lights.rays.hemiX, r),
+                                Mem::realOf(self.lights.rays.hemiY, r),
+                                Mem::realOf(self.lights.rays.hemiZ, r)
+                            );
+                            const hit : HemiHit = self.skyHemiHit(ivec3(wx, y, wz), dir, ceil);
+                            esc += hit.open;
                             if (hit.albedo >= 0) {
-                                let w : f64 = 1.0 - hit.open;
-                                ar = ar + w * (((hit.albedo >> 16) & 0xFF) as f64);
-                                ag = ag + w * (((hit.albedo >> 8) & 0xFF) as f64);
-                                ab = ab + w * ((hit.albedo & 0xFF) as f64);
-                                shut = shut + w;
+                                const w : f64 = 1.0 - hit.open;
+                                ar += w * (((hit.albedo >> 16) & 0xFF) as f64);
+                                ag += w * (((hit.albedo >> 8) & 0xFF) as f64);
+                                ab += w * ((hit.albedo & 0xFF) as f64);
+                                shut += w;
                             }
-                            r = r + 1;
+                            r++;
                         }
-                        Mem::putByte(self.lights.vols.skyaccess, off, (esc * 255.0 / (m as f64)).floorToInt() as i32);
+
+                        const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
+                        Mem::putByte(self.lights.vols.skyaccess, off, access);
+
                         if (Light::BOUNCE_ON && shut > 0.001) {
-                            let avr : f64 = ar / shut;
-                            let avg : f64 = ag / shut;
-                            let avb : f64 = ab / shut;
+                            const avr : f64 = ar / shut;
+                            const avg : f64 = ag / shut;
+                            const avb : f64 = ab / shut;
                             let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
                             if (lum < 1.0) {
                                 lum = 1.0;
                             }
-                            let occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
+                            const occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
                             Mem::putByte(self.lights.vols.bnR, off, self.bounceByte(avr / lum, occ));
                             Mem::putByte(self.lights.vols.bnG, off, self.bounceByte(avg / lum, occ));
                             Mem::putByte(self.lights.vols.bnB, off, self.bounceByte(avb / lum, occ));
@@ -1588,11 +1835,11 @@ class LightEngine : LightSample, LightBaker {
                             Mem::putByte(self.lights.vols.bnB, off, 128);
                         }
                     }
-                    y = y + 1;
+                    y++;
                 }
-                lx = lx + 1;
+                lx++;
             }
-            lz = lz + 1;
+            lz++;
         }
     }
 
@@ -1602,8 +1849,9 @@ class LightEngine : LightSample, LightBaker {
      * @param budget  max chunks to bake this call
      */
     fn stepSkyAO(mut self, budget : i32) : void {
-        let slots : i32 = World::SPAN * World::SPAN;
-        let ceil : i32 = self.terrainCeil();
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = self.terrainCeil();
+
         // A backlog this size is a ring that just filled, not a chunk the player
         // walked into, and dribbling it out `budget` at a time is the ambient
         // occlusion visibly settling in over the first seconds of a run. Drain it
@@ -1616,23 +1864,24 @@ class LightEngine : LightSample, LightBaker {
             }
             self.bakeDirtySkyAO(0, SUN_BAKE_WORKERS, ceil);
             for (i of 0..7) {
-                let r : i32 = crew[i].join();
+                const r : i32 = crew[i].join();
             }
             return;
         }
+
         let done : i32 = 0;
         let guard : i32 = 0;
         while (done < budget && guard < slots) {
-            let slot : i32 = self.lights.skyAOcursor;
-            self.lights.skyAOcursor = self.lights.skyAOcursor + 1;
+            const slot : i32 = self.lights.skyAOcursor;
+            self.lights.skyAOcursor++;
             if (self.lights.skyAOcursor >= slots) {
                 self.lights.skyAOcursor = 0;
             }
-            guard = guard + 1;
+            guard++;
             if (self.cols.loaded[slot] == 1 && self.lights.skyAOdirty[slot] == 1) {
                 self.computeChunkSkyAO(slot, self.cols.cxs[slot], self.cols.czs[slot], ceil);
                 self.lights.skyAOdirty[slot] = 0;
-                done = done + 1;
+                done++;
             }
         }
     }
@@ -1646,14 +1895,14 @@ class LightEngine : LightSample, LightBaker {
      * @param ceil    tallest terrain Y over loaded chunks
      */
     pub(file) fn bakeDirtySkyAO(mut self, first : i32, stride : i32, ceil : i32) : void {
-        let slots : i32 = World::SPAN * World::SPAN;
+        const slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
             if (self.cols.loaded[d] == 1 && self.lights.skyAOdirty[d] == 1) {
                 self.computeChunkSkyAO(d, self.cols.cxs[d], self.cols.czs[d], ceil);
                 self.lights.skyAOdirty[d] = 0;
             }
-            d = d + stride;
+            d += stride;
         }
     }
 
@@ -1685,14 +1934,21 @@ class LightEngine : LightSample, LightBaker {
         // them, so the deck is re-marched before the ring is: a shadow bake
         // reading last pass's cloud would put the dark patch where the cloud has
         // already left.
-        let body : SkyBodyLight = activeBody(self.moment.dayTime);
-        self.clouds.rebake(cloudFieldAt(self.moment.seconds),
-            vec3(body.dirX, body.dirY, body.dirZ), self.moment.camX, self.moment.camZ);
+        const body : SkyBodyLight = activeBody(self.moment.dayTime);
+        self.clouds.rebake(
+            cloudFieldAt(self.moment.seconds),
+            vec3(body.dirX, body.dirY, body.dirZ),
+            self.moment.camX,
+            self.moment.camZ
+        );
         self.stepSunShadows(self.moment.dayTime, Daylight::SUN_CHUNKS_PER_TICK);
         self.stepSkyAO(Light::SKY_AO_CHUNKS_PER_TICK);
     }
 
-    /** Publish the moment the background light thread bakes against. */
+    /**
+     * Publish the moment the background light thread bakes against.
+     * @param m  the hour, clock and camera column to bake for
+     */
     pub(crate) fn setMoment(mut self, m : LightMoment) : void {
         self.moment = m;
     }
@@ -1702,19 +1958,43 @@ class LightEngine : LightSample, LightBaker {
         self.lightRunning.set(false);
     }
 
-    /** Whether the background light thread should keep running. */
+    /**
+     * Whether the background light thread should keep running.
+     * @return false once `stopLight` has been called
+     */
     pub(crate) fn lightAlive(self) : bool {
         return self.lightRunning.get();
     }
 }
 
-/** Worker job: cast one share of the ring's never-shadowed slots. */
-fn sunBakeJob(leng : LightEngine, first : i32, stride : i32, sun : Vec3, ceil : i32) : i32 {
+/**
+ * Worker job: cast one share of the ring's never-shadowed slots.
+ * @param leng    the light engine whose ring is baked
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param sun     sun direction (unit)
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
+fn sunBakeJob(
+    leng : LightEngine,
+    first : i32,
+    stride : i32,
+    sun : Vec3,
+    ceil : i32
+) : i32 {
     leng.bakeDirtySun(first, stride, sun, ceil);
     return 0;
 }
 
-/** Worker job: bake one share of the ring's pending sky-access slots. */
+/**
+ * Worker job: bake one share of the ring's pending sky-access slots.
+ * @param leng    the light engine whose ring is baked
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
 fn skyAOBakeJob(leng : LightEngine, first : i32, stride : i32, ceil : i32) : i32 {
     leng.bakeDirtySkyAO(first, stride, ceil);
     return 0;

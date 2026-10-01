@@ -18,11 +18,13 @@ enum MobKind : i32 {
 /** Population, per-species hit points and speeds, the wander AI, melee, and the creeper. */
 class Mobs {
     static CAP : i32 = 32;
+
     static CHICKEN_HP : i32 = 4;
     static SHEEP_HP : i32 = 8;
     static COW_HP : i32 = 10;
     static CREEPER_HP : i32 = 12;
     static PIG_HP : i32 = 10;
+
     static PIG_SPEED : f64 = 0.030;
 
     // ── Creeper (hostile: approaches, charges, explodes) ────────
@@ -38,13 +40,16 @@ class Mobs {
     static WANDER_SPEED : f64 = 0.034;
     static SHEEP_SPEED : f64 = 0.030;
     static COW_SPEED : f64 = 0.024;
+
     static SPAWN_RADIUS : i32 = 30;  // blocks from player
     static SPAWN_MIN : i32 = 12;
+
     // Skip spawn directions whose dot with the camera forward exceeds this, so
     // creatures appear off-screen (≈ outside a 60° front cone), not in view.
     static SPAWN_FOV_DOT : f64 = 0.5;
     static DESPAWN_DIST : f64 = 56.0;
     static TARGET_COUNT : i32 = 18;
+
     static TURN_EVERY_MIN : i32 = 40;
     static TURN_EVERY_RAND : i32 = 110;
     static TURN_RATE : f64 = 0.10;             // radians/frame the heading eases toward target
@@ -53,6 +58,7 @@ class Mobs {
     static FLEE_SPEED : f64 = 0.085;
     static CHICKEN_GRAVITY_SCALE : f64 = 0.42; // chickens flutter down slowly
     static DEATH_FRAMES : i32 = 38;            // collapse animation length before removal
+
     static ATTACK_RANGE : f64 = 3.4;
     static ATTACK_DAMAGE : i32 = 4;
     static HURT_FLASH_FRAMES : i32 = 10;       // frames a struck mob glows red

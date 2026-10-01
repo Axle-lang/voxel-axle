@@ -67,5 +67,5 @@ fn uiScaleFor(frameH : i32) : UiScale {
     if (t < 1) {
         t = 1;
     }
-    return UiScale { k: k, text: t };
+    return UiScale { k, text: t };
 }

@@ -29,9 +29,20 @@
 
 use smalt::WorkerPool;
 use std::time::monotonicNanos;
-use crate::kernel::ksky::atmosphere::{ FogTable, FogTables, SkyDome, ViewRays, skyDomeFor };
-use crate::kernel::ksky::backdrop::{ SkyPaint, SkyPaintFrame, SKY_BANDS, drawCelestial };
-use crate::kernel::ksky::cloud::{ cloudFieldAt };
+use crate::kernel::ksky::atmosphere::{
+    FogTable,
+    FogTables,
+    SkyDome,
+    ViewRays,
+    skyDomeFor
+};
+use crate::kernel::ksky::backdrop::{
+    SkyPaint,
+    SkyPaintFrame,
+    SKY_BANDS,
+    drawCelestial
+};
+use crate::kernel::ksky::cloud::{ CloudField, cloudFieldAt };
 use crate::kernel::ksky::clouddome::{ CloudDome, CloudSky };
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::raster::{ FrameBuf, Lens };
@@ -67,22 +78,45 @@ class SkyEngine {
         self.cloudSky = new CloudSky();
         self.fogT = new FogTables();
         self.dome = SkyDome {
-            zenR: 0.0, zenG: 0.0, zenB: 0.0,
-            horR: 0.0, horG: 0.0, horB: 0.0,
-            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
+            zenR: 0.0,
+            zenG: 0.0,
+            zenB: 0.0,
+            horR: 0.0,
+            horG: 0.0,
+            horB: 0.0,
+            sunX: 0.0,
+            sunY: 1.0,
+            sunZ: 0.0,
             haloFade: 0.0,
         };
-        self.rays = ViewRays { cosy: 1.0, siny: 0.0, cosp: 1.0, sinp: 0.0, hw: 0.0, hh: 0.0, focal: 1.0 };
-        self.lastFog = FogTable {
-            cols: 1, rows: 1, r: 0, g: 0, b: 0, curve: 0,
-            xscale: 0.0, yscale: 0.0, dscale: 0.0,
+        self.rays = ViewRays {
+            cosy: 1.0,
+            siny: 0.0,
+            cosp: 1.0,
+            sinp: 0.0,
+            hw: 0.0,
+            hh: 0.0,
+            focal: 1.0,
         };
+        self.lastFog = FogTable {
+            cols: 1,
+            rows: 1,
+            r: 0,
+            g: 0,
+            b: 0,
+            curve: 0,
+            xscale: 0.0,
+            yscale: 0.0,
+            dscale: 0.0,
+        };
+
         self.pool = pool;
         self.paintNow = Shared::wrap(malloc<SkyPaintFrame>(1));
         self.paintSeen = Shared::wrap(malloc<i32>(SKY_BANDS));
         for (i of 0..SKY_BANDS) {
             self.paintSeen[i] = 0;
         }
+
         // Until the first paint has run, assume the sky is in full view: the
         // deck has to be built before anything can decide it is not worth it.
         self.skyPixels = 0x7FFFFFFF;
@@ -106,17 +140,36 @@ class SkyEngine {
      * @param worldTime  seconds since the run began, for the wind
      * @param fb         the render target, for the fog grid's size
      */
-    pub(crate) fn update(mut self, ds : DayState, p : Player, lens : Lens,
-        worldTime : f64, fb : FrameBuf) : void {
-        let t : i64 = monotonicNanos();
+    pub(crate) fn update(
+        mut self,
+        ds : DayState,
+        p : Player,
+        lens : Lens,
+        worldTime : f64,
+        fb : FrameBuf
+    ) : void {
+        const t : i64 = monotonicNanos();
         self.dome = skyDomeFor(ds);
         self.rays = ViewRays {
-            cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp,
-            hw: lens.hw, hh: lens.hh, focal: lens.focal,
+            cosy: p.cosy,
+            siny: p.siny,
+            cosp: p.cosp,
+            sinp: p.sinp,
+            hw: lens.hw,
+            hh: lens.hh,
+            focal: lens.focal,
         };
-        self.cloudSky.march(cloudFieldAt(worldTime), ds, p.eye.y, self.skyPixels);
-        self.lastFog = self.fogT.build(self.dome, self.rays, self.cloudSky.dome(), fb.w, fb.h);
-        self.marchUs = self.marchUs + (monotonicNanos() - t) / 1000;
+
+        const field : CloudField = cloudFieldAt(worldTime);
+        self.cloudSky.march(field, ds, p.eye.y, self.skyPixels);
+        self.lastFog = self.fogT.build(
+            self.dome,
+            self.rays,
+            self.cloudSky.dome(),
+            fb.w,
+            fb.h
+        );
+        self.marchUs += (monotonicNanos() - t) / 1000;
     }
 
     /**
@@ -129,25 +182,37 @@ class SkyEngine {
      * @param lens  the frame's projection centre + focal length
      */
     pub(crate) fn draw(mut self, ds : DayState, p : Player, fb : FrameBuf, lens : Lens) : void {
-        let t : i64 = monotonicNanos();
-        let deck : CloudDome = self.cloudSky.dome();
-        self.paintNow[0] = SkyPaintFrame { dome: self.dome, rays: self.rays, cloud: deck, fb: fb };
+        const t : i64 = monotonicNanos();
+        const deck : CloudDome = self.cloudSky.dome();
+        self.paintNow[0] = SkyPaintFrame {
+            dome: self.dome,
+            rays: self.rays,
+            cloud: deck,
+            fb,
+        };
         self.pool.run(self.paintPass, SKY_BANDS);
         drawCelestial(ds, p, fb, lens, deck);
+
         let seen : i32 = 0;
         for (i of 0..SKY_BANDS) {
-            seen = seen + self.paintSeen[i];
+            seen += self.paintSeen[i];
         }
         self.skyPixels = seen;
-        self.drawUs = self.drawUs + (monotonicNanos() - t) / 1000;
+        self.drawUs += (monotonicNanos() - t) / 1000;
     }
 
-    /** Microseconds the cloud march and fog build have taken, accumulated over the run. */
+    /**
+     * Microseconds the cloud march and fog build have taken, accumulated over the run.
+     * @return the total, in microseconds
+     */
     pub(crate) fn marchMicros(self) : i64 {
         return self.marchUs;
     }
 
-    /** Microseconds the sky paint has taken, accumulated over the run. */
+    /**
+     * Microseconds the sky paint has taken, accumulated over the run.
+     * @return the total, in microseconds
+     */
     pub(crate) fn drawMicros(self) : i64 {
         return self.drawUs;
     }

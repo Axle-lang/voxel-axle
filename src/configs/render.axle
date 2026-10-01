@@ -12,6 +12,7 @@
 /** Draw distance, the sky backdrop, the fog and the post passes. */
 class Render {
     static DRAW_DIST : f64 = 118.0;
+
     // How far the air stays clear, as the distance at which extinction has taken
     // about a third of the view. There is no START any more: a fog that begins
     // at a distance draws a ring on the ground, and real extinction has no
@@ -51,6 +52,7 @@ class Render {
     // Extracted above a luminance threshold at half resolution, blurred, and added
     // back — gives the image a honeyed, sunlit feel without touching midtones.
     static BLOOM_ON : bool = true;
+
     // The threshold is a luminance the LIT WORLD must not reach, or the glow
     // stops being a glow and becomes a haze over everything. Sunlit ground now
     // sits near 180 — under the old 190 the grass itself bloomed — so this is
@@ -71,6 +73,7 @@ class Render {
     // beside those arrays as `BUILD_WORKERS` / `RASTER_BANDS` in `krender::render`.
     // A constant here that nothing could read was worse than no constant — the two
     // that used to sit here said 4 and 12 while the code ran 8 and 12.
+    //
     // Measured rather than guessed. With the view cone cutting the ring down to
     // what the window shows, a frame queues about thirty-two thousand triangles
     // over the six workers, so five and a half thousand each; before the cone

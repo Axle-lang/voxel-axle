@@ -44,18 +44,20 @@ fn smooth(t : f64) : f64 {
  * @return the interpolated noise value
  */
 fn valueNoise(x : f64, y : f64, s : i32) : f64 {
-    let xi : i32 = x.floorToInt() as i32;
-    let yi : i32 = y.floorToInt() as i32;
-    let xf : f64 = x - (xi as f64);
-    let yf : f64 = y - (yi as f64);
-    let u : f64 = smooth(xf);
-    let v : f64 = smooth(yf);
-    let a : f64 = hashI(xi, yi, s);
-    let b : f64 = hashI(xi + 1, yi, s);
-    let c : f64 = hashI(xi, yi + 1, s);
-    let d : f64 = hashI(xi + 1, yi + 1, s);
-    let ab : f64 = a + (b - a) * u;
-    let cd : f64 = c + (d - c) * u;
+    const xi : i32 = x.floorToInt() as i32;
+    const yi : i32 = y.floorToInt() as i32;
+    const xf : f64 = x - (xi as f64);
+    const yf : f64 = y - (yi as f64);
+    const u : f64 = smooth(xf);
+    const v : f64 = smooth(yf);
+
+    const a : f64 = hashI(xi, yi, s);
+    const b : f64 = hashI(xi + 1, yi, s);
+    const c : f64 = hashI(xi, yi + 1, s);
+    const d : f64 = hashI(xi + 1, yi + 1, s);
+
+    const ab : f64 = a + (b - a) * u;
+    const cd : f64 = c + (d - c) * u;
     return ab + (cd - ab) * v;
 }
 
@@ -74,11 +76,11 @@ fn fbm(x : f64, y : f64, s : i32, oct : i32) : f64 {
     let norm : f64 = 0.0;
     let o : i32 = 0;
     while (o < oct) {
-        total = total + valueNoise(x * freq, y * freq, s + o * 17) * amp;
-        norm = norm + amp;
-        amp = amp * 0.5;
-        freq = freq * 2.0;
-        o = o + 1;
+        total += valueNoise(x * freq, y * freq, s + o * 17) * amp;
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+        o++;
     }
     return total / norm;
 }

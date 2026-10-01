@@ -31,11 +31,26 @@ use crate::kernel::ksky::skyengine::{ SkyEngine };
 use crate::kernel::krender::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::kernel::krender::atlas::{ TextureAtlas };
 use crate::kernel::klight::daymodel::{ DayLighting };
-use crate::kernel::krender::chunkview::{ ChunkRenderer, buildSlotsJob, chunkVisible, viewConeFor, ViewCone };
+use crate::kernel::krender::chunkview::{
+    ChunkRenderer,
+    buildSlotsJob,
+    chunkVisible,
+    viewConeFor,
+    ViewCone,
+};
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
-use crate::kernel::krender::raster::{ clearFrame, clearDepth, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected };
+use crate::kernel::krender::raster::{
+    clearFrame,
+    clearDepth,
+    lensFor,
+    FrameBuf,
+    MipAtlas,
+    Camera,
+    Lens,
+    Projected,
+};
 use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::kmath::vec3::{ vec3 };
 use crate::kernel::kentity::player::Player;
@@ -90,9 +105,22 @@ class RasterCrew {
      * @param day     the day/night state
      * @param lcurve  the brightness-curve lookup
      */
-    pub(crate) fn setFrame(mut self, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
+    pub(crate) fn setFrame(
+        mut self,
+        atlas : MipAtlas,
+        gam : Gamma,
+        fogT : FogTable,
+        day : DayState,
+        lcurve : i64
+    ) : void {
         for (i of 0..BUILD_WORKERS) {
-            self.members[i as i64].setFrame(atlas, gam, fogT, day, lcurve);
+            self.members[i as i64].setFrame(
+                atlas,
+                gam,
+                fogT,
+                day,
+                lcurve
+            );
         }
     }
 
@@ -107,12 +135,28 @@ class RasterCrew {
     pub(crate) fn build(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64) : void {
         let builders : Task<i32>[5];
         for (i of 0..5) {
-            builders[i] = spawn buildSlotsJob(self.members[(i + 1) as i64], man, p, cam, phase,
-                i + 1, BUILD_WORKERS);
+            builders[i] = spawn buildSlotsJob(
+                self.members[(i + 1) as i64],
+                man,
+                p,
+                cam,
+                phase,
+                i + 1,
+                BUILD_WORKERS
+            );
         }
-        self.members[0].buildSlots(man, p, cam, phase, 0, BUILD_WORKERS);
+
+        self.members[0].buildSlots(
+            man,
+            p,
+            cam,
+            phase,
+            0,
+            BUILD_WORKERS
+        );
+
         for (i of 0..5) {
-            let d : i32 = builders[i].join();
+            const d : i32 = builders[i].join();
         }
     }
 
@@ -128,11 +172,14 @@ class RasterCrew {
         }
     }
 
-    /** Triangles the crew queued in the last build. */
+    /**
+     * Triangles the crew queued in the last build.
+     * @return the queued triangle count summed over every member
+     */
     pub(crate) fn triCount(self) : i32 {
         let n : i32 = 0;
         for (i of 0..BUILD_WORKERS) {
-            n = n + self.members[i as i64].queuedTris;
+            n += self.members[i as i64].queuedTris;
         }
         return n;
     }
@@ -151,6 +198,7 @@ class BandFill : Job {
     frame : Shared<FrameBuf[]>, // one slot: the target this frame, written before the pass
 
     /**
+     * Build the pass around the crew it drains and the frame slot it reads.
      * @param crew   the raster crew
      * @param frame  the one-slot render target the Renderer publishes into
      */
@@ -168,10 +216,10 @@ class BandFill : Job {
      * @param shares  how many bands the frame was cut into
      */
     fn run(mut self, share : i32, shares : i32) : void {
-        let fb : FrameBuf = self.frame[0];
-        let bw : i32 = (fb.w + shares - 1) / shares;
-        let x0 : i32 = (bw * share).min(fb.w);
-        let x1 : i32 = (bw * (share + 1)).min(fb.w);
+        const fb : FrameBuf = self.frame[0];
+        const bw : i32 = (fb.w + shares - 1) / shares;
+        const x0 : i32 = (bw * share).min(fb.w);
+        const x1 : i32 = (bw * (share + 1)).min(fb.w);
         self.crew.fillBand(fb, x0, x1);
     }
 }
@@ -223,7 +271,12 @@ class Renderer {
         // One fewer than the widest fan-out: the calling thread takes share 0.
         self.pool = new shared WorkerPool(RASTER_BANDS - 1);
         self.frame = Shared::wrap(malloc<FrameBuf>(1));
-        self.frame[0] = FrameBuf { pixels: 0, zbuf: 0, w: 0, h: 0 };
+        self.frame[0] = FrameBuf {
+            pixels: 0,
+            zbuf: 0,
+            w: 0,
+            h: 0,
+        };
         self.fillPass = self.pool.attach(new BandFill(self.crew, self.frame));
         // Built last: it attaches its own pass to the pool above.
         self.sky = new SkyEngine(self.pool);
@@ -295,23 +348,46 @@ class Renderer {
      * @param day     the day/night state
      * @param lcurve  the brightness-curve lookup
      */
-    pub(file) fn drawWorld(mut self, man : ChunkManager, p : Player, fb : FrameBuf, cam : Camera,
-        phase : f64, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
-        self.crew.setFrame(atlas, gam, fogT, day, lcurve);
+    pub(file) fn drawWorld(
+        mut self,
+        man : ChunkManager,
+        p : Player,
+        fb : FrameBuf,
+        cam : Camera,
+        phase : f64,
+        atlas : MipAtlas,
+        gam : Gamma,
+        fogT : FogTable,
+        day : DayState,
+        lcurve : i64
+    ) : void {
+        self.crew.setFrame(
+            atlas,
+            gam,
+            fogT,
+            day,
+            lcurve
+        );
         self.crew.build(man, p, cam, phase);
 
-        let tFill : i64 = monotonicNanos();
+        const tFill : i64 = monotonicNanos();
         self.frame[0] = fb;
         self.pool.run(self.fillPass, RASTER_BANDS);
-        self.fillUs = self.fillUs + (monotonicNanos() - tFill) / 1000;
+        self.fillUs += (monotonicNanos() - tFill) / 1000;
     }
 
-    /** Triangles the world pass queued in the last frame. */
+    /**
+     * Triangles the world pass queued in the last frame.
+     * @return the queued triangle count
+     */
     pub(crate) fn triCount(self) : i32 {
         return self.crew.triCount();
     }
 
-    /** Microseconds the banded fill has taken, accumulated over the run. */
+    /**
+     * Microseconds the banded fill has taken, accumulated over the run.
+     * @return the accumulated fill time in microseconds
+     */
     pub(crate) fn fillMicros(self) : i64 {
         return self.fillUs;
     }
@@ -329,30 +405,61 @@ class Renderer {
      *                   skips the sky/celestial pass)
      * @param phase      animation time phase (scrolls flowing-water textures)
      * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
+     * @param worldTime  seconds since the run began, which drives the cloud wind
      */
-    pub(crate) fn render(mut self, man : ChunkManager, p : Player, fb : FrameBuf, underwater : bool, phase : f64, dayTime : f64, worldTime : f64) : void {
+    pub(crate) fn render(
+        mut self,
+        man : ChunkManager,
+        p : Player,
+        fb : FrameBuf,
+        underwater : bool,
+        phase : f64,
+        dayTime : f64,
+        worldTime : f64
+    ) : void {
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
-        let ds : DayState = self.day.update(dayTime);
+        const ds : DayState = self.day.update(dayTime);
+
         // Under water the cleared "void" is deep water, and nothing paints over
         // it — `drawSky` returns early down there, so the colour has to be laid
         // down here. Above water it must not be: the sky paint covers every
         // pixel the world left empty, so a colour clear is a whole frame
         // written and then thrown away.
         if (underwater) {
-            clearFrame(fb, Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B));
+            const deep : i32 = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
+            clearFrame(fb, deep);
         } else {
             clearDepth(fb);
         }
+
         // The sky moves on by a frame whether or not it is drawn: the fog reads
         // its colour field, and the world is fogged even from under water. It
         // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
         self.sky.update(ds, p, self.lens, worldTime, fb);
+
         // One Camera carries the eye + look trig + projection width for every
         // face this frame; the world raster owns the rest of the pass.
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: self.lens };
-        self.drawWorld(man, p, fb, cam, phase, self.atlas.mip(), self.gamma.view(),
-            self.sky.fog(), ds, self.day.curve());
+        const cam : Camera = Camera {
+            eye: p.eye,
+            cosy: p.cosy,
+            siny: p.siny,
+            cosp: p.cosp,
+            sinp: p.sinp,
+            lens: self.lens,
+        };
+        self.drawWorld(
+            man,
+            p,
+            fb,
+            cam,
+            phase,
+            self.atlas.mip(),
+            self.gamma.view(),
+            self.sky.fog(),
+            ds,
+            self.day.curve()
+        );
     }
 
     /**
@@ -370,12 +477,18 @@ class Renderer {
         self.sky.draw(self.day.state(), p, fb, self.lens);
     }
 
-    /** Microseconds the cloud march and fog build have taken, accumulated over the run. */
+    /**
+     * Microseconds the cloud march and fog build have taken, accumulated over the run.
+     * @return the accumulated march time in microseconds
+     */
     pub(crate) fn skyMarchMicros(self) : i64 {
         return self.sky.marchMicros();
     }
 
-    /** Microseconds the sky paint has taken, accumulated over the run. */
+    /**
+     * Microseconds the sky paint has taken, accumulated over the run.
+     * @return the accumulated sky paint time in microseconds
+     */
     pub(crate) fn skyDrawMicros(self) : i64 {
         return self.sky.drawMicros();
     }
@@ -393,35 +506,56 @@ class Renderer {
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn godRays(self, p : Player, fb : FrameBuf) : void {
-        let ds : DayState = self.day.state();
+        const ds : DayState = self.day.state();
         if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
             return;
         }
+
         // Project the sun direction to screen through the shared camera.
-        let cam : Camera = Camera { eye: p.eye, cosy: p.cosy, siny: p.siny, cosp: p.cosp, sinp: p.sinp, lens: self.lens };
-        let pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
+        const cam : Camera = Camera {
+            eye: p.eye,
+            cosy: p.cosy,
+            siny: p.siny,
+            cosp: p.cosp,
+            sinp: p.sinp,
+            lens: self.lens,
+        };
+        const pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
         if (pr.cz < 0.05) {
             return;   // sun behind the camera
         }
+
         // Overall exposure: fade in as the sun climbs, scale by daylight.
         let climb : f64 = ds.sunY * 4.0;
         if (climb > 1.0) {
             climb = 1.0;
         }
+
         // Shafts are made of the light that got past the deck, so a sun behind a
         // cloud casts none. Sampled once, at the sun — not per march step per
         // pixel, which is twenty-four cloud reads a pixel and was, measured, the
         // single most expensive thing in a sunset frame.
-        let sunCloud : CloudSample = self.sky.clouds().sample(ViewRay { dx: ds.sunX, dy: ds.sunY, dz: ds.sunZ, inv: 1.0 });
-        let expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
+        const sunRay : ViewRay = ViewRay {
+            dx: ds.sunX,
+            dy: ds.sunY,
+            dz: ds.sunZ,
+            inv: 1.0,
+        };
+        const sunCloud : CloudSample = self.sky.clouds().sample(sunRay);
+        const expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
         if (expo < 0.002) {
             return;
         }
         if (expo <= 0.0) {
             return;
         }
+
         // The scatter is a PostEffect over the finished frame.
-        let fx : GodRayFX = new GodRayFX(SunScreen { sunSx: pr.sx, sunSy: pr.sy, expo: expo });
+        let fx : GodRayFX = new GodRayFX(SunScreen {
+            sunSx: pr.sx,
+            sunSy: pr.sy,
+            expo,
+        });
         fx.apply(fb);
     }
 
@@ -461,41 +595,98 @@ class Renderer {
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn renderTorches(self, man : ChunkManager, p : Player, fb : FrameBuf) : void {
-        let hw : f64 = 0.09;
-        let ht : f64 = 0.55;
-        let mat : Material = Material { color: Color::packBytes(240, 180, 70), tile: Tile::TORCH, hurt: false };
-        let scene : MobScene = self.mobScene();
+        const hw : f64 = 0.09;
+        const ht : f64 = 0.55;
+        const mat : Material = Material {
+            color: Color::packBytes(240, 180, 70),
+            tile: Tile::TORCH,
+            hurt: false,
+        };
+        const scene : MobScene = self.mobScene();
+
         // A torch is drawn in its own light, above white, so it reads as the
         // source of the pool around it and the bloom catches the flame.
-        self.mobs.setLight(LinRgb { r: Light::TORCH_GLOW, g: Light::TORCH_GLOW * 0.86, b: Light::TORCH_GLOW * 0.62 });
-        let slots : i32 = World::SPAN * World::SPAN;
-        let cone : ViewCone = viewConeFor(p, self.lens);
-        let slot : i32 = 0;
-        while (slot < slots) {
-            if (man.cols.loaded[slot] == 1 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
-                let base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
-                let n : i32 = man.mesher.torches.tcount[slot];
-                let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
-                let oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
-                let ti : i32 = 0;
-                while (ti < n) {
-                    let cx : f64 = ((ox + (man.mesher.torches.tx[base + ti] as i32)) as f64) + 0.5;
-                    let cz : f64 = ((oz + (man.mesher.torches.tz[base + ti] as i32)) as f64) + 0.5;
-                    let x0 : f64 = cx - hw;
-                    let x1 : f64 = cx + hw;
-                    let z0 : f64 = cz - hw;
-                    let z1 : f64 = cz + hw;
-                    let y0 : f64 = man.mesher.torches.ty[base + ti] as f64;
-                    let y1 : f64 = y0 + ht;
-                    self.mobs.drawQuad(p, fb, vec3(x1, y0, z1), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(1.0, 0.0, 0.0), mat, scene);
-                    self.mobs.drawQuad(p, fb, vec3(x0, y0, z0), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x0, y1, z0), vec3(0.0 - 1.0, 0.0, 0.0), mat, scene);
-                    self.mobs.drawQuad(p, fb, vec3(x0, y0, z1), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 0.0, 1.0), mat, scene);
-                    self.mobs.drawQuad(p, fb, vec3(x1, y0, z0), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(0.0, 0.0, 0.0 - 1.0), mat, scene);
-                    self.mobs.drawQuad(p, fb, vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1), vec3(0.0, 1.0, 0.0), mat, scene);
-                    ti = ti + 1;
+        self.mobs.setLight(LinRgb {
+            r: Light::TORCH_GLOW,
+            g: Light::TORCH_GLOW * 0.86,
+            b: Light::TORCH_GLOW * 0.62,
+        });
+
+        const slots : i32 = World::SPAN * World::SPAN;
+        const cone : ViewCone = viewConeFor(p, self.lens);
+        for (slot of 0..slots) {
+            if (man.cols.loaded[slot] == 1
+                && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
+                const base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
+                const n : i32 = man.mesher.torches.tcount[slot];
+                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
+                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
+                for (ti of 0..n) {
+                    const cx : f64 = ((ox + (man.mesher.torches.tx[base + ti] as i32)) as f64) + 0.5;
+                    const cz : f64 = ((oz + (man.mesher.torches.tz[base + ti] as i32)) as f64) + 0.5;
+                    const x0 : f64 = cx - hw;
+                    const x1 : f64 = cx + hw;
+                    const z0 : f64 = cz - hw;
+                    const z1 : f64 = cz + hw;
+                    const y0 : f64 = man.mesher.torches.ty[base + ti] as f64;
+                    const y1 : f64 = y0 + ht;
+                    self.mobs.drawQuad(
+                        p,
+                        fb,
+                        vec3(x1, y0, z1),
+                        vec3(x1, y0, z0),
+                        vec3(x1, y1, z0),
+                        vec3(x1, y1, z1),
+                        vec3(1.0, 0.0, 0.0),
+                        mat,
+                        scene
+                    );
+                    self.mobs.drawQuad(
+                        p,
+                        fb,
+                        vec3(x0, y0, z0),
+                        vec3(x0, y0, z1),
+                        vec3(x0, y1, z1),
+                        vec3(x0, y1, z0),
+                        vec3(0.0 - 1.0, 0.0, 0.0),
+                        mat,
+                        scene
+                    );
+                    self.mobs.drawQuad(
+                        p,
+                        fb,
+                        vec3(x0, y0, z1),
+                        vec3(x1, y0, z1),
+                        vec3(x1, y1, z1),
+                        vec3(x0, y1, z1),
+                        vec3(0.0, 0.0, 1.0),
+                        mat,
+                        scene
+                    );
+                    self.mobs.drawQuad(
+                        p,
+                        fb,
+                        vec3(x1, y0, z0),
+                        vec3(x0, y0, z0),
+                        vec3(x0, y1, z0),
+                        vec3(x1, y1, z0),
+                        vec3(0.0, 0.0, 0.0 - 1.0),
+                        mat,
+                        scene
+                    );
+                    self.mobs.drawQuad(
+                        p,
+                        fb,
+                        vec3(x0, y1, z0),
+                        vec3(x1, y1, z0),
+                        vec3(x1, y1, z1),
+                        vec3(x0, y1, z1),
+                        vec3(0.0, 1.0, 0.0),
+                        mat,
+                        scene
+                    );
                 }
             }
-            slot = slot + 1;
         }
     }
 
@@ -507,12 +698,12 @@ class Renderer {
      * @return the per-frame mob scene context
      */
     fn mobScene(mut self) : MobScene {
-        let ds : DayState = self.day.state();
+        const ds : DayState = self.day.state();
         return MobScene {
             atlas: self.atlas.mip(),
             gam: self.gamma.view(),
             fogT: self.sky.fog(),
-            ds: ds,
+            ds,
             lens: self.lens,
         };
     }
@@ -527,8 +718,21 @@ class Renderer {
      * @param p    player providing the eye position and orientation
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn renderMobs(self, man : ChunkManager, mm : MobManager, p : Player, fb : FrameBuf) : void {
-        self.mobs.drawAll(man, mm, p, fb, self.mobScene(), self.day.curve());
+    pub(crate) fn renderMobs(
+        self,
+        man : ChunkManager,
+        mm : MobManager,
+        p : Player,
+        fb : FrameBuf
+    ) : void {
+        self.mobs.drawAll(
+            man,
+            mm,
+            p,
+            fb,
+            self.mobScene(),
+            self.day.curve()
+        );
     }
 
     /**
@@ -536,17 +740,15 @@ class Renderer {
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn crosshair(self, fb : FrameBuf) : void {
-        let pixels : i64 = fb.pixels;
-        let w : i32 = fb.w;
-        let h : i32 = fb.h;
-        let cx : i32 = w / 2;
-        let cy : i32 = h / 2;
-        let white : i32 = Color::packBytes(255, 255, 255);
-        let i : i32 = 0 - 6;
-        while (i <= 6) {
+        const pixels : i64 = fb.pixels;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
+        const cx : i32 = w / 2;
+        const cy : i32 = h / 2;
+        const white : i32 = Color::packBytes(255, 255, 255);
+        for (i of -6..7) {
             Mem::putWordOf(pixels, cy * w + cx + i, white);
             Mem::putWordOf(pixels, (cy + i) * w + cx, white);
-            i = i + 1;
         }
     }
 
@@ -563,8 +765,24 @@ class Renderer {
      * @param topH  the block's real box height (1.0 full, snowDepth for a thin
      *              snow layer) so the outline hugs the true box, not a cube
      */
-    pub(crate) fn drawSelection(self, p : Player, fb : FrameBuf, bx : i32, by : i32, bz : i32, topH : f64) : void {
-        self.sel.draw(p, fb, self.lens, bx, by, bz, topH);
+    pub(crate) fn drawSelection(
+        self,
+        p : Player,
+        fb : FrameBuf,
+        bx : i32,
+        by : i32,
+        bz : i32,
+        topH : f64
+    ) : void {
+        self.sel.draw(
+            p,
+            fb,
+            self.lens,
+            bx,
+            by,
+            bz,
+            topH
+        );
     }
 }
 

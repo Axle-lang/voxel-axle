@@ -22,10 +22,12 @@ class Light {
     // number applied to display bytes: 0.20 of the light is about 0.48 of the
     // pixel. Set them by the darkness you want to SEE.
     static AMBIENT : f64 = 0.11;
+
     // How much of that sky share a face keeps when it faces away from the sky.
     // The sky is a hemisphere: a floor sees all of it, a wall half, a ceiling's
     // underside only what the ground bounces back.
     static SKY_VIEW_MIN : f64 = 0.18;
+
     // How much light the sun itself carries, over that share. Above 1 on purpose:
     // a sunlit surface then lands past `Light::TONE_KNEE` and rolls off through
     // the tone map's shoulder instead of stopping at the texture's own brightness,
@@ -33,9 +35,11 @@ class Light {
     // and what makes a shadow read as dark, since the two are judged against each
     // other and only their ratio is seen.
     static SUN_STRENGTH : f64 = 1.42;
+
     // Fraction of the direct term a cast-shadowed face keeps (0 = flat ambient /
     // fully aggressive, 1 = no shadow). Higher = softer, less aggressive shadows.
     static SHADOW_KEEP : f64 = 0.05;
+
     // How far the sun visibility (0..255) may vary along ONE merged quad before
     // the mesher's run is cut and each cell gets its own quad. A merged quad reads
     // the shadow at its four corners and interpolates between them, so a run a
@@ -143,11 +147,12 @@ class Light {
     static LEAF_TRANSMIT : f64 = 0.34;
 
     // Hemispherical sky-access (ray-traced ambient occlusion / soft GI). Each open
-    // cell casts `Light::SKY_AO_SAMPLES` rays over the upper hemisphere (up to `Light::SKY_AO_REACH`
-    // blocks); the escaped fraction darkens the ambient SKY light at render —
-    // contact shadows in valleys, corners and under canopy. Baked & amortised
-    // (`Light::SKY_AO_CHUNKS_PER_TICK` chunks/frame, once per chunk; static, no re-bake until an
-    // edit). `Light::AO_SKY_MIN` is the darkest the sky term drops to at zero access.
+    // cell casts `Light::SKY_AO_SAMPLES` rays over the upper hemisphere (up to
+    // `Light::SKY_AO_REACH` blocks); the escaped fraction darkens the ambient SKY
+    // light at render — contact shadows in valleys, corners and under canopy.
+    // Baked & amortised (`Light::SKY_AO_CHUNKS_PER_TICK` chunks/frame, once per
+    // chunk; static, no re-bake until an edit). `Light::AO_SKY_MIN` is the darkest
+    // the sky term drops to at zero access.
     static SKY_AO_SAMPLES : i32 = 10;
     static SKY_AO_REACH : f64 = 14.0;
     static SKY_AO_CHUNKS_PER_TICK : i32 = 3;
@@ -173,16 +178,19 @@ class Light {
     // the surface toward the light's own colour, which is what a real reflection
     // does and what takes the shrillness out of grass in full sun.
     static SHEEN_ON : bool = true;
+
     // The lobe, as the power the half-vector cosine is raised to. Low on purpose
     // — this is a rough surface, so the reflection is a broad sheen across the
     // whole sunward half of the ground and not a spot. A whole number because it
     // is reached by multiplying, which a lobe this shallow is far cheaper at than
     // a call to pow, and there are four of these per face.
     static SHEEN_EXP : i32 = 6;
+
     // How much of the sun comes back at the centre of that lobe, as a fraction of
     // full sunlight. Small: a rough surface reflects a few percent, and above
     // that the ground starts to look wet.
     static SHEEN_STRENGTH : f64 = 0.085;
+
     // And how much more of it comes back at a grazing view. Every material
     // reflects more the flatter you look across it — it is why a field goes
     // silver toward the horizon and why the same field is plain green at your

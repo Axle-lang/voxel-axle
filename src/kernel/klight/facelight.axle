@@ -49,8 +49,8 @@ struct FaceLight {
      * @return the direct share of the light, 0..1
      */
     pub(crate) fn directShare(self, vis : f64) : f64 {
-        let d : f64 = Light::SUN_STRENGTH * vis * self.direct;
-        let t : f64 = d + self.ambient;
+        const d : f64 = Light::SUN_STRENGTH * vis * self.direct;
+        const t : f64 = d + self.ambient;
         if (t < 0.000001) {
             return 0.0;
         }
@@ -65,6 +65,11 @@ struct FaceLight {
  * normal now?" rather than re-deriving the dot-product against loose scalars.
  */
 trait SkyLighting {
+    /**
+     * Split the light on a surface normal into the sun's share and the sky's.
+     * @param n  the (unit) surface normal
+     * @return the face's direct and ambient terms
+     */
     fn shade(self, n : Vec3) : FaceLight;
 }
 

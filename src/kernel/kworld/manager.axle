@@ -28,7 +28,14 @@ use crate::kernel::kworld::meshbuf::{ ColumnRing };
 use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::{ ChunkMesher, MeshSource };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
-use crate::kernel::seams::{ VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels };
+use crate::kernel::seams::{
+    VoxelQuery,
+    VoxelEdit,
+    LightSample,
+    CornerProbe,
+    CornerSample,
+    ChannelLevels
+};
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -44,7 +51,22 @@ use crate::configs::world::{ World };
  * `MobSpawner` in kentity::mob. seams.axle holds only the kernel↔kernel contracts.
  */
 trait Generator {
+    /**
+     * Fill a freshly-streamed slot with the terrain of chunk (cx, cz).
+     * @param store  the voxel store the terrain is written into
+     * @param slot   the slot index
+     * @param cx     the chunk x coordinate
+     * @param cz     the chunk z coordinate
+     */
     fn generate(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void;
+
+    /**
+     * The terrain surface height of one column of a generated slot.
+     * @param slot  the slot index
+     * @param lx    the chunk-local x coordinate
+     * @param lz    the chunk-local z coordinate
+     * @return the surface Y, trees excluded
+     */
     fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32;
 }
 
@@ -68,19 +90,19 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * mesher, then mark every slot unloaded.
      */
     constructor() {
-        let slots : i32 = World::SPAN * World::SPAN;
+        const slots : i32 = World::SPAN * World::SPAN;
+
         // The voxel field and the ring are co-owned with the light engine, which
         // reads both from its own thread; each side takes its own handle. The
         // generator and the mesher are lent them per call instead.
-        let field : Shared<VoxData> = new shared VoxData(slots);
+        const field : Shared<VoxData> = new shared VoxData(slots);
         self.cols = new shared ColumnRing(slots);
         self.store = new VoxStore(field);
         self.gen = malloc<dyn Generator>(1);
         self.leng = new LightEngine(new VoxStore(field), self.cols, slots);
-        let i : i32 = 0;
-        while (i < slots) {
+
+        for (i of 0..slots) {
             self.cols.loaded[i] = 0;
-            i = i + 1;
         }
         self.mesher = new ChunkMesher(slots);
     }
@@ -104,10 +126,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the wrapped index
      */
     fn wrap(self, v : i32) : i32 {
-        let s : i32 = World::SPAN;
+        const s : i32 = World::SPAN;
         let m : i32 = v - (v / s) * s;
         if (m < 0) {
-            m = m + s;
+            m += s;
         }
         return m;
     }
@@ -131,7 +153,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     fn floorDiv(self, a : i32, b : i32) : i32 {
         let q : i32 = a / b;
         if (a - q * b < 0) {
-            q = q - 1;
+            q--;
         }
         return q;
     }
@@ -189,11 +211,13 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the terrain surface height
      */
     fn columnHeight(self, wx : i32, wz : i32) : i32 {
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(wx, s);
-        let cz : i32 = self.floorDiv(wz, s);
-        let slot : i32 = self.slotFor(cx, cz);
-        if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (self.cols.loaded[slot] == 0
+            || self.cols.cxs[slot] != cx
+            || self.cols.czs[slot] != cz) {
             return World::SEA_LEVEL;
         }
         return self.gen[0].heightAt(slot, wx - cx * s, wz - cz * s);
@@ -207,14 +231,17 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the collision surface height
      */
     fn collisionHeight(self, wx : i32, wz : i32) : i32 {
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(wx, s);
-        let cz : i32 = self.floorDiv(wz, s);
-        let slot : i32 = self.slotFor(cx, cz);
-        if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (self.cols.loaded[slot] == 0
+            || self.cols.cxs[slot] != cx
+            || self.cols.czs[slot] != cz) {
             return World::SEA_LEVEL;
         }
-        return self.mesher.ctop[slot * s * s + (wz - cz * s) * s + (wx - cx * s)] as i32;
+        const column : i32 = slot * s * s + (wz - cz * s) * s + (wx - cx * s);
+        return self.mesher.ctop[column] as i32;
     }
 
     /**
@@ -249,15 +276,16 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * `py`. Full blocks are solid the whole cube; a thin SnowLayer is solid only
      * up to its real partial top. Used for ALL axes.
      * @param cell  the world voxel
-     * @param py    the body's foot height being tested
+     * @param py          the body's foot height being tested
+     * @param bodyHeight  the body's height, so its head counts as well as its feet
      * @return true if the cell's real box blocks the body at `py`
      */
     fn collideFloorCell(self, cell : IVec3, py : f64, bodyHeight : f64) : bool {
-        let b : BlockBox = self.blockBox(cell);
+        const b : BlockBox = self.blockBox(cell);
         if (b.isEmpty()) {
             return false;
         }
-        let cy : f64 = cell.y as f64;
+        const cy : f64 = cell.y as f64;
         // Two intervals overlap when each starts before the other ends.
         // The old test was only the first half — the body's feet below the
         // box's top — which is right for a box resting on the cell floor
@@ -274,7 +302,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the standable top Y of the cell, or a very low value if none
      */
     fn supportHeight(self, cell : IVec3) : f64 {
-        let b : BlockBox = self.blockBox(cell);
+        const b : BlockBox = self.blockBox(cell);
         if (b.isEmpty()) {
             return 0.0 - 1000000.0;
         }
@@ -336,48 +364,41 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * exist, so border faces bake real neighbour light — no black seams.
      * @param camCX  the camera chunk x coordinate
      * @param camCZ  the camera chunk z coordinate
+     * @return the number of chunks (re)generated by this call
      */
     fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32 {
-        let r : i32 = World::VIEW_RADIUS;
-        let budget : i32 = World::CHUNK_LOADS_PER_FRAME;
-        if (budget < 1) {
-            budget = 1;
-        }
+        const r : i32 = World::VIEW_RADIUS;
+        const budget : i32 = World::CHUNK_LOADS_PER_FRAME < 1 ? 1 : World::CHUNK_LOADS_PER_FRAME;
+
         let built : i32 = 0;
         let d : i32 = 0;
         while (d <= r && built < budget) {
-            let dz : i32 = 0 - d;
+            let dz : i32 = -d;
             while (dz <= d && built < budget) {
-                let dx : i32 = 0 - d;
+                let dx : i32 = -d;
                 while (dx <= d && built < budget) {
                     // Only the cells on this ring (Chebyshev distance == d).
-                    let ad : i32 = dx;
-                    if (ad < 0) {
-                        ad = 0 - ad;
-                    }
-                    let az : i32 = dz;
-                    if (az < 0) {
-                        az = 0 - az;
-                    }
-                    let cheb : i32 = ad;
-                    if (az > cheb) {
-                        cheb = az;
-                    }
+                    const ad : i32 = dx < 0 ? -dx : dx;
+                    const az : i32 = dz < 0 ? -dz : dz;
+                    const cheb : i32 = az > ad ? az : ad;
                     if (cheb == d) {
-                        let cx : i32 = camCX + dx;
-                        let cz : i32 = camCZ + dz;
-                        let slot : i32 = self.slotFor(cx, cz);
-                        if (self.cols.loaded[slot] == 0 || self.cols.cxs[slot] != cx || self.cols.czs[slot] != cz) {
+                        const cx : i32 = camCX + dx;
+                        const cz : i32 = camCZ + dz;
+                        const slot : i32 = self.slotFor(cx, cz);
+                        if (self.cols.loaded[slot] == 0
+                            || self.cols.cxs[slot] != cx
+                            || self.cols.czs[slot] != cz) {
                             self.regen(slot, cx, cz);
-                            built = built + 1;
+                            built++;
                         }
                     }
-                    dx = dx + 1;
+                    dx++;
                 }
-                dz = dz + 1;
+                dz++;
             }
-            d = d + 1;
+            d++;
         }
+
         if (built > 0) {
             self.flushLightMesh();
         }
@@ -424,21 +445,24 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param cz    the chunk z coordinate
      */
     fn buildMesh(mut self, slot : i32, cx : i32, cz : i32) : void {
-        self.mesher.buildSlot(MeshSource { store: self.store, leng: self.leng }, slot, cx, cz);
+        self.mesher.buildSlot(
+            MeshSource { store: self.store, leng: self.leng },
+            slot,
+            cx,
+            cz
+        );
     }
 
     /** Re-mesh every slot whose light changed, then re-flag it for a sky-AO bake. */
     fn flushLightMesh(mut self) : void {
-        let slots : i32 = World::SPAN * World::SPAN;
-        let i : i32 = 0;
-        while (i < slots) {
+        const slots : i32 = World::SPAN * World::SPAN;
+        for (i of 0..slots) {
             if (self.leng.takeDirty(i)) {
                 if (self.cols.loaded[i] == 1) {
                     self.buildMesh(i, self.cols.cxs[i], self.cols.czs[i]);
                     self.leng.flagSkyAO(i);
                 }
             }
-            i = i + 1;
         }
     }
 
@@ -454,26 +478,27 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @param id    the block id to write
      */
     fn setVoxel(mut self, cell : IVec3, id : Block) : void {
-        let wx : i32 = cell.x;
-        let wy : i32 = cell.y;
-        let wz : i32 = cell.z;
+        const wx : i32 = cell.x;
+        const wy : i32 = cell.y;
+        const wz : i32 = cell.z;
         if (wy < 0 || wy >= World::HEIGHT) {
             return;
         }
-        let s : i32 = World::CHUNK_SIZE;
-        let cx : i32 = self.floorDiv(wx, s);
-        let cz : i32 = self.floorDiv(wz, s);
-        let dcz : i32 = 0 - 1;
-        while (dcz <= 1) {
-            let dcx : i32 = 0 - 1;
-            while (dcx <= 1) {
-                let ccx : i32 = cx + dcx;
-                let ccz : i32 = cz + dcz;
-                let lx : i32 = wx - ccx * s;
-                let lz : i32 = wz - ccz * s;
-                if (lx >= 0 - 1 && lx <= s && lz >= 0 - 1 && lz <= s) {
-                    let slot : i32 = self.slotFor(ccx, ccz);
-                    if (self.cols.loaded[slot] == 1 && self.cols.cxs[slot] == ccx && self.cols.czs[slot] == ccz) {
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        for (dcz of -1..2) {
+            for (dcx of -1..2) {
+                const ccx : i32 = cx + dcx;
+                const ccz : i32 = cz + dcz;
+                const lx : i32 = wx - ccx * s;
+                const lz : i32 = wz - ccz * s;
+                if (lx >= -1 && lx <= s && lz >= -1 && lz <= s) {
+                    const slot : i32 = self.slotFor(ccx, ccz);
+                    if (self.cols.loaded[slot] == 1
+                        && self.cols.cxs[slot] == ccx
+                        && self.cols.czs[slot] == ccz) {
                         if (dcx == 0 && dcz == 0) {
                             let v : Block = id;
                             self.setVoxLocal(slot, ivec3(lx, wy, lz), v);
@@ -484,9 +509,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
                         self.buildMesh(slot, ccx, ccz);
                     }
                 }
-                dcx = dcx + 1;
             }
-            dcz = dcz + 1;
         }
     }
 
@@ -519,32 +542,56 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.flushLightMesh();
     }
 
-    /** Block light per channel (0..15 each) at a world voxel. */
+    /**
+     * Block light per channel (0..15 each) at a world voxel.
+     * @param cell  the world voxel
+     * @return the red, green and blue block-light levels
+     */
     fn blGetW(self, cell : IVec3) : ChannelLevels {
         return self.leng.blGetW(cell);
     }
 
-    /** Sky-light level (0..15) at a world voxel. */
+    /**
+     * Sky-light level (0..15) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sky-light level
+     */
     fn skGetW(self, cell : IVec3) : i32 {
         return self.leng.skGetW(cell);
     }
 
-    /** Hemispherical sky access (0..255) at a world voxel. */
+    /**
+     * Hemispherical sky access (0..255) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sky access
+     */
     fn skyaccessGet(self, cell : IVec3) : i32 {
         return self.leng.skyaccessGet(cell);
     }
 
-    /** Soft directional sun visibility (0..255) at a world voxel. */
+    /**
+     * Soft directional sun visibility (0..255) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sun visibility
+     */
     fn sunlitGet(self, cell : IVec3) : i32 {
         return self.leng.sunlitGet(cell);
     }
 
-    /** Packed one-bounce coloured tint (0xRRGGBB) at a world voxel. */
+    /**
+     * Packed one-bounce coloured tint (0xRRGGBB) at a world voxel.
+     * @param cell  the world voxel
+     * @return the packed bounce tint
+     */
     fn bounceGet(self, cell : IVec3) : i32 {
         return self.leng.bounceGet(cell);
     }
 
-    /** Sun, sky access and bounce averaged over the 4 air cells at a face corner. */
+    /**
+     * Sun, sky access and bounce averaged over the 4 air cells at a face corner.
+     * @param probe  the face corner to sample
+     * @return the averaged corner sample
+     */
     fn cornerSample(self, probe : CornerProbe) : CornerSample {
         return self.leng.cornerSample(probe);
     }
@@ -554,7 +601,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.leng.stepBake();
     }
 
-    /** Publish the moment the background light thread bakes against. */
+    /**
+     * Publish the moment the background light thread bakes against.
+     * @param m  the hour, clock and player column to bake against
+     */
     fn setMoment(mut self, m : LightMoment) : void {
         self.leng.setMoment(m);
     }
@@ -569,7 +619,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.leng.stopLight();
     }
 
-    /** Whether the background light thread should keep running. */
+    /**
+     * Whether the background light thread should keep running.
+     * @return false once stopLight() has been called
+     */
     pub(file) fn lightAlive(self) : bool {
         return self.leng.lightAlive();
     }

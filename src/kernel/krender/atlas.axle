@@ -7,7 +7,12 @@
 
 use smalt::Mem;
 use crate::kernel::krender::raster::{
-    buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, MipAtlas, MipSource,
+    buildMipChain,
+    mipChainTexels,
+    mipLevelOffset,
+    mipLevelSize,
+    MipAtlas,
+    MipSource,
 };
 use crate::kernel::klight::gamma::{ Gamma };
 use crate::configs::atlas::{ Atlas };
@@ -29,11 +34,10 @@ class TextureAtlas : MipSource {
         self.mips = 0;
         self.mipOff = Mem::take((Atlas::MIP_LEVELS as i64) * 4);
         self.mipSz = Mem::take((Atlas::MIP_LEVELS as i64) * 4);
-        let ml : i32 = 0;
-        while (ml < Atlas::MIP_LEVELS) {
+
+        for (ml of 0..Atlas::MIP_LEVELS) {
             Mem::putWordOf(self.mipOff, ml, mipLevelOffset(ml));
             Mem::putWordOf(self.mipSz, ml, mipLevelSize(ml));
-            ml = ml + 1;
         }
     }
 
@@ -66,6 +70,10 @@ class TextureAtlas : MipSource {
      * @return the atlas mip snapshot
      */
     fn mip(self) : MipAtlas {
-        return MipAtlas { mips: self.mips, mipOff: self.mipOff, mipSz: self.mipSz };
+        return MipAtlas {
+            mips: self.mips,
+            mipOff: self.mipOff,
+            mipSz: self.mipSz,
+        };
     }
 }

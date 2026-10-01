@@ -11,9 +11,11 @@ class Atlas {
     static TILE_PX : i32 = 128;
     static TILE_COUNT : i32 = 94;
     static USE_MOB_TEXTURES : bool = true;
+
     // Mip chain depth (64 → 32 → … → 1 = 7 levels). Distant faces sample a
     // coarser, pre-averaged level so textures don't shimmer when moving.
     static MIP_LEVELS : i32 = 8;
+
     // Texture filtering: the rasteriser picks the mip from the LESS compressed
     // screen axis and averages `Atlas::MAX_ANISO` taps along the MORE compressed one
     // (anisotropic filtering) — this is what keeps oblique distant ground crisp

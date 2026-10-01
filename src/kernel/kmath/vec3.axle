@@ -11,6 +11,10 @@
  * "where is it". Implement by returning your own `Vec3` position.
  */
 trait Spatial {
+    /**
+     * Where this thing is.
+     * @return its world-space position
+     */
     fn position(self) : Vec3;
 }
 
@@ -26,7 +30,11 @@ struct Vec3 : Spatial {
      * @return self + o
      */
     fn add(self, o : Vec3) : Vec3 {
-        return Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z };
+        return Vec3 {
+            x: self.x + o.x,
+            y: self.y + o.y,
+            z: self.z + o.z,
+        };
     }
 
     /**
@@ -35,7 +43,11 @@ struct Vec3 : Spatial {
      * @return self - o
      */
     fn sub(self, o : Vec3) : Vec3 {
-        return Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z };
+        return Vec3 {
+            x: self.x - o.x,
+            y: self.y - o.y,
+            z: self.z - o.z,
+        };
     }
 
     /**
@@ -44,7 +56,11 @@ struct Vec3 : Spatial {
      * @return self * s
      */
     fn scale(self, s : f64) : Vec3 {
-        return Vec3 { x: self.x * s, y: self.y * s, z: self.z * s };
+        return Vec3 {
+            x: self.x * s,
+            y: self.y * s,
+            z: self.z * s,
+        };
     }
 
     /**
@@ -91,12 +107,21 @@ struct Vec3 : Spatial {
      * @return self / |self|, or self if it has zero length
      */
     fn normalize(self) : Vec3 {
-        let len : f64 = self.length();
+        const len : f64 = self.length();
         if (len == 0.0) {
-            return Vec3 { x: self.x, y: self.y, z: self.z };
+            return Vec3 {
+                x: self.x,
+                y: self.y,
+                z: self.z,
+            };
         }
-        let inv : f64 = 1.0 / len;
-        return Vec3 { x: self.x * inv, y: self.y * inv, z: self.z * inv };
+
+        const inv : f64 = 1.0 / len;
+        return Vec3 {
+            x: self.x * inv,
+            y: self.y * inv,
+            z: self.z * inv,
+        };
     }
 
     /**
@@ -105,9 +130,9 @@ struct Vec3 : Spatial {
      * @return |self - o|²
      */
     fn distanceSq(self, o : Vec3) : f64 {
-        let dx : f64 = self.x - o.x;
-        let dy : f64 = self.y - o.y;
-        let dz : f64 = self.z - o.z;
+        const dx : f64 = self.x - o.x;
+        const dy : f64 = self.y - o.y;
+        const dz : f64 = self.z - o.z;
         return dx * dx + dy * dy + dz * dz;
     }
 
@@ -125,7 +150,11 @@ struct Vec3 : Spatial {
      * @return self
      */
     fn position(self) : Vec3 {
-        return Vec3 { x: self.x, y: self.y, z: self.z };
+        return Vec3 {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        };
     }
 }
 
@@ -141,7 +170,11 @@ struct IVec3 {
      * @return self + o
      */
     fn add(self, o : IVec3) : IVec3 {
-        return IVec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z };
+        return IVec3 {
+            x: self.x + o.x,
+            y: self.y + o.y,
+            z: self.z + o.z,
+        };
     }
 
     /**
@@ -150,7 +183,11 @@ struct IVec3 {
      * @return self - o
      */
     fn sub(self, o : IVec3) : IVec3 {
-        return IVec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z };
+        return IVec3 {
+            x: self.x - o.x,
+            y: self.y - o.y,
+            z: self.z - o.z,
+        };
     }
 
     /**
@@ -167,7 +204,11 @@ struct IVec3 {
      * @return the corner point
      */
     fn toVec3(self) : Vec3 {
-        return Vec3 { x: self.x as f64, y: self.y as f64, z: self.z as f64 };
+        return Vec3 {
+            x: self.x as f64,
+            y: self.y as f64,
+            z: self.z as f64,
+        };
     }
 
     /**
@@ -191,7 +232,7 @@ struct IVec3 {
  * @return the vector
  */
 fn vec3(x : f64, y : f64, z : f64) : Vec3 {
-    return Vec3 { x: x, y: y, z: z };
+    return Vec3 { x, y, z };
 }
 
 /**
@@ -202,5 +243,5 @@ fn vec3(x : f64, y : f64, z : f64) : Vec3 {
  * @return the integer coordinate
  */
 fn ivec3(x : i32, y : i32, z : i32) : IVec3 {
-    return IVec3 { x: x, y: y, z: z };
+    return IVec3 { x, y, z };
 }

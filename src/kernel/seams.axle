@@ -28,8 +28,25 @@ use crate::configs::mobs::{ MobKind };
 
 /** Read the block id at a cell and test raw / targetable solidity. */
 trait VoxelReader {
+    /**
+     * The block id stored at a world voxel.
+     * @param cell  the world voxel
+     * @return the block at that cell
+     */
     fn worldGet(self, cell : IVec3) : Block;
+
+    /**
+     * Does a world voxel stop the look-ray (a targetable solid block)?
+     * @param cell  the world voxel
+     * @return whether the voxel is a solid target
+     */
     fn solidTarget(self, cell : IVec3) : bool;
+
+    /**
+     * Is the voxel a block an entity collides with (per-voxel physics)?
+     * @param cell  the world voxel
+     * @return whether the voxel is collidable
+     */
     fn solidAt(self, cell : IVec3) : bool;
 }
 
@@ -42,16 +59,59 @@ trait VoxelReader {
  * feet — a box with a bottom cannot be tested against a single point.
  */
 trait CollisionField {
+    /**
+     * Does the cell's real box block a body whose feet are at `py`?
+     * @param cell        the world voxel
+     * @param py          the body's foot height being tested
+     * @param bodyHeight  the body's height above its feet
+     * @return true if the cell's box overlaps the body's vertical span
+     */
     fn collideFloorCell(self, cell : IVec3, py : f64, bodyHeight : f64) : bool;
+
+    /**
+     * Real standable top height of one cell.
+     * @param cell  the world voxel
+     * @return the standable top Y of the cell, or a very low value if none
+     */
     fn supportHeight(self, cell : IVec3) : f64;
+
+    /**
+     * The collision / render box of a cell — the single authority on its shape.
+     * @param cell  the world voxel
+     * @return the cell's box within its cell
+     */
     fn blockBox(self, cell : IVec3) : BlockBox;
+
+    /**
+     * The cell box's vertical extent, for a caller that only wants a height.
+     * @param cell  the world voxel
+     * @return the box's height in cell units
+     */
     fn blockBoxHeight(self, cell : IVec3) : f64;
+
+    /**
+     * Extra vertical cells the auto-step / floor scan is padded by.
+     * @return the pad in whole cells
+     */
     fn floorScanPad(self) : i32;
 }
 
 /** Sample per-column terrain / collision heights (spawn, footing, AI). */
 trait Heightfield {
+    /**
+     * Terrain surface Y at a world column, excluding trees.
+     * @param wx  the world x coordinate
+     * @param wz  the world z coordinate
+     * @return the terrain surface height
+     */
     fn columnHeight(self, wx : i32, wz : i32) : i32;
+
+    /**
+     * Solid collision surface Y at a world column: the highest collidable voxel + 1.
+     * @param wx  the world x coordinate
+     * @param wz  the world z coordinate
+     * @return the collision surface height
+     */
     fn collisionHeight(self, wx : i32, wz : i32) : i32;
 }
 
@@ -63,18 +123,45 @@ trait VoxelQuery : VoxelReader, CollisionField, Heightfield {
 
 /** Mutate the voxel field (edit / dig / place), re-meshing the touched slots. */
 trait VoxelWriter {
+    /**
+     * Write a block id at a world voxel and re-mesh every slot that sees it.
+     * @param cell  the world voxel
+     * @param id    the block id to write
+     */
     fn setVoxel(mut self, cell : IVec3, id : Block) : void;
+
+    /**
+     * Dig (set to air) a world voxel.
+     * @param cell  the world voxel
+     */
     fn breakAt(mut self, cell : IVec3) : void;
+
+    /**
+     * Place `block` at a world voxel.
+     * @param cell   the world voxel
+     * @param block  the block id to place
+     */
     fn placeAt(mut self, cell : IVec3, block : Block) : void;
 }
 
 /** Kick a light re-bake around an edited cell. */
 trait LightMutator {
+    /**
+     * Re-bake the light around a cell that has just been edited.
+     * @param cell  the edited world voxel
+     */
     fn lightUpdate(mut self, cell : IVec3) : void;
 }
 
 /** Drive chunk streaming toward a camera column (budgeted per call). */
 trait ChunkStreamer {
+    /**
+     * Load the missing chunks in view of the camera chunk, nearest first and
+     * budgeted per call.
+     * @param camCX  the camera chunk x coordinate
+     * @param camCZ  the camera chunk z coordinate
+     * @return how many chunks this call built
+     */
     fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32;
 }
 
@@ -96,21 +183,33 @@ struct LightMoment {
 
 /** Publish the moment the light thread bakes against. */
 trait DayCycle {
+    /**
+     * Publish the moment the next light bake is for.
+     * @param m  the hour, clock and player column, taken together
+     */
     fn setMoment(mut self, m : LightMoment) : void;
 }
 
 /** Light the whole loaded ring up front, before the first frame is drawn. */
 trait LightPrime {
+    /** Bake the light of every loaded chunk before the first frame. */
     fn primeLight(mut self) : void;
 }
 
 /** Stop + join the background light thread at shutdown. */
 trait LightThread {
+    /** Stop the background light thread and wait for it to finish. */
     fn stopLight(mut self) : void;
 }
 
 /** Bundle: the full write + world-lifecycle surface the interaction layer drives. */
-trait VoxelEdit : VoxelWriter, LightMutator, ChunkStreamer, DayCycle, LightPrime, LightThread {
+trait VoxelEdit :
+    VoxelWriter,
+    LightMutator,
+    ChunkStreamer,
+    DayCycle,
+    LightPrime,
+    LightThread {
 }
 
 // ─── Baked light-sample capabilities (read by the renderer per face corner) ──
@@ -145,22 +244,48 @@ struct ChannelLevels {
 
 /** Emissive block-light level at a cell. */
 trait BlockLightField {
+    /**
+     * Block light per channel at a world voxel.
+     * @param cell  the world voxel
+     * @return the r / g / b levels, 0..15 each
+     */
     fn blGetW(self, cell : IVec3) : ChannelLevels;
 }
 
 /** Sky-light level + hemispherical sky access (ambient / GI term). */
 trait SkyLightField {
+    /**
+     * Sky-light level at a world voxel.
+     * @param cell  the world voxel
+     * @return the sky-light level, 0..15
+     */
     fn skGetW(self, cell : IVec3) : i32;
+
+    /**
+     * Hemispherical sky access at a world voxel: 255 = fully open.
+     * @param cell  the world voxel
+     * @return the sky access, 0..255
+     */
     fn skyaccessGet(self, cell : IVec3) : i32;
 }
 
 /** Direct-sun visibility at a cell. */
 trait SunLightField {
+    /**
+     * Soft directional sun visibility at a world voxel.
+     * @param cell  the world voxel
+     * @return 0 (shadow) .. 255 (full sun)
+     */
     fn sunlitGet(self, cell : IVec3) : i32;
 }
 
 /** One-bounce coloured light bleed at a cell. */
 trait BounceLightField {
+    /**
+     * Packed one-bounce coloured tint at a world voxel (each channel 128 = ×1.0).
+     * @param cell  the world voxel
+     * @return the packed bounce tint (0xRRGGBB)
+     */
     fn bounceGet(self, cell : IVec3) : i32;
 }
 
@@ -180,7 +305,16 @@ struct CornerSample {
 }
 
 /** Bundle: every baked light term the face shader samples. */
-trait LightSample : BlockLightField, SkyLightField, SunLightField, BounceLightField {
+trait LightSample :
+    BlockLightField,
+    SkyLightField,
+    SunLightField,
+    BounceLightField {
+    /**
+     * Sun, sky access and bounce averaged over the four air cells at a face corner.
+     * @param probe  the corner's own cell and its two tangent steps
+     * @return the three averaged terms
+     */
     fn cornerSample(self, probe : CornerProbe) : CornerSample;
 }
 
@@ -188,12 +322,25 @@ trait LightSample : BlockLightField, SkyLightField, SunLightField, BounceLightFi
 
 /** Which species an actor is (selects its billboard model). */
 trait Kinded {
+    /**
+     * The actor's species.
+     * @return the mob kind
+     */
     fn kind(self) : MobKind;
 }
 
 /** Animation state driving the billboard pose. */
 trait Animated {
+    /**
+     * Walk-cycle phase driving the leg swing.
+     * @return the walk phase
+     */
     fn walkPhase(self) : f64;
+
+    /**
+     * Collapse progress: 0 at the moment of death, 1 when gone.
+     * @return the normalized death-collapse progress
+     */
     fn deathProgress(self) : f64;
 }
 
@@ -203,9 +350,28 @@ trait Animated {
  * old five per-species arrays.
  */
 trait ActorVisual : Kinded, Animated {
+    /**
+     * The actor's world-space position.
+     * @return the position
+     */
     fn pos(self) : Vec3;
+
+    /**
+     * Facing angle in radians (the whole box model turns to it).
+     * @return the heading
+     */
     fn heading(self) : f64;
+
+    /**
+     * Remaining frames of the red hurt flash.
+     * @return the hurt-flash countdown, 0 when not flashing
+     */
     fn hurtFlash(self) : i32;
+
+    /**
+     * Fuse charge level, for the swell / strobe of a charging creeper.
+     * @return the fuse level, or a value below zero when idle
+     */
     fn fuseLevel(self) : i32;
 }
 

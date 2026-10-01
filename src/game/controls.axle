@@ -47,10 +47,10 @@ struct Intent {
 fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
     let v : f64 = 0.0;
     if (events.isKeyDown(plus)) {
-        v = v + 1.0;
+        v += 1.0;
     }
     if (events.isKeyDown(minus)) {
-        v = v - 1.0;
+        v -= 1.0;
     }
     return v;
 }
@@ -62,8 +62,9 @@ fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
  * @return the intent, and the sprint latch to carry into the next frame
  */
 fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
-    let fwd : f64 = axis(events, Keys::forward(), Keys::back());
-    let strafe : f64 = axis(events, Keys::right(), Keys::left());
+    const fwd : f64 = axis(events, Keys::forward(), Keys::back());
+    const strafe : f64 = axis(events, Keys::right(), Keys::left());
+
     let latch : bool = latched;
     if (events.isKeyDown(Keys::sprint())) {
         latch = true;
@@ -71,14 +72,16 @@ fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
     if (fwd == 0.0 && strafe == 0.0) {
         latch = false;
     }
-    return (Intent {
-        fwd: fwd,
-        strafe: strafe,
+
+    const intent : Intent = Intent {
+        fwd,
+        strafe,
         sprint: latch,
         up: events.isKeyDown(Keys::up()),
         down: events.isKeyDown(Keys::down()),
         moving: fwd != 0.0 || strafe != 0.0,
-    }, latch);
+    };
+    return (intent, latch);
 }
 
 /**
@@ -91,13 +94,15 @@ fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
  * @return the swallow flag for the next frame
  */
 fn applyLook(events : Events, p : Player, swallow : bool, pinned : bool) : bool {
-    let mdx : i32 = events.mouseDX();
-    let mdy : i32 = events.mouseDY();
+    const mdx : i32 = events.mouseDX();
+    const mdy : i32 = events.mouseDY();
     if (swallow) {
         return false;
     }
     if (!pinned) {
-        p.look(0.0 - (mdx as f64) * Motion::MOUSE_SENS, 0.0 - (mdy as f64) * Motion::MOUSE_SENS);
+        const dYaw : f64 = 0.0 - (mdx as f64) * Motion::MOUSE_SENS;
+        const dPitch : f64 = 0.0 - (mdy as f64) * Motion::MOUSE_SENS;
+        p.look(dYaw, dPitch);
     }
     return false;
 }
@@ -108,12 +113,10 @@ fn applyLook(events : Events, p : Player, swallow : bool, pinned : bool) : bool 
  * @param p       the player whose held block changes
  */
 fn readHotbar(events : Events, p : Player) : void {
-    let slot : i32 = 0;
-    while (slot < Hotbar::SIZE) {
+    for (slot of 0..Hotbar::SIZE) {
         if (events.isKeyDown(Keys::hotbar(slot))) {
             p.selectSlot(slot);
         }
-        slot = slot + 1;
     }
 }
 
@@ -127,7 +130,8 @@ fn readHotbar(events : Events, p : Player) : void {
  * @return whether both keys are down now
  */
 fn readGameMode(events : Events, p : Player, wasBoth : bool) : bool {
-    let both : bool = events.isKeyDown(Keys::gameModeA()) && events.isKeyDown(Keys::gameModeB());
+    const both : bool = events.isKeyDown(Keys::gameModeA())
+        && events.isKeyDown(Keys::gameModeB());
     if (both && !wasBoth) {
         p.toggleGameMode();
     }

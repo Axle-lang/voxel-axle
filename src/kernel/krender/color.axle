@@ -33,6 +33,10 @@ const TINT_KEEP_DEN : i32 = 100;
  * inside each widget, so `draw` needs only the surface.
  */
 trait Widget {
+    /**
+     * Paint this widget into the frame at its own position.
+     * @param f  the frame to draw into.
+     */
     fn draw(self, f : Frame) : void;
 }
 
@@ -61,8 +65,5 @@ fn redTint(color : i32) : i32 {
  * @return the tinted or original colour.
  */
 fn tintIf(on : bool, color : i32) : i32 {
-    if (on) {
-        return redTint(color);
-    }
-    return color;
+    return on ? redTint(color) : color;
 }

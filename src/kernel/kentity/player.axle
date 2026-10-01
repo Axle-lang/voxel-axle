@@ -22,7 +22,14 @@ use crate::kernel::kmath::vec3::{ Vec3, vec3, ivec3 };
  * where you walk.
  */
 trait Looks {
+    /**
+     * Apply a relative look delta.
+     * @param dyaw    yaw change in radians
+     * @param dpitch  pitch change in radians
+     */
     fn look(mut self, dyaw : f64, dpitch : f64) : void;
+
+    /** Recompute the cached look trig and the eye position. */
     fn refresh(mut self) : void;
 }
 
@@ -32,12 +39,22 @@ trait Looks {
  * resolves all three from this frame's state.
  */
 trait Survives {
+    /** Resolve fall damage, drowning and regeneration for this frame. */
     fn survive(mut self) : void;
 }
 
 /** Compétence: a hotbar inventory — select a slot and read the held block. */
 trait Inventory {
+    /**
+     * Make hotbar slot `i` the active one.
+     * @param i  hotbar slot index to activate
+     */
     fn selectSlot(mut self, i : i32) : void;
+
+    /**
+     * The block in the active hotbar slot.
+     * @return block id held for placing
+     */
     fn heldBlock(self) : Block;
 }
 
@@ -64,7 +81,12 @@ class Player : Entity, Looks, Survives, Inventory {
     pub(crate) hotbar : Block[], // block id held in each inventory slot
     pub(crate) selected : i32,   // active hotbar slot (0-based)
 
-    /** Construct a player at (x, y, z) with a stocked hotbar and full HP. */
+    /**
+     * Construct a player at (x, y, z) with a stocked hotbar and full HP.
+     * @param x  body-centre X
+     * @param y  foot height
+     * @param z  body-centre Z
+     */
     constructor(x : f64, y : f64, z : f64) {
         self.pos = vec3(x, y, z);
         self.velY = 0.0;
@@ -153,7 +175,7 @@ class Player : Entity, Looks, Survives, Inventory {
      * @param dpitch  pitch change in radians
      */
     fn look(mut self, dyaw : f64, dpitch : f64) : void {
-        self.yaw = self.yaw + dyaw;
+        self.yaw += dyaw;
         self.pitch = clampF64(self.pitch + dpitch, 0.0 - Motion::PITCH_MAX, Motion::PITCH_MAX);
     }
 
@@ -199,23 +221,31 @@ class Player : Entity, Looks, Survives, Inventory {
      * @param up      whether the up / jump input is held
      * @param down    whether the down input is held
      */
-    pub(crate) fn update(mut self, world : dyn VoxelQuery, fwd : f64, strafe : f64, sprint : bool,
-        up : bool, down : bool) : void {
+    pub(crate) fn update(
+        mut self,
+        world : dyn VoxelQuery,
+        fwd : f64,
+        strafe : f64,
+        sprint : bool,
+        up : bool,
+        down : bool
+    ) : void {
         if (self.mode == GameMode::Creative) {
             self.fly(world, fwd, strafe, sprint, up, down);
             self.refresh();
             return;
         }
 
-        let inWater : bool = self.bodyInWater(world);
+        const inWater : bool = self.bodyInWater(world);
         self.inWater = inWater;
+
         // Submerged = the eye's own voxel is water, at any altitude (not the
         // absolute sea level) — this is what drives the underwater visuals and
         // drowning, so a pool you dug on a hill counts too.
-        let ex : i32 = self.pos.x.floorToInt() as i32;
-        let ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
-        let ez : i32 = self.pos.z.floorToInt() as i32;
-        let submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
+        const ex : i32 = self.pos.x.floorToInt() as i32;
+        const ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
+        const ez : i32 = self.pos.z.floorToInt() as i32;
+        const submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
         self.headInWater = submerged;
 
         let speed : f64 = Motion::WALK_SPEED;
@@ -227,18 +257,18 @@ class Player : Entity, Looks, Survives, Inventory {
 
         let dx : f64 = (0.0 - self.siny) * fwd + self.cosy * strafe;
         let dz : f64 = self.cosy * fwd + self.siny * strafe;
-        dx = dx * speed;
-        dz = dz * speed;
+        dx *= speed;
+        dz *= speed;
 
         if (inWater) {
             // Additive up/down swim thrust (gentle; you sink slowly and rise
             // only while Space is held). The horizontal current that carries
             // every entity is applied in Entity.tick.
             if (up) {
-                self.velY = self.velY + Motion::SWIM_UP_ACCEL;
+                self.velY += Motion::SWIM_UP_ACCEL;
             }
             if (down) {
-                self.velY = self.velY - Motion::SWIM_DOWN_SPEED;
+                self.velY -= Motion::SWIM_DOWN_SPEED;
             }
         } else if (up && self.onGround) {
             self.velY = Motion::JUMP_VEL;
@@ -260,34 +290,45 @@ class Player : Entity, Looks, Survives, Inventory {
      * @param up      whether the up input is held
      * @param down    whether the down input is held
      */
-    fn fly(mut self, world : dyn VoxelQuery, fwd : f64, strafe : f64, sprint : bool,
-        up : bool, down : bool) : void {
-        let speed : f64 = Motion::FLY_SPEED;
-        if (sprint) {
-            speed = Motion::FLY_SPRINT_SPEED;
-        }
-        let dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
-        let dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
+    fn fly(
+        mut self,
+        world : dyn VoxelQuery,
+        fwd : f64,
+        strafe : f64,
+        sprint : bool,
+        up : bool,
+        down : bool
+    ) : void {
+        const speed : f64 = sprint ? Motion::FLY_SPRINT_SPEED : Motion::FLY_SPEED;
+        const dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
+        const dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
         self.velY = 0.0;
         self.onGround = false;
+
         // Horizontal move with voxel collision (no auto-step in flight).
         if (!self.collidesAt(world, vec3(self.pos.x + dx, self.pos.y, self.pos.z))) {
-            self.pos.x = self.pos.x + dx;
+            self.pos.x += dx;
         }
         if (!self.collidesAt(world, vec3(self.pos.x, self.pos.y, self.pos.z + dz))) {
-            self.pos.z = self.pos.z + dz;
+            self.pos.z += dz;
         }
         if (up) {
-            self.pos.y = self.pos.y + Motion::FLY_VERT_SPEED;
+            self.pos.y += Motion::FLY_VERT_SPEED;
         }
         if (down) {
-            self.pos.y = self.pos.y - Motion::FLY_VERT_SPEED;
+            self.pos.y -= Motion::FLY_VERT_SPEED;
         }
+
         // Don't sink into the ground: if the body intersects blocks, lift
         // the feet onto the highest support beneath them.
         if (self.collidesAt(world, self.pos)) {
-            let top : f64 = self.supportTop(world, self.pos.x, self.pos.z,
-                self.pos.y.floorToInt() as i32, (self.pos.y + self.height).floorToInt() as i32);
+            const top : f64 = self.supportTop(
+                world,
+                self.pos.x,
+                self.pos.z,
+                self.pos.y.floorToInt() as i32,
+                (self.pos.y + self.height).floorToInt() as i32
+            );
             self.pos.y = top;
             self.onGround = true;
         }
@@ -298,22 +339,23 @@ class Player : Entity, Looks, Survives, Inventory {
      * Reads `headInWater`, already refreshed by `look` earlier this frame.
      */
     fn survive(mut self) : void {
-        let water : bool = self.headInWater;
-        self.sinceHurt = self.sinceHurt + 1;
+        const water : bool = self.headInWater;
+        self.sinceHurt++;
 
         // Water cushions a fall; on land, falling far hurts (`impact` is
         // the distance dropped from the apex).
         if (!water && self.impact > Health::SAFE_FALL_DIST) {
-            let dmg : i32 = ((self.impact - Health::SAFE_FALL_DIST) * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
+            const excess : f64 = self.impact - Health::SAFE_FALL_DIST;
+            const dmg : i32 = (excess * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
             if (dmg > 0) {
                 self.hurt(dmg);
             }
         }
 
         if (water) {
-            self.airTicks = self.airTicks + 1;
+            self.airTicks++;
             if (self.airTicks > Health::DROWN_GRACE_FRAMES) {
-                self.drownTick = self.drownTick - 1;
+                self.drownTick--;
                 if (self.drownTick <= 0) {
                     self.hurt(1);
                     self.drownTick = Health::DROWN_EVERY_FRAMES;
@@ -325,7 +367,7 @@ class Player : Entity, Looks, Survives, Inventory {
         }
 
         if (!water && self.hp < self.maxHp && self.sinceHurt > Health::REGEN_DELAY_FRAMES) {
-            self.regenTick = self.regenTick - 1;
+            self.regenTick--;
             if (self.regenTick <= 0) {
                 self.heal(1);
                 self.regenTick = Health::REGEN_EVERY_FRAMES;

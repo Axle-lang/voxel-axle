@@ -14,7 +14,20 @@
 // is another, and measured, the build is the expensive two thirds.
 
 use smalt::Mem;
-use crate::kernel::krender::raster::{ rasterTriTex, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens, Projected, VertAttribs, ScreenScratch };
+use crate::kernel::krender::raster::{
+    rasterTriTex,
+    columnSpan,
+    RasterVert,
+    RasterTri,
+    FrameBuf,
+    MipAtlas,
+    Band,
+    Camera,
+    Lens,
+    Projected,
+    VertAttribs,
+    ScreenScratch
+};
 use crate::kernel::klight::facelight::{ FaceLight };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };
 use crate::kernel::ksky::atmosphere::{ FogTable };
@@ -110,31 +123,44 @@ struct ViewCone {
 fn viewConeFor(p : Player, lens : Lens) : ViewCone {
     // The camera basis. Forward carries the pitch; right lies in the ground
     // plane, there being no roll; up is the third of the frame.
-    let fx : f64 = (0.0 - p.siny) * p.cosp;
-    let fy : f64 = p.sinp;
-    let fz : f64 = p.cosy * p.cosp;
-    let rx : f64 = p.cosy;
-    let rz : f64 = p.siny;
-    let ux : f64 = p.siny * p.sinp;
-    let uy : f64 = p.cosp;
-    let uz : f64 = (0.0 - p.cosy) * p.sinp;
+    const fx : f64 = (0.0 - p.siny) * p.cosp;
+    const fy : f64 = p.sinp;
+    const fz : f64 = p.cosy * p.cosp;
+    const rx : f64 = p.cosy;
+    const rz : f64 = p.siny;
+    const ux : f64 = p.siny * p.sinp;
+    const uy : f64 = p.cosp;
+    const uz : f64 = (0.0 - p.cosy) * p.sinp;
+
     return ViewCone {
         eyeX: p.eye.x,
         eyeY: p.eye.y,
         eyeZ: p.eye.z,
-        near: ViewPlane { nx: fx, ny: fy, nz: fz },
-        left: ViewPlane { nx: fx * lens.hw + rx * lens.focal,
-                          ny: fy * lens.hw,
-                          nz: fz * lens.hw + rz * lens.focal },
-        right: ViewPlane { nx: fx * lens.hw - rx * lens.focal,
-                           ny: fy * lens.hw,
-                           nz: fz * lens.hw - rz * lens.focal },
-        top: ViewPlane { nx: fx * lens.hh - ux * lens.focal,
-                         ny: fy * lens.hh - uy * lens.focal,
-                         nz: fz * lens.hh - uz * lens.focal },
-        bottom: ViewPlane { nx: fx * lens.hh + ux * lens.focal,
-                            ny: fy * lens.hh + uy * lens.focal,
-                            nz: fz * lens.hh + uz * lens.focal },
+        near: ViewPlane {
+            nx: fx,
+            ny: fy,
+            nz: fz,
+        },
+        left: ViewPlane {
+            nx: fx * lens.hw + rx * lens.focal,
+            ny: fy * lens.hw,
+            nz: fz * lens.hw + rz * lens.focal,
+        },
+        right: ViewPlane {
+            nx: fx * lens.hw - rx * lens.focal,
+            ny: fy * lens.hw,
+            nz: fz * lens.hw - rz * lens.focal,
+        },
+        top: ViewPlane {
+            nx: fx * lens.hh - ux * lens.focal,
+            ny: fy * lens.hh - uy * lens.focal,
+            nz: fz * lens.hh - uz * lens.focal,
+        },
+        bottom: ViewPlane {
+            nx: fx * lens.hh + ux * lens.focal,
+            ny: fy * lens.hh + uy * lens.focal,
+            nz: fz * lens.hh + uz * lens.focal,
+        },
         far: Render::DRAW_DIST + (World::CHUNK_SIZE as f64),
     };
 }
@@ -146,24 +172,26 @@ fn viewConeFor(p : Player, lens : Lens) : ViewCone {
  * behind the plane, all eight are; if it is in front, the box straddles the
  * plane or clears it, and either way the box is kept.
  * @param pl   the plane's inward normal
- * @param lox  box low corner, relative to the eye
- * @param hix  box high corner, relative to the eye
+ * @param lox  box low corner x, relative to the eye
+ * @param loy  box low corner y, relative to the eye
+ * @param loz  box low corner z, relative to the eye
+ * @param hix  box high corner x, relative to the eye
+ * @param hiy  box high corner y, relative to the eye
+ * @param hiz  box high corner z, relative to the eye
  * @return true when nothing in the box is on the inward side
  */
-fn boxOutside(pl : ViewPlane, lox : f64, loy : f64, loz : f64,
-              hix : f64, hiy : f64, hiz : f64) : bool {
-    let x : f64 = lox;
-    if (pl.nx > 0.0) {
-        x = hix;
-    }
-    let y : f64 = loy;
-    if (pl.ny > 0.0) {
-        y = hiy;
-    }
-    let z : f64 = loz;
-    if (pl.nz > 0.0) {
-        z = hiz;
-    }
+fn boxOutside(
+    pl : ViewPlane,
+    lox : f64,
+    loy : f64,
+    loz : f64,
+    hix : f64,
+    hiy : f64,
+    hiz : f64
+) : bool {
+    const x : f64 = pl.nx > 0.0 ? hix : lox;
+    const y : f64 = pl.ny > 0.0 ? hiy : loy;
+    const z : f64 = pl.nz > 0.0 ? hiz : loz;
     return pl.nx * x + pl.ny * y + pl.nz * z < 0.0;
 }
 
@@ -181,18 +209,19 @@ fn boxOutside(pl : ViewPlane, lox : f64, loy : f64, loz : f64,
  * @return true if the chunk should be drawn
  */
 fn chunkVisible(cone : ViewCone, cx : i32, cz : i32) : bool {
-    let s : f64 = World::CHUNK_SIZE as f64;
-    let lox : f64 = (cx as f64) * s - cone.eyeX;
-    let loz : f64 = (cz as f64) * s - cone.eyeZ;
-    let hix : f64 = lox + s;
-    let hiz : f64 = loz + s;
-    let mx : f64 = lox + s * 0.5;
-    let mz : f64 = loz + s * 0.5;
+    const s : f64 = World::CHUNK_SIZE as f64;
+    const lox : f64 = (cx as f64) * s - cone.eyeX;
+    const loz : f64 = (cz as f64) * s - cone.eyeZ;
+    const hix : f64 = lox + s;
+    const hiz : f64 = loz + s;
+    const mx : f64 = lox + s * 0.5;
+    const mz : f64 = loz + s * 0.5;
     if (mx * mx + mz * mz > cone.far * cone.far) {
         return false;
     }
-    let loy : f64 = 0.0 - cone.eyeY;
-    let hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
+
+    const loy : f64 = 0.0 - cone.eyeY;
+    const hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
     if (boxOutside(cone.near, lox, loy, loz, hix, hiy, hiz)) {
         return false;
     }
@@ -292,31 +321,74 @@ class ChunkRenderer {
         self.coff = malloc<i32>(72);
         self.uvu = malloc<i32>(24);
         self.uvv = malloc<i32>(24);
+
         // Screen-space scratch sized for a near-clipped polygon (≤ 5 verts).
-        self.cs = ScreenScratch { sx: Mem::take(8 * 8), sy: Mem::take(8 * 8), iz: Mem::take(8 * 8) };
+        self.cs = ScreenScratch {
+            sx: Mem::take(8 * 8),
+            sy: Mem::take(8 * 8),
+            iz: Mem::take(8 * 8),
+        };
+
         // Camera-space input (ca) and clipped output (cb) vertex buffers: x, y,
         // z (depth), the u, v texture coordinates and the r, g, b Gouraud colour
         // per vertex — the same 16 disjoint allocBytes buffers, grouped.
         self.ca = VertAttribs {
-            x: Mem::take(8 * 8), y: Mem::take(8 * 8), z: Mem::take(8 * 8),
-            u: Mem::take(8 * 8), v: Mem::take(8 * 8),
-            r: Mem::take(8 * 8), g: Mem::take(8 * 8), b: Mem::take(8 * 8),
+            x: Mem::take(8 * 8),
+            y: Mem::take(8 * 8),
+            z: Mem::take(8 * 8),
+            u: Mem::take(8 * 8),
+            v: Mem::take(8 * 8),
+            r: Mem::take(8 * 8),
+            g: Mem::take(8 * 8),
+            b: Mem::take(8 * 8),
         };
         self.cb = VertAttribs {
-            x: Mem::take(8 * 8), y: Mem::take(8 * 8), z: Mem::take(8 * 8),
-            u: Mem::take(8 * 8), v: Mem::take(8 * 8),
-            r: Mem::take(8 * 8), g: Mem::take(8 * 8), b: Mem::take(8 * 8),
+            x: Mem::take(8 * 8),
+            y: Mem::take(8 * 8),
+            z: Mem::take(8 * 8),
+            u: Mem::take(8 * 8),
+            v: Mem::take(8 * 8),
+            r: Mem::take(8 * 8),
+            g: Mem::take(8 * 8),
+            b: Mem::take(8 * 8),
         };
-        self.atlas = MipAtlas { mips: 0, mipOff: 0, mipSz: 0 };
-        self.gam = Gamma { toLin: 0, toByte: 0, scale: 0.0 };
-        self.fogT = FogTable { cols: 1, rows: 1, r: 0, g: 0, b: 0, curve: 0, xscale: 0.0, yscale: 0.0, dscale: 0.0 };
+
+        self.atlas = MipAtlas {
+            mips: 0,
+            mipOff: 0,
+            mipSz: 0,
+        };
+        self.gam = Gamma {
+            toLin: 0,
+            toByte: 0,
+            scale: 0.0,
+        };
+        self.fogT = FogTable {
+            cols: 1,
+            rows: 1,
+            r: 0,
+            g: 0,
+            b: 0,
+            curve: 0,
+            xscale: 0.0,
+            yscale: 0.0,
+            dscale: 0.0,
+        };
         self.day = DayState {
-            sunX: 0.0, sunY: 1.0, sunZ: 0.0,
-            dirX: 0.0, dirY: 1.0, dirZ: 0.0,
+            sunX: 0.0,
+            sunY: 1.0,
+            sunZ: 0.0,
+            dirX: 0.0,
+            dirY: 1.0,
+            dirZ: 0.0,
             dirStrength: 1.0,
-            dirTintR: Light::SUN_TINT_R, dirTintG: Light::SUN_TINT_G, dirTintB: Light::SUN_TINT_B,
+            dirTintR: Light::SUN_TINT_R,
+            dirTintG: Light::SUN_TINT_G,
+            dirTintB: Light::SUN_TINT_B,
             skyAmbient: 1.0,
-            skyColR: Daylight::DAY_SKY_R, skyColG: Daylight::DAY_SKY_G, skyColB: Daylight::DAY_SKY_B,
+            skyColR: Daylight::DAY_SKY_R,
+            skyColG: Daylight::DAY_SKY_G,
+            skyColB: Daylight::DAY_SKY_B,
         };
         self.lcurve = 0;
         self.fillTable();
@@ -333,12 +405,22 @@ class ChunkRenderer {
      * @param u    tile u coordinate for the corner
      * @param v    tile v coordinate for the corner
      */
-    fn setCorner(mut self, dir : i32, k : i32, ox : i32, oy : i32, oz : i32, u : i32, v : i32) : void {
-        let b : i32 = (dir * 4 + k) * 3;
+    fn setCorner(
+        mut self,
+        dir : i32,
+        k : i32,
+        ox : i32,
+        oy : i32,
+        oz : i32,
+        u : i32,
+        v : i32
+    ) : void {
+        const b : i32 = (dir * 4 + k) * 3;
         self.coff[b] = ox;
         self.coff[b + 1] = oy;
         self.coff[b + 2] = oz;
-        let q : i32 = dir * 4 + k;
+
+        const q : i32 = dir * 4 + k;
         self.uvu[q] = u;
         self.uvv[q] = v;
     }
@@ -351,22 +433,27 @@ class ChunkRenderer {
         self.setCorner(0, 1, 1, 0, 1, 1, 1);
         self.setCorner(0, 2, 1, 1, 1, 1, 0);
         self.setCorner(0, 3, 1, 1, 0, 0, 0);
+
         self.setCorner(1, 0, 0, 0, 0, 0, 1);
         self.setCorner(1, 1, 0, 1, 0, 0, 0);
         self.setCorner(1, 2, 0, 1, 1, 1, 0);
         self.setCorner(1, 3, 0, 0, 1, 1, 1);
+
         self.setCorner(2, 0, 0, 1, 0, 0, 0);
         self.setCorner(2, 1, 1, 1, 0, 1, 0);
         self.setCorner(2, 2, 1, 1, 1, 1, 1);
         self.setCorner(2, 3, 0, 1, 1, 0, 1);
+
         self.setCorner(3, 0, 0, 0, 0, 0, 0);
         self.setCorner(3, 1, 0, 0, 1, 0, 1);
         self.setCorner(3, 2, 1, 0, 1, 1, 1);
         self.setCorner(3, 3, 1, 0, 0, 1, 0);
+
         self.setCorner(4, 0, 0, 0, 1, 0, 1);
         self.setCorner(4, 1, 1, 0, 1, 1, 1);
         self.setCorner(4, 2, 1, 1, 1, 1, 0);
         self.setCorner(4, 3, 0, 1, 1, 0, 0);
+
         self.setCorner(5, 0, 0, 0, 0, 0, 1);
         self.setCorner(5, 1, 0, 1, 0, 0, 0);
         self.setCorner(5, 2, 1, 1, 0, 1, 0);
@@ -384,7 +471,7 @@ class ChunkRenderer {
      * @param k    scratch slot index to store the result in
      */
     fn toCam(self, cam : Camera, w : Vec3, k : i32) : void {
-        let c : Vec3 = cam.toCamera(w);
+        const c : Vec3 = cam.toCamera(w);
         Mem::putRealOf(self.ca.x, k, c.x);
         Mem::putRealOf(self.ca.y, k, c.y);
         Mem::putRealOf(self.ca.z, k, c.z);
@@ -399,14 +486,46 @@ class ChunkRenderer {
      * @param o  output vertex slot
      */
     fn emitLerp(self, j : i32, i : i32, t : f64, o : i32) : void {
-        Mem::putRealOf(self.cb.x, o, Mem::realOf(self.ca.x, j) + (Mem::realOf(self.ca.x, i) - Mem::realOf(self.ca.x, j)) * t);
-        Mem::putRealOf(self.cb.y, o, Mem::realOf(self.ca.y, j) + (Mem::realOf(self.ca.y, i) - Mem::realOf(self.ca.y, j)) * t);
-        Mem::putRealOf(self.cb.z, o, Mem::realOf(self.ca.z, j) + (Mem::realOf(self.ca.z, i) - Mem::realOf(self.ca.z, j)) * t);
-        Mem::putRealOf(self.cb.u, o, Mem::realOf(self.ca.u, j) + (Mem::realOf(self.ca.u, i) - Mem::realOf(self.ca.u, j)) * t);
-        Mem::putRealOf(self.cb.v, o, Mem::realOf(self.ca.v, j) + (Mem::realOf(self.ca.v, i) - Mem::realOf(self.ca.v, j)) * t);
-        Mem::putRealOf(self.cb.r, o, Mem::realOf(self.ca.r, j) + (Mem::realOf(self.ca.r, i) - Mem::realOf(self.ca.r, j)) * t);
-        Mem::putRealOf(self.cb.g, o, Mem::realOf(self.ca.g, j) + (Mem::realOf(self.ca.g, i) - Mem::realOf(self.ca.g, j)) * t);
-        Mem::putRealOf(self.cb.b, o, Mem::realOf(self.ca.b, j) + (Mem::realOf(self.ca.b, i) - Mem::realOf(self.ca.b, j)) * t);
+        Mem::putRealOf(
+            self.cb.x,
+            o,
+            Mem::realOf(self.ca.x, j) + (Mem::realOf(self.ca.x, i) - Mem::realOf(self.ca.x, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.y,
+            o,
+            Mem::realOf(self.ca.y, j) + (Mem::realOf(self.ca.y, i) - Mem::realOf(self.ca.y, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.z,
+            o,
+            Mem::realOf(self.ca.z, j) + (Mem::realOf(self.ca.z, i) - Mem::realOf(self.ca.z, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.u,
+            o,
+            Mem::realOf(self.ca.u, j) + (Mem::realOf(self.ca.u, i) - Mem::realOf(self.ca.u, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.v,
+            o,
+            Mem::realOf(self.ca.v, j) + (Mem::realOf(self.ca.v, i) - Mem::realOf(self.ca.v, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.r,
+            o,
+            Mem::realOf(self.ca.r, j) + (Mem::realOf(self.ca.r, i) - Mem::realOf(self.ca.r, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.g,
+            o,
+            Mem::realOf(self.ca.g, j) + (Mem::realOf(self.ca.g, i) - Mem::realOf(self.ca.g, j)) * t
+        );
+        Mem::putRealOf(
+            self.cb.b,
+            o,
+            Mem::realOf(self.ca.b, j) + (Mem::realOf(self.ca.b, i) - Mem::realOf(self.ca.b, j)) * t
+        );
     }
 
     /**
@@ -447,12 +566,9 @@ class ChunkRenderer {
         if (n != 4) {
             return 0;
         }
-        let d02 : f64 = self.cornerLum(0) + self.cornerLum(2);
-        let d13 : f64 = self.cornerLum(1) + self.cornerLum(3);
-        if (d02 > d13) {
-            return 1;
-        }
-        return 0;
+        const d02 : f64 = self.cornerLum(0) + self.cornerLum(2);
+        const d13 : f64 = self.cornerLum(1) + self.cornerLum(3);
+        return d02 > d13 ? 1 : 0;
     }
 
     /**
@@ -462,7 +578,9 @@ class ChunkRenderer {
      * @return the corner's brightness
      */
     fn cornerLum(self, i : i32) : f64 {
-        return Mem::realOf(self.cb.r, i) + Mem::realOf(self.cb.g, i) + Mem::realOf(self.cb.b, i);
+        return Mem::realOf(self.cb.r, i)
+            + Mem::realOf(self.cb.g, i)
+            + Mem::realOf(self.cb.b, i);
     }
 
     /**
@@ -504,21 +622,21 @@ class ChunkRenderer {
         let j : i32 = nIn - 1;
         let i : i32 = 0;
         while (i < nIn) {
-            let zi : f64 = Mem::realOf(self.ca.z, i);
-            let zj : f64 = Mem::realOf(self.ca.z, j);
-            let inI : bool = zi >= Screen::NEAR_PLANE;
-            let inJ : bool = zj >= Screen::NEAR_PLANE;
+            const zi : f64 = Mem::realOf(self.ca.z, i);
+            const zj : f64 = Mem::realOf(self.ca.z, j);
+            const inI : bool = zi >= Screen::NEAR_PLANE;
+            const inJ : bool = zj >= Screen::NEAR_PLANE;
             if (inI != inJ) {
-                let t : f64 = (Screen::NEAR_PLANE - zj) / (zi - zj);
+                const t : f64 = (Screen::NEAR_PLANE - zj) / (zi - zj);
                 self.emitLerp(j, i, t, outN);
-                outN = outN + 1;
+                outN++;
             }
             if (inI) {
                 self.copyVert(i, outN);
-                outN = outN + 1;
+                outN++;
             }
             j = i;
-            i = i + 1;
+            i++;
         }
         return outN;
     }
@@ -537,7 +655,7 @@ class ChunkRenderer {
      * @return the classification value described above
      */
     fn cornerSample(self, man : ChunkManager, wx : i32, y : i32, wz : i32) : f64 {
-        let id : Block = man.worldGet(ivec3(wx, y, wz));
+        const id : Block = man.worldGet(ivec3(wx, y, wz));
         if (id == Block::Air) {
             return 0.0 - 1.0;
         }
@@ -547,7 +665,7 @@ class ChunkRenderer {
         if (isSource(id) || isWater(man.worldGet(ivec3(wx, y + 1, wz)))) {
             return 2.0;
         }
-        let lvl : i32 = fluidLevel(id);
+        const lvl : i32 = fluidLevel(id);
         return (lvl as f64) / 8.0;
     }
 
@@ -565,46 +683,48 @@ class ChunkRenderer {
      * @return the corner height fraction (0..1)
      */
     fn waterCornerY(self, man : ChunkManager, cx : i32, y : i32, cz : i32) : f64 {
-        let s0 : f64 = self.cornerSample(man, cx - 1, y, cz - 1);
-        let s1 : f64 = self.cornerSample(man, cx, y, cz - 1);
-        let s2 : f64 = self.cornerSample(man, cx - 1, y, cz);
-        let s3 : f64 = self.cornerSample(man, cx, y, cz);
+        const s0 : f64 = self.cornerSample(man, cx - 1, y, cz - 1);
+        const s1 : f64 = self.cornerSample(man, cx, y, cz - 1);
+        const s2 : f64 = self.cornerSample(man, cx - 1, y, cz);
+        const s3 : f64 = self.cornerSample(man, cx, y, cz);
         if (s0 > 1.5 || s1 > 1.5 || s2 > 1.5 || s3 > 1.5) {
             return 1.0;   // a source / column corner stays full height
         }
+
         // Air contributes Water::EDGE_HEIGHT (not a hard 0), so a flowing
         // edge keeps a bit of body and only eases down — a gentle lip rather
         // than a steep "skateboard ramp" right at the border.
         let sum : f64 = 0.0;
         let cnt : i32 = 0;
         if (s0 >= 0.0) {
-            sum = sum + s0;
-            cnt = cnt + 1;
+            sum += s0;
+            cnt++;
         } else if (s0 > 0.0 - 1.5) {
-            sum = sum + Water::EDGE_HEIGHT;
-            cnt = cnt + 1;
+            sum += Water::EDGE_HEIGHT;
+            cnt++;
         }
         if (s1 >= 0.0) {
-            sum = sum + s1;
-            cnt = cnt + 1;
+            sum += s1;
+            cnt++;
         } else if (s1 > 0.0 - 1.5) {
-            sum = sum + Water::EDGE_HEIGHT;
-            cnt = cnt + 1;
+            sum += Water::EDGE_HEIGHT;
+            cnt++;
         }
         if (s2 >= 0.0) {
-            sum = sum + s2;
-            cnt = cnt + 1;
+            sum += s2;
+            cnt++;
         } else if (s2 > 0.0 - 1.5) {
-            sum = sum + Water::EDGE_HEIGHT;
-            cnt = cnt + 1;
+            sum += Water::EDGE_HEIGHT;
+            cnt++;
         }
         if (s3 >= 0.0) {
-            sum = sum + s3;
-            cnt = cnt + 1;
+            sum += s3;
+            cnt++;
         } else if (s3 > 0.0 - 1.5) {
-            sum = sum + Water::EDGE_HEIGHT;
-            cnt = cnt + 1;
+            sum += Water::EDGE_HEIGHT;
+            cnt++;
         }
+
         if (cnt == 0) {
             return 1.0;
         }
@@ -629,20 +749,39 @@ class ChunkRenderer {
      * @param advZ     cells to the far end of the run along Z (0 if the run is not)
      * @return the corner's probe
      */
-    fn cornerProbe(self, cell : IVec3, off : IVec3, naxis : i32, advX : i32, advZ : i32) : CornerProbe {
-        let sgx : i32 = off.x * 2 - 1;
-        let sgy : i32 = off.y * 2 - 1;
-        let sgz : i32 = off.z * 2 - 1;
-        let base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
+    fn cornerProbe(
+        self,
+        cell : IVec3,
+        off : IVec3,
+        naxis : i32,
+        advX : i32,
+        advZ : i32
+    ) : CornerProbe {
+        const sgx : i32 = off.x * 2 - 1;
+        const sgy : i32 = off.y * 2 - 1;
+        const sgz : i32 = off.z * 2 - 1;
+        const base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
         match naxis {
             0 => {
-                return CornerProbe { base: base, t1: ivec3(0, sgy, 0), t2: ivec3(0, 0, sgz) };
+                return CornerProbe {
+                    base,
+                    t1: ivec3(0, sgy, 0),
+                    t2: ivec3(0, 0, sgz),
+                };
             }
             1 => {
-                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, 0, sgz) };
+                return CornerProbe {
+                    base,
+                    t1: ivec3(sgx, 0, 0),
+                    t2: ivec3(0, 0, sgz),
+                };
             }
             _ => {
-                return CornerProbe { base: base, t1: ivec3(sgx, 0, 0), t2: ivec3(0, sgy, 0) };
+                return CornerProbe {
+                    base,
+                    t1: ivec3(sgx, 0, 0),
+                    t2: ivec3(0, sgy, 0),
+                };
             }
         }
     }
@@ -655,7 +794,7 @@ class ChunkRenderer {
      * @return the sky-AO factor in [`Light::AO_SKY_MIN`, 1]
      */
     fn skyAOFactor(self, s : CornerSample) : f64 {
-        let skyAcc : f64 = (s.sky as f64) * 0.00392157;
+        const skyAcc : f64 = (s.sky as f64) * 0.00392157;
         return Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * skyAcc;
     }
 
@@ -669,7 +808,8 @@ class ChunkRenderer {
         return vec3(
             (((s.bounce >> 16) & 0xFF) as f64) * 0.0078125,
             (((s.bounce >> 8) & 0xFF) as f64) * 0.0078125,
-            ((s.bounce & 0xFF) as f64) * 0.0078125);
+            ((s.bounce & 0xFF) as f64) * 0.0078125
+        );
     }
 
     // ── World faces (water surface heights, face baking) ──
@@ -684,15 +824,24 @@ class ChunkRenderer {
      * @param ox      the slot's world x origin — the faces store chunk-local x
      * @param oz      …and z
      */
-    fn renderFace(mut self, man : ChunkManager, idx : i32, cam : Camera, phase : f64,
-        ox : i32, oz : i32) : void {
-        let x : i32 = ox + (man.mesher.faces.fx[idx] as i32);
-        let y : i32 = man.mesher.faces.fy[idx] as i32;
-        let z : i32 = oz + (man.mesher.faces.fz[idx] as i32);
+    fn renderFace(
+        mut self,
+        man : ChunkManager,
+        idx : i32,
+        cam : Camera,
+        phase : f64,
+        ox : i32,
+        oz : i32
+    ) : void {
+        const x : i32 = ox + (man.mesher.faces.fx[idx] as i32);
+        const y : i32 = man.mesher.faces.fy[idx] as i32;
+        const z : i32 = oz + (man.mesher.faces.fz[idx] as i32);
+
         // Unpack the direction and atlas tile from the packed ftile slot.
-        let packed : i32 = man.mesher.faces.ftile[idx] as i32;
-        let dir : FaceDir = faceDirFrom(packed / 256);
-        let isWaterFace : bool = (packed % 256) == Tile::WATER;
+        const packed : i32 = man.mesher.faces.ftile[idx] as i32;
+        const dir : FaceDir = faceDirFrom(packed / 256);
+        const isWaterFace : bool = (packed % 256) == Tile::WATER;
+
         // Cells this face spans, from the mesher's greedy merge, stretched along
         // one axis. Which axis needs no table: for every direction the corner's
         // `u` is exactly its offset along a HORIZONTAL axis — X for the top, the
@@ -702,8 +851,8 @@ class ChunkRenderer {
         // The extent is wanted whole HERE, for the culling centre and the
         // distance cut, which measure the surface that is actually there; the
         // span loop below is what decides how many quads it is drawn as.
-        let run : i32 = man.mesher.faces.frun[idx] as i32;
-        let runF : f64 = run as f64;
+        const run : i32 = man.mesher.faces.frun[idx] as i32;
+        const runF : f64 = run as f64;
         let runX : f64 = 1.0;
         let runZ : f64 = 1.0;
         if (dir == FaceDir::PosX || dir == FaceDir::NegX) {
@@ -711,6 +860,7 @@ class ChunkRenderer {
         } else {
             runX = runF;
         }
+
         let nx : f64 = 0.0;
         let ny : f64 = 0.0;
         let nz : f64 = 0.0;
@@ -737,15 +887,16 @@ class ChunkRenderer {
 
         // The centre of the MERGED quad, so back-face culling and the distance
         // cut both measure the thing that is actually drawn.
-        let fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
-        let fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
-        let fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
-        let vx : f64 = cam.eye.x - fcx;
-        let vy : f64 = cam.eye.y - fcy;
-        let vz : f64 = cam.eye.z - fcz;
+        const fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
+        const fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
+        const fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
+        const vx : f64 = cam.eye.x - fcx;
+        const vy : f64 = cam.eye.y - fcy;
+        const vz : f64 = cam.eye.z - fcz;
         if (vx * vx + vz * vz > Render::DRAW_DIST * Render::DRAW_DIST) {
             return;
         }
+
         // Water surfaces AND the top of a partial block (thin snow, a slab) draw
         // double-sided so the surface stays visible from below; every other face
         // back-face culls. Without this the raised partial top back-face culls
@@ -757,15 +908,16 @@ class ChunkRenderer {
         // and only a TOP face can be the exception at all. So the ordinary case
         // goes first and the walk is paid by the few faces that reach it, not by
         // every face in the ring.
-        let facing : f64 = vx * nx + vy * ny + vz * nz;
+        const facing : f64 = vx * nx + vy * ny + vz * nz;
         if (!isWaterFace && facing <= 0.0 && ny <= 0.0) {
             return;
         }
+
         // Partial, floor-resting blocks (thin snow, slabs later) render at their
         // real box height (top + side tops lowered to y + boxH), like a short
         // water surface. blockBoxHeight is the single authority (1.0 = full cube).
-        let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
-        let isPartialFace : bool = boxH < 1.0;
+        const boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
+        const isPartialFace : bool = boxH < 1.0;
         if (!isWaterFace && facing <= 0.0 && !isPartialFace) {
             return;
         }
@@ -776,11 +928,11 @@ class ChunkRenderer {
         let flowU : f64 = 0.0;
         let flowV : f64 = 0.0;
         if (isWaterFace) {
-            let lpx : i32 = fluidLevel(man.worldGet(ivec3(x + 1, y, z)));
-            let lnx : i32 = fluidLevel(man.worldGet(ivec3(x - 1, y, z)));
-            let lpz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z + 1)));
-            let lnz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z - 1)));
-            let tscroll : f64 = phase * Water::FLOW_SPEED;
+            const lpx : i32 = fluidLevel(man.worldGet(ivec3(x + 1, y, z)));
+            const lnx : i32 = fluidLevel(man.worldGet(ivec3(x - 1, y, z)));
+            const lpz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z + 1)));
+            const lnz : i32 = fluidLevel(man.worldGet(ivec3(x, y, z - 1)));
+            const tscroll : f64 = phase * Water::FLOW_SPEED;
             flowU = ((lpx - lnx) as f64) * tscroll;
             flowV = ((lpz - lnz) as f64) * tscroll;
         }
@@ -790,8 +942,12 @@ class ChunkRenderer {
         let bright : FaceLight = self.day.shade(vec3(nx, ny, nz));
         if (isWaterFace && facing <= 0.0) {
             // underside / far face of water, dimmer on both counts
-            bright = FaceLight { direct: bright.direct * 0.62, ambient: bright.ambient * 0.62 };
+            bright = FaceLight {
+                direct: bright.direct * 0.62,
+                ambient: bright.ambient * 0.62,
+            };
         }
+
         // Directional sun shadow: if the air cell this face looks into is in the
         // sun's cast shadow, drop toward ambient (keeping Light::SHADOW_KEEP of
         // the direct term). A cell the bake never visits reads as full sun, so
@@ -810,23 +966,24 @@ class ChunkRenderer {
             FaceDir::PosZ => { sbz = z + 1; }
             _ => { sbz = z - 1; }
         }
-        let shadowCell : IVec3 = ivec3(sbx, sby, sbz);
+        const shadowCell : IVec3 = ivec3(sbx, sby, sbz);
+
         // `bright` is now the pure Lambert (sun-direction) term; the cast shadow
         // is applied PER CORNER below (smooth, face-independent), not flattened
         // over the whole face here — that's what removes the block staircase.
-        let shade : FaceShade = FaceShade {
-            idx: idx,
+        const shade : FaceShade = FaceShade {
+            idx,
             tile: packed % 256,
-            dir: dir,
+            dir,
             naxis: (dir as i32) / 2,   // normal axis: 0=X, 1=Y, 2=Z
             normal: vec3(nx, ny, nz),
             light: bright,
-            boxH: boxH,
+            boxH,
             isWater: isWaterFace,
             isPartial: isPartialFace,
             wrap: isWaterFace || run > 1,
-            flowU: flowU,
-            flowV: flowV,
+            flowU,
+            flowV,
         };
 
         // A merged quad carries the cast shadow at its four CORNERS and lets the
@@ -838,13 +995,14 @@ class ChunkRenderer {
         // So the run is cut where the shadow is NOT flat along it, and only
         // there: most of the world is evenly lit or evenly shaded, and those runs
         // still go out whole, which is what the merge was for.
-        let step : i32 = self.shadowStep(man, shade, shadowCell, run);
+        const step : i32 = self.shadowStep(man, shade, shadowCell, run);
         let start : i32 = 0;
         while (start < run) {
             let len : i32 = step;
             if (start + len > run) {
                 len = run - start;
             }
+
             let advX : i32 = 0;
             let advZ : i32 = 0;
             if (shade.naxis == 0) {
@@ -852,13 +1010,19 @@ class ChunkRenderer {
             } else {
                 advX = start;
             }
-            self.emitSpan(man, cam, shade, FaceSpan {
-                cell: ivec3(x + advX, y, z + advZ),
-                probe: ivec3(shadowCell.x + advX, shadowCell.y, shadowCell.z + advZ),
-                run: len,
-                uOff: start as f64,
-            });
-            start = start + len;
+
+            self.emitSpan(
+                man,
+                cam,
+                shade,
+                FaceSpan {
+                    cell: ivec3(x + advX, y, z + advZ),
+                    probe: ivec3(shadowCell.x + advX, shadowCell.y, shadowCell.z + advZ),
+                    run: len,
+                    uOff: start as f64,
+                }
+            );
+            start += len;
         }
     }
 
@@ -886,25 +1050,28 @@ class ChunkRenderer {
         if ((Mem::byteAt(man.mesher.faces.flight, (fs.idx * 4 * 2) as i64) >> 4) == 0) {
             return run;
         }
+
         let dx : i32 = 1;
         let dz : i32 = 0;
         if (fs.naxis == 0) {
             dx = 0;
             dz = 1;
         }
+
         let lo : i32 = 255;
         let hi : i32 = 0;
         let i : i32 = 0;
         while (i < run) {
-            let v : i32 = man.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
+            const v : i32 = man.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
             if (v < lo) {
                 lo = v;
             }
             if (v > hi) {
                 hi = v;
             }
-            i = i + 1;
+            i++;
         }
+
         if (hi - lo > Light::SHADOW_SPLIT) {
             return 1;
         }
@@ -924,12 +1091,13 @@ class ChunkRenderer {
      * @param sp   this span's origin, length and texture offset
      */
     fn emitSpan(mut self, man : ChunkManager, cam : Camera, fs : FaceShade, sp : FaceSpan) : void {
-        let x : i32 = sp.cell.x;
-        let y : i32 = sp.cell.y;
-        let z : i32 = sp.cell.z;
-        let nx : f64 = fs.normal.x;
-        let ny : f64 = fs.normal.y;
-        let nz : f64 = fs.normal.z;
+        const x : i32 = sp.cell.x;
+        const y : i32 = sp.cell.y;
+        const z : i32 = sp.cell.z;
+        const nx : f64 = fs.normal.x;
+        const ny : f64 = fs.normal.y;
+        const nz : f64 = fs.normal.z;
+
         // Cells the span spans, per axis: the run on the one it runs along, one
         // on the other. As integers, because the corner's world column is one of
         // them and the far end of the run is the other minus one.
@@ -940,7 +1108,7 @@ class ChunkRenderer {
         } else {
             runXi = sp.run;
         }
-        let runF : f64 = sp.run as f64;
+        const runF : f64 = sp.run as f64;
 
         // Load the 4 corners into camera space + their tile UVs, and bake each
         // corner's light colour (smooth light + AO + per-corner soft shadow) into
@@ -949,19 +1117,20 @@ class ChunkRenderer {
         // surface: each corner takes the average height of the water columns
         // meeting at it, so adjacent levels join in a continuous ramp with no
         // vertical "façade" gaps between layers.
-        let di : i32 = fs.dir as i32;
-        let q : i32 = di * 4;
+        const di : i32 = fs.dir as i32;
+        const q : i32 = di * 4;
         let k : i32 = 0;
         while (k < 4) {
-            let b : i32 = (di * 4 + k) * 3;
-            let oxv : i32 = self.coff[b];
-            let oyv : i32 = self.coff[b + 1];
-            let ozv : i32 = self.coff[b + 2];
+            const b : i32 = (di * 4 + k) * 3;
+            const oxv : i32 = self.coff[b];
+            const oyv : i32 = self.coff[b + 1];
+            const ozv : i32 = self.coff[b + 2];
+
             // The corner's own world column — its block offset stretched along
             // the run. The water height and the eye vector both want the column
             // the corner actually sits over, not the span's origin.
-            let cwx : i32 = x + oxv * runXi;
-            let cwz : i32 = z + ozv * runZi;
+            const cwx : i32 = x + oxv * runXi;
+            const cwz : i32 = z + ozv * runZi;
             let cornerY : f64 = (y as f64) + (oyv as f64);
             if (fs.isWater && oyv > 0) {
                 cornerY = (y as f64) + self.waterCornerY(man, cwx, y, cwz);
@@ -971,28 +1140,35 @@ class ChunkRenderer {
             self.toCam(cam, vec3(cwx as f64, cornerY, cwz as f64), k);
             Mem::putRealOf(self.ca.u, k, (self.uvu[q + k] as f64) * runF + sp.uOff + fs.flowU);
             Mem::putRealOf(self.ca.v, k, (self.uvv[q + k] as f64) + fs.flowV);
+
             // Every smooth term is read AT THIS CORNER, through one probe: the
             // corner's own air cell and the two in-plane steps to the other
             // three cells meeting there. On a merged quad that cell is the far
             // end of the run, not the face's origin — a term sampled at the
             // origin would be spread over eight blocks of surface.
-            let smp : CornerSample = man.cornerSample(
-                self.cornerProbe(sp.probe, ivec3(oxv, oyv, ozv), fs.naxis, runXi - 1, runZi - 1));
+            const probe : CornerProbe = self.cornerProbe(
+                sp.probe,
+                ivec3(oxv, oyv, ozv),
+                fs.naxis,
+                runXi - 1,
+                runZi - 1
+            );
+            const smp : CornerSample = man.cornerSample(probe);
 
-            let visK : f64 = (smp.sun as f64) * 0.00392157;
-            let keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
-            let brightK : f64 = fs.light.exposure(keepK);
+            const visK : f64 = (smp.sun as f64) * 0.00392157;
+            const keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
+            const brightK : f64 = fs.light.exposure(keepK);
 
             // Per-corner smooth light: the four nibbles the mesher averaged —
             // sky, then block red / green / blue — each through the exponential
             // curve (sky dimmed by daylight), with the corner's shaded
             // brightness and its ambient occlusion.
-            let lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
-            let lb0 : i32 = Mem::byteAt(man.mesher.faces.flight, lo);
-            let lb1 : i32 = Mem::byteAt(man.mesher.faces.flight, lo + 1);
-            let aok : i32 = (Mem::byteAt(man.mesher.faces.fao, fs.idx as i64) >> (2 * k)) & 3;
-            let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
-            let lit : CornerLight = CornerLight {
+            const lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
+            const lb0 : i32 = Mem::byteAt(man.mesher.faces.flight, lo);
+            const lb1 : i32 = Mem::byteAt(man.mesher.faces.flight, lo + 1);
+            const aok : i32 = (Mem::byteAt(man.mesher.faces.fao, fs.idx as i64) >> (2 * k)) & 3;
+            const aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
+            const lit : CornerLight = CornerLight {
                 sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.skyAOFactor(smp),
                 block: LinRgb {
                     r: Mem::realOf(self.lcurve, lb0 & 0xF),
@@ -1013,8 +1189,13 @@ class ChunkRenderer {
             // blue of 0.56 where the table says 0.86.
             let cc : LinRgb = lit.colour(skyTint(
                 fs.light.directShare(keepK),
-                LinRgb { r: self.day.dirTintR, g: self.day.dirTintG, b: self.day.dirTintB },
-                self.bounceTint(smp)));
+                LinRgb {
+                    r: self.day.dirTintR,
+                    g: self.day.dirTintG,
+                    b: self.day.dirTintB,
+                },
+                self.bounceTint(smp)
+            ));
 
             // View vector from this corner to the eye. Both reflections want it:
             // water's sharp glint, and the broad sheen every other surface has.
@@ -1025,16 +1206,16 @@ class ChunkRenderer {
             if (vl < 0.0001) {
                 vl = 0.0001;
             }
-            vx = vx / vl;
-            vy = vy / vl;
-            vz = vz / vl;
+            vx /= vl;
+            vy /= vl;
+            vz /= vl;
 
             if (fs.isWater) {
                 // Sun glint: half-vector specular, cos^32, gated by sun visibility
                 // and daylight. A strong warm multiplier that bloom turns to gold.
-                let hx : f64 = vx + self.day.sunX;
-                let hy : f64 = vy + self.day.sunY;
-                let hz : f64 = vz + self.day.sunZ;
+                const hx : f64 = vx + self.day.sunX;
+                const hy : f64 = vy + self.day.sunY;
+                const hz : f64 = vz + self.day.sunZ;
                 let hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
                 if (hl < 0.0001) {
                     hl = 0.0001;
@@ -1043,20 +1224,21 @@ class ChunkRenderer {
                 if (ndh < 0.0) {
                     ndh = 0.0;
                 }
-                let s2 : f64 = ndh * ndh;
-                let s4 : f64 = s2 * s2;
-                let s8 : f64 = s4 * s4;
-                let s16 : f64 = s8 * s8;
-                let spec : f64 = s16 * s16 * visK * self.day.dirStrength * Water::SPEC_STRENGTH;
+                const s2 : f64 = ndh * ndh;
+                const s4 : f64 = s2 * s2;
+                const s8 : f64 = s4 * s4;
+                const s16 : f64 = s8 * s8;
+                const spec : f64 = s16 * s16 * visK * self.day.dirStrength * Water::SPEC_STRENGTH;
+
                 // Fresnel: brighter at grazing view angles (sky-reflection sheen).
                 let ndv : f64 = nx * vx + ny * vy + nz * vz;
                 if (ndv < 0.0) {
                     ndv = 0.0;
                 }
-                let om : f64 = 1.0 - ndv;
-                let om2 : f64 = om * om;
-                let fres : f64 = Water::F0 + (1.0 - Water::F0) * om2 * om2 * om;
-                let fboost : f64 = 1.0 + fres * Water::FRESNEL_STRENGTH;
+                const om : f64 = 1.0 - ndv;
+                const om2 : f64 = om * om;
+                const fres : f64 = Water::F0 + (1.0 - Water::F0) * om2 * om2 * om;
+                const fboost : f64 = 1.0 + fres * Water::FRESNEL_STRENGTH;
                 cc.r = cc.r * fboost * (1.0 + spec * 1.10);
                 cc.g = cc.g * fboost * (1.0 + spec * 1.00);
                 cc.b = cc.b * fboost * (1.0 + spec * 0.72);
@@ -1065,35 +1247,44 @@ class ChunkRenderer {
                 // colour rather than multiplied into the texel's, so a surface in
                 // full sun moves toward the light instead of simply becoming more
                 // of itself — which is what stops grass at noon reading as paint.
-                let sh : f64 = sunSheen(fs.normal, vec3(vx, vy, vz),
-                    vec3(self.day.dirX, self.day.dirY, self.day.dirZ), visK)
-                    * self.day.dirStrength;
-                cc.r = cc.r + sh * self.day.dirTintR;
-                cc.g = cc.g + sh * self.day.dirTintG;
-                cc.b = cc.b + sh * self.day.dirTintB;
+                const sheen : f64 = sunSheen(
+                    fs.normal,
+                    vec3(vx, vy, vz),
+                    vec3(self.day.dirX, self.day.dirY, self.day.dirZ),
+                    visK
+                );
+                const sh : f64 = sheen * self.day.dirStrength;
+                cc.r += sh * self.day.dirTintR;
+                cc.g += sh * self.day.dirTintG;
+                cc.b += sh * self.day.dirTintB;
             }
             Mem::putRealOf(self.ca.r, k, cc.r);
             Mem::putRealOf(self.ca.g, k, cc.g);
             Mem::putRealOf(self.ca.b, k, cc.b);
-            k = k + 1;
+            k++;
         }
 
         // Clip against the near plane, then project the surviving polygon.
-        let n : i32 = self.clipNear(4);
+        const n : i32 = self.clipNear(4);
         if (n < 3) {
             return;
         }
+
         // Mip selection + filtering is now per pixel in the rasteriser
         // (anisotropic), so no per-face mip is computed here.
         // Per-corner light colour was baked into car/cag/cab and carried through
         // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
         let v : i32 = 0;
         while (v < n) {
-            let sp : Projected = cam.screenOf(vec3(Mem::realOf(self.cb.x, v), Mem::realOf(self.cb.y, v), Mem::realOf(self.cb.z, v)));
-            Mem::putRealOf(self.cs.sx, v, sp.sx);
-            Mem::putRealOf(self.cs.sy, v, sp.sy);
-            Mem::putRealOf(self.cs.iz, v, sp.iz);
-            v = v + 1;
+            const proj : Projected = cam.screenOf(vec3(
+                Mem::realOf(self.cb.x, v),
+                Mem::realOf(self.cb.y, v),
+                Mem::realOf(self.cb.z, v)
+            ));
+            Mem::putRealOf(self.cs.sx, v, proj.sx);
+            Mem::putRealOf(self.cs.sy, v, proj.sy);
+            Mem::putRealOf(self.cs.iz, v, proj.iz);
+            v++;
         }
 
         // Fan-triangulate the clipped polygon from vertex 0 and QUEUE each
@@ -1103,16 +1294,13 @@ class ChunkRenderer {
         // A merged quad tiles its texture, which is the same wrap the scrolled
         // water surface asks for — and a span cut out of one carries a texture
         // offset, so it wraps for the same reason even when it is one cell wide.
-        let wf : i32 = 0;
-        if (fs.wrap) {
-            wf = 1;
-        }
-        let o : i32 = self.fanOrigin(n);
+        const wf : i32 = fs.wrap ? 1 : 0;
+        const o : i32 = self.fanOrigin(n);
         let t : i32 = 1;
         while (t < n - 1) {
             if (self.triN < Render::TRI_QUEUE_CAP) {
-                let i1 : i32 = (o + t) % n;
-                let i2 : i32 = (o + t + 1) % n;
+                const i1 : i32 = (o + t) % n;
+                const i2 : i32 = (o + t + 1) % n;
                 // The column span, taken here where the projection just ran,
                 // so the fill's band test costs a comparison instead of a
                 // whole triangle setup it then throws away.
@@ -1128,11 +1316,11 @@ class ChunkRenderer {
                     tile: fs.tile as i16,
                     wrap: wf as i8,
                     minx: colLo,
-                    maxx: colHi
+                    maxx: colHi,
                 };
-                self.triN = self.triN + 1;
+                self.triN++;
             }
-            t = t + 1;
+            t++;
         }
     }
 
@@ -1148,7 +1336,14 @@ class ChunkRenderer {
      * @param day     the day/night state (sun / daylight for corner shading)
      * @param lcurve  the brightness-curve lookup
      */
-    pub(crate) fn setFrame(mut self, atlas : MipAtlas, gam : Gamma, fogT : FogTable, day : DayState, lcurve : i64) : void {
+    pub(crate) fn setFrame(
+        mut self,
+        atlas : MipAtlas,
+        gam : Gamma,
+        fogT : FogTable,
+        day : DayState,
+        lcurve : i64
+    ) : void {
         self.atlas = atlas;
         self.gam = gam;
         self.fogT = fogT;
@@ -1176,24 +1371,32 @@ class ChunkRenderer {
      * @param first   the first slot this worker takes
      * @param stride  how many workers there are
      */
-    pub(crate) fn buildSlots(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64,
-        first : i32, stride : i32) : void {
-        let slots : i32 = World::SPAN * World::SPAN;
-        let cone : ViewCone = viewConeFor(p, cam.lens);
+    pub(crate) fn buildSlots(
+        mut self,
+        man : ChunkManager,
+        p : Player,
+        cam : Camera,
+        phase : f64,
+        first : i32,
+        stride : i32
+    ) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        const cone : ViewCone = viewConeFor(p, cam.lens);
         let slot : i32 = first;
         while (slot < slots) {
-            if (man.cols.loaded[slot] == 1 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
-                let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
-                let n : i32 = man.mesher.faces.fcount[slot];
-                let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
-                let oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
+            if (man.cols.loaded[slot] == 1
+                && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
+                const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+                const n : i32 = man.mesher.faces.fcount[slot];
+                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
+                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
                 let fi : i32 = 0;
                 while (fi < n) {
                     self.renderFace(man, base + fi, cam, phase, ox, oz);
-                    fi = fi + 1;
+                    fi++;
                 }
             }
-            slot = slot + stride;
+            slot += stride;
         }
         self.queuedTris = self.triN;
     }
@@ -1209,22 +1412,39 @@ class ChunkRenderer {
      */
     pub(crate) fn rasterizeBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
         let i : i32 = 0;
-        let band : Band = Band { x0: bx0, x1: bx1 };
+        const band : Band = Band { x0: bx0, x1: bx1 };
         while (i < self.triN) {
-            let tri : RasterTri = self.triBuf[i];
+            const tri : RasterTri = self.triBuf[i];
             // The band owns columns [bx0, bx1); a triangle that touches none
             // of them is done with here, before the setup it would not use.
             if ((tri.maxx as i32) >= bx0 && (tri.minx as i32) < bx1) {
                 rasterTriTex(fb, tri, self.atlas, self.gam, self.fogT, band);
             }
-            i = i + 1;
+            i++;
         }
     }
 }
 
-/** Worker job: project / clip / light one worker's share of the chunks. */
-fn buildSlotsJob(r : ChunkRenderer, man : ChunkManager, p : Player, cam : Camera, phase : f64,
-    first : i32, stride : i32) : i32 {
+/**
+ * Worker job: project / clip / light one worker's share of the chunks.
+ * @param r       the worker whose triangle queue the share is built into
+ * @param man     chunk manager holding the loaded chunks and baked faces
+ * @param p       player providing the eye position (for chunk culling)
+ * @param cam     the camera (eye + orientation + projection width)
+ * @param phase   animation time phase (scrolls flowing-water textures)
+ * @param first   the first slot this worker takes
+ * @param stride  how many workers there are
+ * @return always 0 — the job's result is the filled queue on `r`
+ */
+fn buildSlotsJob(
+    r : ChunkRenderer,
+    man : ChunkManager,
+    p : Player,
+    cam : Camera,
+    phase : f64,
+    first : i32,
+    stride : i32
+) : i32 {
     r.buildSlots(man, p, cam, phase, first, stride);
     return 0;
 }

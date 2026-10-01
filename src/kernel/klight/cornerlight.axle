@@ -22,7 +22,13 @@ use crate::kernel::klight::gamma::{ LinRgb };
 use crate::kernel::kmath::vec3::{ Vec3 };
 use crate::configs::light::{ Light };
 
-/** Rec. 601 luminance of a linear triple — what "the same brightness" means here. */
+/**
+ * Rec. 601 luminance of a linear triple — what "the same brightness" means here.
+ * @param r  linear red
+ * @param g  linear green
+ * @param b  linear blue
+ * @return the weighted luminance
+ */
 fn luma(r : f64, g : f64, b : f64) : f64 {
     return 0.299 * r + 0.587 * g + 0.114 * b;
 }
@@ -58,15 +64,24 @@ fn skyTint(direct : f64, sun : LinRgb, bounce : Vec3) : LinRgb {
     if (k > 1.0) {
         k = 1.0;
     }
-    let ind : f64 = 1.0 - k;
-    let r : f64 = (Light::SHADE_TINT_R + (sun.r - Light::SHADE_TINT_R) * k) * (1.0 + (bounce.x - 1.0) * ind);
-    let g : f64 = (Light::SHADE_TINT_G + (sun.g - Light::SHADE_TINT_G) * k) * (1.0 + (bounce.y - 1.0) * ind);
-    let b : f64 = (Light::SHADE_TINT_B + (sun.b - Light::SHADE_TINT_B) * k) * (1.0 + (bounce.z - 1.0) * ind);
+    const ind : f64 = 1.0 - k;
+
+    const r : f64 = (Light::SHADE_TINT_R + (sun.r - Light::SHADE_TINT_R) * k)
+        * (1.0 + (bounce.x - 1.0) * ind);
+    const g : f64 = (Light::SHADE_TINT_G + (sun.g - Light::SHADE_TINT_G) * k)
+        * (1.0 + (bounce.y - 1.0) * ind);
+    const b : f64 = (Light::SHADE_TINT_B + (sun.b - Light::SHADE_TINT_B) * k)
+        * (1.0 + (bounce.z - 1.0) * ind);
+
     let l : f64 = luma(r, g, b);
     if (l < 0.0001) {
         l = 0.0001;
     }
-    return LinRgb { r: r / l, g: g / l, b: b / l };
+    return LinRgb {
+        r: r / l,
+        g: g / l,
+        b: b / l,
+    };
 }
 
 /**
@@ -96,28 +111,31 @@ fn sunSheen(n : Vec3, v : Vec3, sun : Vec3, vis : f64) : f64 {
     if (!Light::SHEEN_ON || vis <= 0.0) {
         return 0.0;
     }
-    let hx : f64 = v.x + sun.x;
-    let hy : f64 = v.y + sun.y;
-    let hz : f64 = v.z + sun.z;
-    let hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
+    const hx : f64 = v.x + sun.x;
+    const hy : f64 = v.y + sun.y;
+    const hz : f64 = v.z + sun.z;
+    const hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
     if (hl < 0.0001) {
         return 0.0;
     }
-    let ndh : f64 = (n.x * hx + n.y * hy + n.z * hz) / hl;
+
+    const ndh : f64 = (n.x * hx + n.y * hy + n.z * hz) / hl;
     if (ndh <= 0.0) {
         return 0.0;
     }
     let lobe : f64 = ndh;
     for (i of 1..Light::SHEEN_EXP) {
-        lobe = lobe * ndh;
+        lobe *= ndh;
     }
+
     let ndv : f64 = n.dot(v);
     if (ndv < 0.0) {
         ndv = 0.0;
     }
-    let om : f64 = 1.0 - ndv;
-    let om2 : f64 = om * om;
-    return Light::SHEEN_STRENGTH * lobe * vis * (1.0 + Light::SHEEN_GRAZE * om2 * om2 * om);
+    const om : f64 = 1.0 - ndv;
+    const om2 : f64 = om * om;
+    return Light::SHEEN_STRENGTH * lobe * vis
+        * (1.0 + Light::SHEEN_GRAZE * om2 * om2 * om);
 }
 
 /**
@@ -141,9 +159,9 @@ struct CornerLight {
      * @return the corner's light colour
      */
     pub(crate) fn colour(self, tint : LinRgb) : LinRgb {
-        let sun : f64 = self.bright * self.sky;
-        let dark : f64 = Light::MIN * self.ao;
-        let span : f64 = (1.0 - Light::MIN) * self.ao;
+        const sun : f64 = self.bright * self.sky;
+        const dark : f64 = Light::MIN * self.ao;
+        const span : f64 = (1.0 - Light::MIN) * self.ao;
         return LinRgb {
             r: dark + span * (sun * tint.r + self.block.r),
             g: dark + span * (sun * tint.g + self.block.g),

@@ -40,13 +40,12 @@ class CloudMap {
 
     /** Allocate the map, open everywhere until the first bake fills it. */
     constructor() {
-        let n : i64 = (Cloud::MAP_SIDE as i64) * (Cloud::MAP_SIDE as i64);
+        const n : i64 = (Cloud::MAP_SIDE as i64) * (Cloud::MAP_SIDE as i64);
         self.cells = Mem::takeZeroed(n);
-        let i : i64 = 0;
-        while (i < n) {
+        for (i of 0..n) {
             Mem::putByte(self.cells, i, 255);
-            i = i + 1;
         }
+
         self.originX = 0;
         self.originZ = 0;
         self.step = Cloud::MAP_SPAN / Cloud::MAP_SIDE;
@@ -66,22 +65,23 @@ class CloudMap {
         if (self.live == 0) {
             return 1.0;
         }
-        let fx : f64 = (wx - (self.originX as f64)) / (self.step as f64);
-        let fz : f64 = (wz - (self.originZ as f64)) / (self.step as f64);
-        let ix : i32 = fx.floorToInt() as i32;
-        let iz : i32 = fz.floorToInt() as i32;
+        const fx : f64 = (wx - (self.originX as f64)) / (self.step as f64);
+        const fz : f64 = (wz - (self.originZ as f64)) / (self.step as f64);
+        const ix : i32 = fx.floorToInt() as i32;
+        const iz : i32 = fz.floorToInt() as i32;
         if (ix < 0 || iz < 0 || ix >= Cloud::MAP_SIDE - 1 || iz >= Cloud::MAP_SIDE - 1) {
             return 1.0;
         }
-        let tx : f64 = fx - (ix as f64);
-        let tz : f64 = fz - (iz as f64);
-        let s : i32 = Cloud::MAP_SIDE;
-        let a : f64 = (Mem::byteAt(self.cells, (iz * s + ix) as i64) as f64);
-        let b : f64 = (Mem::byteAt(self.cells, (iz * s + ix + 1) as i64) as f64);
-        let c : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix) as i64) as f64);
-        let d : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix + 1) as i64) as f64);
-        let top : f64 = a + (b - a) * tx;
-        let bot : f64 = c + (d - c) * tx;
+
+        const tx : f64 = fx - (ix as f64);
+        const tz : f64 = fz - (iz as f64);
+        const s : i32 = Cloud::MAP_SIDE;
+        const a : f64 = (Mem::byteAt(self.cells, (iz * s + ix) as i64) as f64);
+        const b : f64 = (Mem::byteAt(self.cells, (iz * s + ix + 1) as i64) as f64);
+        const c : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix) as i64) as f64);
+        const d : f64 = (Mem::byteAt(self.cells, ((iz + 1) * s + ix + 1) as i64) as f64);
+        const top : f64 = a + (b - a) * tx;
+        const bot : f64 = c + (d - c) * tx;
         return (top + (bot - top) * tz) * 0.00392157;
     }
 
@@ -101,24 +101,26 @@ class CloudMap {
         // Not every pass. The march is thousands of noise evaluations and the
         // wind moves a cloud across one cell in seconds; the exception is a map
         // that has never been filled, or one the player has walked off.
-        self.due = self.due - 1;
+        self.due--;
         if (self.live == 1 && self.due > 0
             && (camX - self.originX - Cloud::MAP_SPAN / 2).abs() < Cloud::MAP_SPAN / 4
             && (camZ - self.originZ - Cloud::MAP_SPAN / 2).abs() < Cloud::MAP_SPAN / 4) {
             return;
         }
+
         self.due = Cloud::MAP_EVERY;
-        let half : i32 = Cloud::MAP_SPAN / 2;
+        const half : i32 = Cloud::MAP_SPAN / 2;
         self.originX = camX - half;
         self.originZ = camZ - half;
-        let s : i32 = Cloud::MAP_SIDE;
+
+        const s : i32 = Cloud::MAP_SIDE;
         let iz : i32 = 0;
         while (iz < s) {
-            let wz : f64 = (self.originZ + iz * self.step) as f64;
+            const wz : f64 = (self.originZ + iz * self.step) as f64;
             let ix : i32 = 0;
             while (ix < s) {
-                let wx : f64 = (self.originX + ix * self.step) as f64;
-                let t : f64 = sunThrough(field, wx, wz, sun);
+                const wx : f64 = (self.originX + ix * self.step) as f64;
+                const t : f64 = sunThrough(field, wx, wz, sun);
                 let v : i32 = (t * 255.0 + 0.5).floorToInt() as i32;
                 if (v < 0) {
                     v = 0;
@@ -127,9 +129,9 @@ class CloudMap {
                     v = 255;
                 }
                 Mem::putByte(self.cells, (iz * s + ix) as i64, v);
-                ix = ix + 1;
+                ix++;
             }
-            iz = iz + 1;
+            iz++;
         }
         self.live = 1;
     }
@@ -159,36 +161,41 @@ fn sunThrough(field : CloudField, wx : f64, wz : f64, sun : Vec3) : f64 {
     if (sun.y < 0.08) {
         return Cloud::SCATTER_FLOOR;
     }
-    let lo : f64 = Cloud::BASE;
-    let hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
+
+    const lo : f64 = Cloud::BASE;
+    const hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
+
     // Where the ray enters and leaves the band, and how far that is along it.
     // Measured from the surface the shadow lands on, not from y = 0: the lean is
     // (altitude difference) / sin(elevation), and starting a hundred blocks too
     // low leans the whole march half again too far.
-    let t0 : f64 = (lo - Cloud::SHADOW_FROM) / sun.y;
-    let t1 : f64 = (hi - Cloud::SHADOW_FROM) / sun.y;
+    const t0 : f64 = (lo - Cloud::SHADOW_FROM) / sun.y;
+    const t1 : f64 = (hi - Cloud::SHADOW_FROM) / sun.y;
+
     // A fixed count over a length that is capped but continuous — the same rule
     // the view march uses, and for the same reason: a count derived from the span
     // jumps, and a jump in a shadow map is a hard edge in the light on the ground
     // that no cloud put there.
-    let span : f64 = t1 - t0;
+    const span : f64 = t1 - t0;
     let cut : f64 = span;
     if (cut > Cloud::MAX_PATH) {
         cut = Cloud::MAX_PATH;
     }
-    let n : i32 = Cloud::SUN_STEPS_MIN;
-    let ds : f64 = cut / (n as f64);
+    const n : i32 = Cloud::SUN_STEPS_MIN;
+    const ds : f64 = cut / (n as f64);
+
     let sum : f64 = 0.0;
     let i : i32 = 0;
     while (i < n) {
-        let t : f64 = t0 + ((i as f64) + 0.5) * ds;
-        let px : f64 = wx + sun.x * t;
-        let py : f64 = Cloud::SHADOW_FROM + sun.y * t;
-        let pz : f64 = wz + sun.z * t;
-        sum = sum + field.densityAt(vec3(px, py, pz));
-        i = i + 1;
+        const t : f64 = t0 + ((i as f64) + 0.5) * ds;
+        const px : f64 = wx + sun.x * t;
+        const py : f64 = Cloud::SHADOW_FROM + sun.y * t;
+        const pz : f64 = wz + sun.z * t;
+        sum += field.densityAt(vec3(px, py, pz));
+        i++;
     }
-    let e : f64 = (0.0 - sum * ds).exp();
+    const e : f64 = (0.0 - sum * ds).exp();
+
     // The light that scattered its way out rather than being absorbed. Without
     // it a thick cloud casts a black hole, and no cloud does.
     return Cloud::SCATTER_FLOOR + (1.0 - Cloud::SCATTER_FLOOR) * e;

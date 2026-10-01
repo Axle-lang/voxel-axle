@@ -78,8 +78,8 @@ fn toneMap(x : f64) : f64 {
     if (x <= Light::TONE_KNEE) {
         return x;
     }
-    let head : f64 = 1.0 - Light::TONE_KNEE;
-    let over : f64 = x - Light::TONE_KNEE;
+    const head : f64 = 1.0 - Light::TONE_KNEE;
+    const over : f64 = x - Light::TONE_KNEE;
     return Light::TONE_KNEE + head * over / (over + head);
 }
 
@@ -116,7 +116,11 @@ struct Gamma {
      * @return the colour as linear light
      */
     pub(crate) fn decodeRgb(self, c : i32) : LinRgb {
-        return LinRgb { r: self.decode(c, 16), g: self.decode(c, 8), b: self.decode(c, 0) };
+        return LinRgb {
+            r: self.decode(c, 16),
+            g: self.decode(c, 8),
+            b: self.decode(c, 0),
+        };
     }
 
     /**
@@ -130,7 +134,7 @@ struct Gamma {
         if (i < 0) {
             i = 0;
         }
-        let top : i32 = Light::TONE_STEPS - 1;
+        const top : i32 = Light::TONE_STEPS - 1;
         if (i > top) {
             i = top;
         }
@@ -174,20 +178,16 @@ class GammaTables {
     /** Fill both tables. */
     constructor() {
         self.toLin = Mem::take((DECODE_STEPS as i64) * 8);
-        let i : i32 = 0;
-        while (i < DECODE_STEPS) {
+        for (i of 0..DECODE_STEPS) {
             Mem::putRealOf(self.toLin, i as i64, srgbToLinear((i as f64) / 255.0));
-            i = i + 1;
         }
 
         self.toByte = Mem::take(Light::TONE_STEPS as i64);
-        let step : f64 = Light::TONE_MAX / (Light::TONE_STEPS as f64);
-        let j : i32 = 0;
-        while (j < Light::TONE_STEPS) {
-            let lin : f64 = ((j as f64) + 0.5) * step;
-            let out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
+        const step : f64 = Light::TONE_MAX / (Light::TONE_STEPS as f64);
+        for (j of 0..Light::TONE_STEPS) {
+            const lin : f64 = ((j as f64) + 0.5) * step;
+            const out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
             Mem::putByte(self.toByte, j as i64, out.floorToInt() as i32);
-            j = j + 1;
         }
     }
 
