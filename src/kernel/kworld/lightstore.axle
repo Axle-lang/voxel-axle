@@ -706,14 +706,10 @@ class LightEngine : LightSample, LightBaker {
      */
     pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
         const s : i32 = World::CHUNK_SIZE;
-        let lz : i32 = 0;
-        while (lz < s) {
-            let lx : i32 = 0;
-            while (lx < s) {
+        for (lz of 0..s) {
+            for (lx of 0..s) {
                 self.skyColumn(cx * s + lx, cz * s + lz);
-                lx++;
             }
-            lz++;
         }
 
         self.lights.lqn = 0;
@@ -722,22 +718,16 @@ class LightEngine : LightSample, LightBaker {
             top = World::HEIGHT - 1;
         }
 
-        let bz : i32 = 0;
-        while (bz < s) {
-            let bx : i32 = 0;
-            while (bx < s) {
-                let by : i32 = 0;
-                while (by <= top) {
+        for (bz of 0..s) {
+            for (bx of 0..s) {
+                for (by of 0..=top) {
                     const sky : Nibble = self.lights.vols.sky();
                     const off : i64 = self.store.voxIdx(slot, bx, by, bz) as i64;
                     if (nibGet(sky, off) == 15) {
                         self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
                     }
-                    by++;
                 }
-                bx++;
             }
-            bz++;
         }
         self.floodAddCh(self.lights.vols.sky());
     }
@@ -989,8 +979,7 @@ class LightEngine : LightSample, LightBaker {
         const s : i32 = World::CHUNK_SIZE;
         const n : i32 = s * s * World::HEIGHT;
         const base : i64 = (slot as i64) * (n as i64);
-        let i : i32 = 0;
-        while (i < n) {
+        for (i of 0..n) {
             const at : i64 = base + (i as i64);
             Mem::putByte(self.lights.vols.lightRG, at, 0);
             Mem::putByte(self.lights.vols.lightBS, at, 0);
@@ -999,7 +988,6 @@ class LightEngine : LightSample, LightBaker {
             Mem::putByte(self.lights.vols.bnR, at, 128);
             Mem::putByte(self.lights.vols.bnG, at, 128);
             Mem::putByte(self.lights.vols.bnB, at, 128);
-            i++;
         }
 
         self.lights.skyAOdirty[slot] = 1;
@@ -1156,8 +1144,7 @@ class LightEngine : LightSample, LightBaker {
         // the disc weights the middle of the sun like the sun does.
         const r : f64 = Daylight::SUN_DISC_ANGLE;
         let cnt : i32 = 1;
-        let i : i32 = 1;
-        while (i < n) {
+        for (i of 1..n) {
             const u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
             const ang : f64 = (i as f64) * 2.399963;
             const ox : f64 = ang.cos() * r * u;
@@ -1172,7 +1159,6 @@ class LightEngine : LightSample, LightBaker {
             const ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
             total += self.sunRayTransmit(cell, ray, ceil);
             cnt++;
-            i++;
         }
         return (total * 255.0 / (cnt as f64)).floorToInt() as i32;
     }
@@ -1213,12 +1199,9 @@ class LightEngine : LightSample, LightBaker {
         const s : i32 = World::CHUNK_SIZE;
         const inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
 
-        let dz : i32 = -1;
-        while (dz <= 1) {
-            let dx : i32 = -1;
-            while (dx <= 1) {
-                let dy : i32 = -1;
-                while (dy <= 1) {
+        for (dz of -1..=1) {
+            for (dx of -1..=1) {
+                for (dy of -1..=1) {
                     let b : Block = Block::Air;
                     if (inner) {
                         b = self.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz));
@@ -1228,11 +1211,8 @@ class LightEngine : LightSample, LightBaker {
                     if (b != Block::Air) {
                         return true;
                     }
-                    dy++;
                 }
-                dx++;
             }
-            dz++;
         }
         return false;
     }
@@ -1270,10 +1250,8 @@ class LightEngine : LightSample, LightBaker {
             top = World::HEIGHT - 1;
         }
 
-        let lz : i32 = 0;
-        while (lz < s) {
-            let lx : i32 = 0;
-            while (lx < s) {
+        for (lz of 0..s) {
+            for (lx of 0..s) {
                 // What the cloud deck leaves of the sun over this column. Once
                 // per column, not per cell: the deck is a hundred blocks up, so
                 // it shades a whole column alike.
@@ -1281,8 +1259,7 @@ class LightEngine : LightSample, LightBaker {
                     (cx * s + lx) as f64,
                     (cz * s + lz) as f64
                 );
-                let y : i32 = 0;
-                while (y <= top) {
+                for (y of 0..=top) {
                     const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
                         && nibGet(self.lights.vols.sky(), off) > 0
@@ -1295,11 +1272,8 @@ class LightEngine : LightSample, LightBaker {
                         }
                         Mem::putByte(self.lights.vols.sunlit, off, v);
                     }
-                    y++;
                 }
-                lx++;
             }
-            lz++;
         }
     }
 
@@ -1774,12 +1748,9 @@ class LightEngine : LightSample, LightBaker {
             top = World::HEIGHT - 1;
         }
 
-        let lz : i32 = 0;
-        while (lz < s) {
-            let lx : i32 = 0;
-            while (lx < s) {
-                let y : i32 = 0;
-                while (y <= top) {
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                for (y of 0..=top) {
                     const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
                     if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
                         && nibGet(self.lights.vols.sky(), off) > 0
@@ -1795,8 +1766,7 @@ class LightEngine : LightSample, LightBaker {
                         let ar : f64 = 0.0;
                         let ag : f64 = 0.0;
                         let ab : f64 = 0.0;
-                        let r : i32 = 0;
-                        while (r < m) {
+                        for (r of 0..m) {
                             const dir : Vec3 = vec3(
                                 Mem::realOf(self.lights.rays.hemiX, r),
                                 Mem::realOf(self.lights.rays.hemiY, r),
@@ -1811,7 +1781,6 @@ class LightEngine : LightSample, LightBaker {
                                 ab += w * ((hit.albedo & 0xFF) as f64);
                                 shut += w;
                             }
-                            r++;
                         }
 
                         const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
@@ -1835,11 +1804,8 @@ class LightEngine : LightSample, LightBaker {
                             Mem::putByte(self.lights.vols.bnB, off, 128);
                         }
                     }
-                    y++;
                 }
-                lx++;
             }
-            lz++;
         }
     }
 

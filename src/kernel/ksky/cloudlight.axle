@@ -114,11 +114,9 @@ class CloudMap {
         self.originZ = camZ - half;
 
         const s : i32 = Cloud::MAP_SIDE;
-        let iz : i32 = 0;
-        while (iz < s) {
+        for (iz of 0..s) {
             const wz : f64 = (self.originZ + iz * self.step) as f64;
-            let ix : i32 = 0;
-            while (ix < s) {
+            for (ix of 0..s) {
                 const wx : f64 = (self.originX + ix * self.step) as f64;
                 const t : f64 = sunThrough(field, wx, wz, sun);
                 let v : i32 = (t * 255.0 + 0.5).floorToInt() as i32;
@@ -129,9 +127,7 @@ class CloudMap {
                     v = 255;
                 }
                 Mem::putByte(self.cells, (iz * s + ix) as i64, v);
-                ix++;
             }
-            iz++;
         }
         self.live = 1;
     }
@@ -185,14 +181,12 @@ fn sunThrough(field : CloudField, wx : f64, wz : f64, sun : Vec3) : f64 {
     const ds : f64 = cut / (n as f64);
 
     let sum : f64 = 0.0;
-    let i : i32 = 0;
-    while (i < n) {
+    for (i of 0..n) {
         const t : f64 = t0 + ((i as f64) + 0.5) * ds;
         const px : f64 = wx + sun.x * t;
         const py : f64 = Cloud::SHADOW_FROM + sun.y * t;
         const pz : f64 = wz + sun.z * t;
         sum += field.densityAt(vec3(px, py, pz));
-        i++;
     }
     const e : f64 = (0.0 - sum * ds).exp();
 

@@ -620,8 +620,7 @@ class ChunkRenderer {
     fn clipNear(self, nIn : i32) : i32 {
         let outN : i32 = 0;
         let j : i32 = nIn - 1;
-        let i : i32 = 0;
-        while (i < nIn) {
+        for (i of 0..nIn) {
             const zi : f64 = Mem::realOf(self.ca.z, i);
             const zj : f64 = Mem::realOf(self.ca.z, j);
             const inI : bool = zi >= Screen::NEAR_PLANE;
@@ -636,7 +635,6 @@ class ChunkRenderer {
                 outN++;
             }
             j = i;
-            i++;
         }
         return outN;
     }
@@ -1060,8 +1058,7 @@ class ChunkRenderer {
 
         let lo : i32 = 255;
         let hi : i32 = 0;
-        let i : i32 = 0;
-        while (i < run) {
+        for (i of 0..run) {
             const v : i32 = man.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
             if (v < lo) {
                 lo = v;
@@ -1069,7 +1066,6 @@ class ChunkRenderer {
             if (v > hi) {
                 hi = v;
             }
-            i++;
         }
 
         if (hi - lo > Light::SHADOW_SPLIT) {
@@ -1119,8 +1115,7 @@ class ChunkRenderer {
         // vertical "façade" gaps between layers.
         const di : i32 = fs.dir as i32;
         const q : i32 = di * 4;
-        let k : i32 = 0;
-        while (k < 4) {
+        for (k of 0..4) {
             const b : i32 = (di * 4 + k) * 3;
             const oxv : i32 = self.coff[b];
             const oyv : i32 = self.coff[b + 1];
@@ -1261,7 +1256,6 @@ class ChunkRenderer {
             Mem::putRealOf(self.ca.r, k, cc.r);
             Mem::putRealOf(self.ca.g, k, cc.g);
             Mem::putRealOf(self.ca.b, k, cc.b);
-            k++;
         }
 
         // Clip against the near plane, then project the surviving polygon.
@@ -1274,8 +1268,7 @@ class ChunkRenderer {
         // (anisotropic), so no per-face mip is computed here.
         // Per-corner light colour was baked into car/cag/cab and carried through
         // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
-        let v : i32 = 0;
-        while (v < n) {
+        for (v of 0..n) {
             const proj : Projected = cam.screenOf(vec3(
                 Mem::realOf(self.cb.x, v),
                 Mem::realOf(self.cb.y, v),
@@ -1284,7 +1277,6 @@ class ChunkRenderer {
             Mem::putRealOf(self.cs.sx, v, proj.sx);
             Mem::putRealOf(self.cs.sy, v, proj.sy);
             Mem::putRealOf(self.cs.iz, v, proj.iz);
-            v++;
         }
 
         // Fan-triangulate the clipped polygon from vertex 0 and QUEUE each
@@ -1296,8 +1288,7 @@ class ChunkRenderer {
         // offset, so it wraps for the same reason even when it is one cell wide.
         const wf : i32 = fs.wrap ? 1 : 0;
         const o : i32 = self.fanOrigin(n);
-        let t : i32 = 1;
-        while (t < n - 1) {
+        for (t of 1..n - 1) {
             if (self.triN < Render::TRI_QUEUE_CAP) {
                 const i1 : i32 = (o + t) % n;
                 const i2 : i32 = (o + t + 1) % n;
@@ -1320,7 +1311,6 @@ class ChunkRenderer {
                 };
                 self.triN++;
             }
-            t++;
         }
     }
 
@@ -1390,10 +1380,8 @@ class ChunkRenderer {
                 const n : i32 = man.mesher.faces.fcount[slot];
                 const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
                 const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
-                let fi : i32 = 0;
-                while (fi < n) {
+                for (fi of 0..n) {
                     self.renderFace(man, base + fi, cam, phase, ox, oz);
-                    fi++;
                 }
             }
             slot += stride;
@@ -1411,16 +1399,14 @@ class ChunkRenderer {
      * @param bx1  exclusive right screen column of this band
      */
     pub(crate) fn rasterizeBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
-        let i : i32 = 0;
         const band : Band = Band { x0: bx0, x1: bx1 };
-        while (i < self.triN) {
+        for (i of 0..self.triN) {
             const tri : RasterTri = self.triBuf[i];
             // The band owns columns [bx0, bx1); a triangle that touches none
             // of them is done with here, before the setup it would not use.
             if ((tri.maxx as i32) >= bx0 && (tri.minx as i32) < bx1) {
                 rasterTriTex(fb, tri, self.atlas, self.gam, self.fogT, band);
             }
-            i++;
         }
     }
 }

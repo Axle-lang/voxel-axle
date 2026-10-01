@@ -247,8 +247,7 @@ class BlockSim {
      */
     fn dropDist(self, man : ChunkManager, cell : IVec3, dirx : i32, dirz : i32) : i32 {
         const maxD : i32 = World::FLOW_SEARCH;
-        let d : i32 = 1;
-        while (d <= maxD) {
+        for (d of 1..=maxD) {
             const nx : i32 = cell.x + dirx * d;
             const nz : i32 = cell.z + dirz * d;
             const here : Block = man.worldGet(ivec3(nx, cell.y, nz));
@@ -258,7 +257,6 @@ class BlockSim {
             if (man.worldGet(ivec3(nx, cell.y - 1, nz)) == Block::Air) {
                 return d;          // a drop opens up here
             }
-            d++;
         }
         return maxD + 1;
     }

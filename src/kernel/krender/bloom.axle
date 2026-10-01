@@ -221,15 +221,13 @@ class Bloom : PostEffect {
      */
     pub(file) fn blurRows(self, dw : i32, rad : i32, invK : f64, y0 : i32, y1 : i32) : void {
         const last : i32 = dw - 1;
-        let y : i32 = y0;
-        while (y < y1) {
+        for (y of y0..y1) {
             const rb : i32 = y * dw;
 
             let sr : f64 = 0.0;
             let sg : f64 = 0.0;
             let sb : f64 = 0.0;
-            let k : i32 = -rad;
-            while (k <= rad) {
+            for (k of -rad..=rad) {
                 let xx : i32 = k;
                 if (xx < 0) {
                     xx = 0;
@@ -240,14 +238,12 @@ class Bloom : PostEffect {
                 sr += floatOf(self.blR, rb + xx);
                 sg += floatOf(self.blG, rb + xx);
                 sb += floatOf(self.blB, rb + xx);
-                k++;
             }
             putFloatOf(self.btR, rb, sr * invK);
             putFloatOf(self.btG, rb, sg * invK);
             putFloatOf(self.btB, rb, sb * invK);
 
-            let x : i32 = 1;
-            while (x <= last) {
+            for (x of 1..=last) {
                 let ai : i32 = x + rad;
                 if (ai > last) {
                     ai = last;
@@ -262,9 +258,7 @@ class Bloom : PostEffect {
                 putFloatOf(self.btR, rb + x, sr * invK);
                 putFloatOf(self.btG, rb + x, sg * invK);
                 putFloatOf(self.btB, rb + x, sb * invK);
-                x++;
             }
-            y++;
         }
     }
 
@@ -294,16 +288,13 @@ class Bloom : PostEffect {
         x1 : i32
     ) : void {
         const lastY : i32 = dh - 1;
-        let z : i32 = x0;
-        while (z < x1) {
+        for (z of x0..x1) {
             putFloatOf(self.acR, z, 0.0);
             putFloatOf(self.acG, z, 0.0);
             putFloatOf(self.acB, z, 0.0);
-            z++;
         }
 
-        let k : i32 = -rad;
-        while (k <= rad) {
+        for (k of -rad..=rad) {
             let yy : i32 = k;
             if (yy < 0) {
                 yy = 0;
@@ -312,26 +303,20 @@ class Bloom : PostEffect {
                 yy = lastY;
             }
             const rb : i32 = yy * dw;
-            let xi : i32 = x0;
-            while (xi < x1) {
+            for (xi of x0..x1) {
                 putFloatOf(self.acR, xi, floatOf(self.acR, xi) + floatOf(self.btR, rb + xi));
                 putFloatOf(self.acG, xi, floatOf(self.acG, xi) + floatOf(self.btG, rb + xi));
                 putFloatOf(self.acB, xi, floatOf(self.acB, xi) + floatOf(self.btB, rb + xi));
-                xi++;
             }
-            k++;
         }
 
-        let xw : i32 = x0;
-        while (xw < x1) {
+        for (xw of x0..x1) {
             putFloatOf(self.blR, xw, floatOf(self.acR, xw) * invK);
             putFloatOf(self.blG, xw, floatOf(self.acG, xw) * invK);
             putFloatOf(self.blB, xw, floatOf(self.acB, xw) * invK);
-            xw++;
         }
 
-        let y : i32 = 1;
-        while (y <= lastY) {
+        for (y of 1..=lastY) {
             let ay : i32 = y + rad;
             if (ay > lastY) {
                 ay = lastY;
@@ -343,8 +328,7 @@ class Bloom : PostEffect {
             const ab : i32 = ay * dw;
             const sbb : i32 = sy * dw;
             const ob : i32 = y * dw;
-            let xx : i32 = x0;
-            while (xx < x1) {
+            for (xx of x0..x1) {
                 const nr : f64 = floatOf(self.acR, xx)
                     + floatOf(self.btR, ab + xx)
                     - floatOf(self.btR, sbb + xx);
@@ -360,9 +344,7 @@ class Bloom : PostEffect {
                 putFloatOf(self.blR, ob + xx, nr * invK);
                 putFloatOf(self.blG, ob + xx, ng * invK);
                 putFloatOf(self.blB, ob + xx, nb * invK);
-                xx++;
             }
-            y++;
         }
     }
 
@@ -388,21 +370,17 @@ class Bloom : PostEffect {
         dy1 : i32
     ) : void {
         const thr : f64 = Render::BLOOM_THRESHOLD;
-        let dy : i32 = dy0;
-        while (dy < dy1) {
+        for (dy of dy0..dy1) {
             const sy0 : i32 = dy * 2;
-            let dx : i32 = 0;
-            while (dx < dw) {
+            for (dx of 0..dw) {
                 const sx0 : i32 = dx * 2;
                 let ar : f64 = 0.0;
                 let ag : f64 = 0.0;
                 let ab : f64 = 0.0;
-                let jy : i32 = 0;
-                while (jy < 2) {
+                for (jy of 0..2) {
                     const yy : i32 = sy0 + jy;
                     if (yy < h) {
-                        let jx : i32 = 0;
-                        while (jx < 2) {
+                        for (jx of 0..2) {
                             const xx : i32 = sx0 + jx;
                             if (xx < w) {
                                 const c : i32 = Mem::dwordAt(pixels, ((yy * w + xx) as i64) * 4);
@@ -417,18 +395,14 @@ class Bloom : PostEffect {
                                     ab += b * f;
                                 }
                             }
-                            jx++;
                         }
                     }
-                    jy++;
                 }
                 const di : i32 = dy * dw + dx;
                 putFloatOf(self.blR, di, ar * 0.25);
                 putFloatOf(self.blG, di, ag * 0.25);
                 putFloatOf(self.blB, di, ab * 0.25);
-                dx++;
             }
-            dy++;
         }
     }
 
@@ -452,12 +426,10 @@ class Bloom : PostEffect {
         y0 : i32,
         y1 : i32
     ) : void {
-        let py : i32 = y0;
-        while (py < y1) {
+        for (py of y0..y1) {
             const row : i32 = py * w;
             const drow : i32 = (py / 2) * dw;
-            let px : i32 = 0;
-            while (px < w) {
+            for (px of 0..w) {
                 const di : i32 = drow + px / 2;
                 const addr : f64 = floatOf(self.blR, di) * st;
                 const addg : f64 = floatOf(self.blG, di) * st;
@@ -482,9 +454,7 @@ class Bloom : PostEffect {
                         (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF)
                     );
                 }
-                px++;
             }
-            py++;
         }
     }
 }

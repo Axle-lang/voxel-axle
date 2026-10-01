@@ -366,8 +366,7 @@ class ChunkMesher : Mesher {
         const naxis : i32 = di / 2;
         // The four corners' occlusion, two bits each, gathered into one byte.
         let aoByte : i32 = 0;
-        let k : i32 = 0;
-        while (k < 4) {
+        for (k of 0..4) {
             const b : i32 = (di * 4 + k) * 3;
             // Tangent signs from the corner block offset (0 → -1, 1 → +1).
             const sx : i32 = self.lcoff[b] * 2 - 1;
@@ -461,7 +460,6 @@ class ChunkMesher : Mesher {
                 ao = 0;
             }
             aoByte |= ao << (2 * k);
-            k++;
         }
         Mem::putByte(self.faces.fao, i as i64, aoByte);
     }
@@ -572,14 +570,11 @@ class ChunkMesher : Mesher {
         const air : Block = Block::Air;
 
         self.resetRunsW();
-        let lz : i32 = 0;
-        while (lz < s) {
+        for (lz of 0..s) {
             self.resetRunsU();
-            let lx : i32 = 0;
-            while (lx < s) {
+            for (lx of 0..s) {
                 let coll : i32 = 0;
-                let ly : i32 = 0;
-                while (ly <= top) {
+                for (ly of 0..=top) {
                     const local : IVec3 = ivec3(lx, ly, lz);
                     const id : Block = src.store.getVox(slot, local);
                     // Non-air voxel: emit its faces; a collidable solid raises the
@@ -594,12 +589,9 @@ class ChunkMesher : Mesher {
                             coll = ly + 1;
                         }
                     }
-                    ly++;
                 }
                 self.ctop[slot * s * s + lz * s + lx] = coll as i16;
-                lx++;
             }
-            lz++;
         }
     }
 

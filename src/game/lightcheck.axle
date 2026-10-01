@@ -524,8 +524,7 @@ fn checkCloudCoherence() : i32 {
 
     // A whole cycle at B, during which nothing visible may change.
     let moved : i32 = 0;
-    let f : i32 = 0;
-    while (f < a.cycleFrames()) {
+    for (f of 0..a.cycleFrames()) {
         a.march(fB, dsB, 76.0, FULL_SKY);
         const d : CloudDome = a.dome();
         let diff : i32 = 0;
@@ -537,7 +536,6 @@ fn checkCloudCoherence() : i32 {
         if (diff > 0) {
             moved++;
         }
-        f++;
     }
 
     // Then the fade: every cell the same fraction of the way, every frame.

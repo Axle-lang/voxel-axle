@@ -74,13 +74,11 @@ fn fbm(x : f64, y : f64, s : i32, oct : i32) : f64 {
     let amp : f64 = 1.0;
     let freq : f64 = 1.0;
     let norm : f64 = 0.0;
-    let o : i32 = 0;
-    while (o < oct) {
+    for (o of 0..oct) {
         total += valueNoise(x * freq, y * freq, s + o * 17) * amp;
         norm += amp;
         amp *= 0.5;
         freq *= 2.0;
-        o++;
     }
     return total / norm;
 }

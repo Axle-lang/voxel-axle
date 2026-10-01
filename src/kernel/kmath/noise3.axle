@@ -100,15 +100,13 @@ fn fbm3(x : f64, y : f64, z : f64, s : i32, oct : i32) : f64 {
     let fx : f64 = x;
     let fy : f64 = y;
     let fz : f64 = z;
-    let o : i32 = 0;
-    while (o < oct) {
+    for (o of 0..oct) {
         sum += valueNoise3(fx, fy, fz, s + o * 17) * amp;
         norm += amp;
         amp *= 0.5;
         fx *= 2.0;
         fy *= 2.0;
         fz *= 2.0;
-        o++;
     }
 
     if (norm < 0.000001) {

@@ -323,10 +323,8 @@ fn edge(ax : f64, ay : f64, bx : f64, by : f64, px : f64, py : f64) : f64 {
 fn clearDepth(fb : FrameBuf) : void {
     const zbuf : i64 = fb.zbuf;
     const n : i32 = fb.w * fb.h;
-    let i : i32 = 0;
-    while (i < n) {
+    for (i of 0..n) {
         putFloatOf(zbuf, i, 0.0);
-        i++;
     }
 }
 
@@ -342,10 +340,8 @@ fn clearDepth(fb : FrameBuf) : void {
 fn clearFrame(fb : FrameBuf, bg : i32) : void {
     const pixels : i64 = fb.pixels;
     const n : i32 = fb.w * fb.h;
-    let i : i32 = 0;
-    while (i < n) {
+    for (i of 0..n) {
         Mem::putWordOf(pixels, i, bg);
-        i++;
     }
     clearDepth(fb);
 }
@@ -381,11 +377,9 @@ fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
 fn mipLevelOffset(level : i32) : i32 {
     let off : i32 = 0;
     let sz : i32 = Atlas::TILE_PX;
-    let l : i32 = 0;
-    while (l < level) {
+    for (l of 0..level) {
         off += Atlas::TILE_COUNT * sz * sz;
         sz /= 2;
-        l++;
     }
     return off;
 }
@@ -397,10 +391,8 @@ fn mipLevelOffset(level : i32) : i32 {
  */
 fn mipLevelSize(level : i32) : i32 {
     let sz : i32 = Atlas::TILE_PX;
-    let l : i32 = 0;
-    while (l < level) {
+    for (l of 0..level) {
         sz /= 2;
-        l++;
     }
     return sz;
 }
@@ -426,24 +418,18 @@ fn mipChainTexels() : i32 {
  */
 fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
     const n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
-    let i : i32 = 0;
-    while (i < n0) {
+    for (i of 0..n0) {
         Mem::putWordOf(mips, i, Mem::dwordAt(atlas, (i as i64) * 4));
-        i++;
     }
 
-    let level : i32 = 1;
     let sz : i32 = Atlas::TILE_PX / 2;
     let psz : i32 = Atlas::TILE_PX;
-    while (level < Atlas::MIP_LEVELS) {
+    for (level of 1..Atlas::MIP_LEVELS) {
         const base : i32 = mipLevelOffset(level);
         const pbase : i32 = mipLevelOffset(level - 1);
-        let t : i32 = 0;
-        while (t < Atlas::TILE_COUNT) {
-            let ty : i32 = 0;
-            while (ty < sz) {
-                let tx : i32 = 0;
-                while (tx < sz) {
+        for (t of 0..Atlas::TILE_COUNT) {
+            for (ty of 0..sz) {
+                for (tx of 0..sz) {
                     const i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
                     const i01 : i32 = i00 + 1;
                     const i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
@@ -460,15 +446,11 @@ fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
                         base + (t * sz + ty) * sz + tx,
                         Color::packBytes(rr, gg, bb)
                     );
-                    tx++;
                 }
-                ty++;
             }
-            t++;
         }
         psz = sz;
         sz /= 2;
-        level++;
     }
 }
 
@@ -801,8 +783,7 @@ fn rasterTriTex(
     const tf : f64 = tp;
     const tbase : i32 = tile * Atlas::TILE_PX;
 
-    let py : i32 = miny;
-    while (py <= maxy) {
+    for (py of miny..=maxy) {
         let e0 : f64 = e0row;
         let e1 : f64 = e1row;
         let e2 : f64 = e2row;
@@ -811,8 +792,7 @@ fn rasterTriTex(
         // the sky behind it, and the row half of that read is the same all the
         // way across.
         const fogRow : FogRow = fogT.rowAt(py);
-        let px : i32 = minx;
-        while (px <= maxx) {
+        for (px of minx..=maxx) {
             if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) {
                 const b0 : f64 = e0 * absInv;
                 const b1 : f64 = e1 * absInv;
@@ -942,8 +922,7 @@ fn rasterTriTex(
                             let sr : f64 = 0.0;
                             let sg : f64 = 0.0;
                             let sb : f64 = 0.0;
-                            let i : i32 = 0;
-                            while (i < nN) {
+                            for (i of 0..nN) {
                                 const tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
                                 const c : LinRgb = bilinearLin(
                                     lvl,
@@ -955,7 +934,6 @@ fn rasterTriTex(
                                 sr += c.r;
                                 sg += c.g;
                                 sb += c.b;
-                                i++;
                             }
                             const invN : f64 = 1.0 / (nN as f64);
                             rf = sr * invN;
@@ -994,12 +972,10 @@ fn rasterTriTex(
             e0 += ax0;
             e1 += ax1;
             e2 += ax2;
-            px++;
         }
         e0row += ay0;
         e1row += ay1;
         e2row += ay2;
-        py++;
     }
 }
 
@@ -1049,11 +1025,9 @@ fn rasterTri(fb : FrameBuf,
         maxy = h - 1;
     }
 
-    let py : i32 = miny;
-    while (py <= maxy) {
+    for (py of miny..=maxy) {
         const cy : f64 = (py as f64) + 0.5;
-        let px : i32 = minx;
-        while (px <= maxx) {
+        for (px of minx..=maxx) {
             const cx : f64 = (px as f64) + 0.5;
             const b0 : f64 = edge(x1, y1, x2, y2, cx, cy) * inv;
             const b1 : f64 = edge(x2, y2, x0, y0, cx, cy) * inv;
@@ -1066,8 +1040,6 @@ fn rasterTri(fb : FrameBuf,
                     Mem::putWordOf(pixels, idx, color);
                 }
             }
-            px++;
         }
-        py++;
     }
 }

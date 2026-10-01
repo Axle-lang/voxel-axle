@@ -437,11 +437,9 @@ class FogTables {
         const stepX : f64 = (w as f64) / (FOG_GRID_COLS as f64);
         const stepY : f64 = (h as f64) / (FOG_GRID_ROWS as f64);
 
-        let gy : i32 = 0;
-        while (gy <= FOG_GRID_ROWS) {
+        for (gy of 0..=FOG_GRID_ROWS) {
             const vr : ViewRow = rays.row((gy as f64) * stepY + 0.5);
-            let gx : i32 = 0;
-            while (gx <= FOG_GRID_COLS) {
+            for (gx of 0..=FOG_GRID_COLS) {
                 const ray : ViewRay = rays.dir(vr, (gx as f64) * stepX + 0.5);
                 let c : SkyColour = dome.colourAt(ray);
                 const cl : CloudSample = cloud.sample(ray);
@@ -457,9 +455,7 @@ class FogTables {
                 Mem::putRealOf(self.r, i as i64, c.r);
                 Mem::putRealOf(self.g, i as i64, c.g);
                 Mem::putRealOf(self.b, i as i64, c.b);
-                gx++;
             }
-            gy++;
         }
 
         return FogTable {

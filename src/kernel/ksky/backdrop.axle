@@ -117,11 +117,9 @@ fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Ve
     const y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
     const r2 : f64 = d.radius * d.radius;
 
-    let py : i32 = y0;
-    while (py <= y1) {
+    for (py of y0..=y1) {
         if (py >= 0 && py < h) {
-            let px : i32 = x0;
-            while (px <= x1) {
+            for (px of x0..=x1) {
                 if (px >= 0 && px < w) {
                     const dx : f64 = (px as f64) + 0.5 - d.cx;
                     const dy : f64 = (py as f64) + 0.5 - d.cy;
@@ -164,10 +162,8 @@ fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Ve
                         Mem::putWordOf(pixels, py * w + px, c);
                     }
                 }
-                px++;
             }
         }
-        py++;
     }
 }
 
@@ -241,12 +237,10 @@ fn drawSkyGradientRows(
     const w : i32 = fb.w;
 
     let seen : i32 = 0;
-    let py : i32 = y0;
-    while (py < y1) {
+    for (py of y0..y1) {
         const vr : ViewRow = rays.row((py as f64) + 0.5);
         const row : i32 = py * w;
-        let px : i32 = 0;
-        while (px < w) {
+        for (px of 0..w) {
             // Only where the world left the pixel empty. The sky is painted
             // AFTER the world for exactly this: most of a frame is ground, and
             // a bicubic cloud read under every blade of grass is a frame's
@@ -267,9 +261,7 @@ fn drawSkyGradientRows(
                 Mem::putWordOf(pixels, row + px, packSky(c, px, py));
                 seen++;
             }
-            px++;
         }
-        py++;
     }
     return seen;
 }

@@ -102,11 +102,9 @@ class GodRayFX : PostEffect {
         const cg : f64 = Render::SKY_HALO_G as f64;
         const cb : f64 = Render::SKY_HALO_B as f64;
 
-        let y : i32 = y0;
-        while (y < y1) {
+        for (y of y0..y1) {
             const row : i32 = y * w;
-            let x : i32 = 0;
-            while (x < w) {
+            for (x of 0..w) {
                 const illum : f64 = godRayIllum(zbuf, w, h, x, y, self.sun);
                 if (illum > 0.0) {
                     const f : f64 = illum * invN * self.sun.expo;
@@ -128,9 +126,7 @@ class GodRayFX : PostEffect {
                     );
                     Mem::putWordOf(pixels, row + x, r * 65536 + g * 256 + b);
                 }
-                x++;
             }
-            y++;
         }
     }
 }
@@ -167,13 +163,11 @@ class UnderwaterFX : PostEffect {
         const fogG : f64 = Water::FOG_G as f64;
         const fogB : f64 = Water::FOG_B as f64;
 
-        let y : i32 = 0;
-        while (y < h) {
+        for (y of 0..h) {
             const row : i32 = y * w;
             // Vertical half of the caustic pattern — constant across the row.
             const cy : f64 = ((y as f64) * Water::CAUSTIC_FREQ - phase * 1.3).sin();
-            let x : i32 = 0;
-            while (x < w) {
+            for (x of 0..w) {
                 const idx : i32 = row + x;
 
                 // Depth fog from the z-buffer: izp = 1/depth (0 = cleared bg).
@@ -208,9 +202,7 @@ class UnderwaterFX : PostEffect {
                     255
                 );
                 Mem::putWordOf(pixels, idx, r * 65536 + g * 256 + b);
-                x++;
             }
-            y++;
         }
 
         // Rising bubbles: bright motes drifting upward. Each gets its own
@@ -288,8 +280,7 @@ fn godRayIllum(zbuf : i64, w : i32, h : i32, x : i32, y : i32, sun : SunScreen) 
     let syp : f64 = y as f64;
     let illum : f64 = 0.0;
     let dec : f64 = 1.0;
-    let i : i32 = 0;
-    while (i < n) {
+    for (i of 0..n) {
         sxp += stepx;
         syp += stepy;
         const ix : i32 = sxp.floorToInt() as i32;
@@ -299,7 +290,6 @@ fn godRayIllum(zbuf : i64, w : i32, h : i32, x : i32, y : i32, sun : SunScreen) 
             illum += dec;   // a sky sample contributes
         }
         dec *= Render::GOD_RAY_DECAY;
-        i++;
     }
     return illum;
 }
