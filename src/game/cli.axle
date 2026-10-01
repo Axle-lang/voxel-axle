@@ -73,8 +73,7 @@ fn snapDeadline() : i64 {
  */
 fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
     const toRad : f64 = 3.14159265358979 / 180.0;
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--look" && i + 2 < argc()) {
                 const yaw : f64 = argAt(i + 1).toF64() * toRad;
@@ -82,12 +81,11 @@ fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
                 return (true, yaw, pitch);
             }
         } catch e : IndexOutOfBoundsException {
-            i = argc();
+            break;
         } catch e : ParseException {
             Console::println("--look wants two angles in degrees; leaving the view free");
-            i = argc();
+            break;
         }
-        i++;
     }
     return (false, 0.0, 0.0);
 }
@@ -102,19 +100,17 @@ fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
  * @return the day phase to start the clock at
  */
 fn dayTimeArg() : f64 {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--daytime" && i + 1 < argc()) {
                 return argAt(i + 1).toF64();
             }
         } catch e : IndexOutOfBoundsException {
-            i = argc();
+            break;
         } catch e : ParseException {
             Console::println("--daytime wants a number in 0..1; starting where the config says");
-            i = argc();
+            break;
         }
-        i++;
     }
     return Daylight::START;
 }
@@ -131,8 +127,7 @@ fn dayTimeArg() : f64 {
  * @return the (x, z) block column to search for a start around
  */
 fn startColumn(clock : Clock) : (x: i32, z: i32) {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--at" && i + 2 < argc()) {
                 const x : i32 = argAt(i + 1).toI64() as i32;
@@ -140,12 +135,11 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
                 return (x, z);
             }
         } catch e : IndexOutOfBoundsException {
-            i = argc();
+            break;
         } catch e : ParseException {
             Console::println("--at wants two whole numbers; picking a random start");
-            i = argc();
+            break;
         }
-        i++;
     }
     return randomColumn(clock.counter());
 }
@@ -160,8 +154,7 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
  * @return the window size, the configured one if the flag is absent
  */
 fn windowSize() : (w: i32, h: i32) {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--size" && i + 2 < argc()) {
                 const w : i32 = argAt(i + 1).toI64() as i32;
@@ -170,15 +163,14 @@ fn windowSize() : (w: i32, h: i32) {
                     return (w, h);
                 }
                 Console::println("--size wants at least 320x240; using the configured window");
-                i = argc();
+                break;
             }
         } catch e : IndexOutOfBoundsException {
-            i = argc();
+            break;
         } catch e : ParseException {
             Console::println("--size wants two whole numbers; using the configured window");
-            i = argc();
+            break;
         }
-        i++;
     }
     return (Screen::WINDOW_W, Screen::WINDOW_H);
 }
@@ -194,19 +186,17 @@ fn windowSize() : (w: i32, h: i32) {
  * @return the distance to walk, 0 to stand still
  */
 fn walkBlocks() : f64 {
-    let i : i32 = 1;
-    while (i < argc()) {
+    for (i of 1..argc()) {
         try {
             if (argAt(i) == "--walk" && i + 1 < argc()) {
                 return argAt(i + 1).toF64();
             }
         } catch e : IndexOutOfBoundsException {
-            i = argc();
+            break;
         } catch e : ParseException {
             Console::println("--walk wants a number of blocks; standing still");
-            i = argc();
+            break;
         }
-        i++;
     }
     return 0.0;
 }

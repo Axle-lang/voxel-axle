@@ -880,10 +880,13 @@ class CloudSky {
         let acc : f64 = 0.0;
         let accLit : f64 = 0.0;
         let accAmb : f64 = 0.0;
-        let i : i32 = 0;
-        // Past a hundredth the rest of the ray is behind water the eye cannot
-        // see through; what it would add is below the table's own precision.
-        while (i < n && trans > 0.01) {
+        for (i of 0..n) {
+            // Past a hundredth the rest of the ray is behind water the eye cannot
+            // see through; what it would add is below the table's own precision.
+            if (trans <= 0.01) {
+                break;
+            }
+
             const f : f64 = ((i as f64) + 0.5) / (n as f64);
             const t : f64 = t0 + f * cut;
             const py : f64 = eyeY + dy * t;
@@ -914,7 +917,6 @@ class CloudSky {
                 accAmb += wgt * amb;
                 trans *= 1.0 - take;
             }
-            i++;
         }
 
         if (span > cut && trans > 0.01) {
