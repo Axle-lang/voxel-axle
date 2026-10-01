@@ -51,6 +51,15 @@ const SCAN : i32 = 80;
 const SNOW_HUNT : i32 = 64;
 
 /**
+ * Ticks a jump is followed for: past its apex (~17 ticks) and short of
+ * landing back on level ground (~34).
+ */
+const JUMP_TICKS : i32 = 30;
+
+/** Cells of level, open ground a jump needs ahead of it — a sprint covers ~4.2. */
+const JUMP_RUN : i32 = 7;
+
+/**
  * Walk a fresh body from (x, y, z) for `WALK_TICKS` and answer how far
  * it travelled along the axis it was facing.
  * @param man   the world to walk on
@@ -144,11 +153,96 @@ fn runPhysicsCheck() : i32 {
     fails += checkSnowEdge(man, ax, az, true);
     fails += checkSnowEdge(man, ax, az, false);
     fails += checkStoredBox(man, ax, az);
+    fails += checkSprintJump(man, ax, az);
     surveyFaces(man);
 
     man.stopLight();
     Console::println("physics failures: ${fails}");
     return fails;
+}
+
+/**
+ * A sprint carries a jump further, never higher or faster: two bodies jump
+ * from the same spot along the same level run, one walking and one
+ * sprinting, and while both are in the air their heights must agree on
+ * every tick.
+ * @param man  the world to search and jump on
+ * @param ax   x of the column the search is centred on
+ * @param az   z of the column the search is centred on
+ * @return 1 if the heights ever differ, else 0
+ */
+fn checkSprintJump(man : ChunkManager, ax : i32, az : i32) : i32 {
+    const site = levelRun(man, ax, az);
+    if (!site.found) {
+        Console::println("  sprint jump: SKIP — no level run of ${JUMP_RUN} cells in the ring");
+        return 0;
+    }
+
+    let walker : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
+    let sprinter : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
+    walker.yaw = YAW_PLUS_X;
+    sprinter.yaw = YAW_PLUS_X;
+    walker.refresh();
+    sprinter.refresh();
+
+    // Settle onto the ground first: a body only jumps from standing.
+    for (t of 0..4) {
+        walker.update(man, 0.0, 0.0, false, false, false);
+        sprinter.update(man, 0.0, 0.0, true, false, false);
+    }
+    const y0 : f64 = walker.pos.y;
+    let apex : f64 = 0.0;
+
+    for (t of 0..JUMP_TICKS) {
+        const jump : bool = t == 0;
+        walker.update(man, 1.0, 0.0, false, jump, false);
+        sprinter.update(man, 1.0, 0.0, true, jump, false);
+
+        const walkRise : f64 = walker.pos.y - y0;
+        const sprintRise : f64 = sprinter.pos.y - y0;
+        if (walkRise != sprintRise) {
+            Console::println("  sprint jump: FAIL at tick ${t} — walking ${walkRise}"
+                + " blocks up, sprinting ${sprintRise}");
+            return 1;
+        }
+        apex = apex.max(walkRise);
+    }
+
+    const ahead : f64 = sprinter.pos.x - walker.pos.x;
+    Console::println("  sprint jump: same height on all ${JUMP_TICKS} ticks"
+        + " (apex ${apex}), the sprint ${ahead} blocks further");
+    return 0;
+}
+
+/**
+ * The first column near (ax, az) with `JUMP_RUN` cells of level, open, dry,
+ * full-block ground ahead of it along +X.
+ * @param man  the world to search
+ * @param ax   x of the column the search is centred on
+ * @param az   z of the column the search is centred on
+ * @return whether one was found, and the start cell's x, foot height and z
+ */
+fn levelRun(man : ChunkManager, ax : i32, az : i32) : (found: bool, x: i32, y: i32, z: i32) {
+    for (z of (az - SCAN)..=(az + SCAN)) {
+        for (x of (ax - SCAN)..=(ax + SCAN - JUMP_RUN)) {
+            const y : i32 = man.collisionHeight(x, z);
+            let level : bool = y > World::SEA_LEVEL;
+            for (k of 0..=JUMP_RUN) {
+                if (!level) {
+                    break;
+                }
+                const ground : IVec3 = ivec3(x + k, y - 1, z);
+                const feet : IVec3 = ivec3(x + k, y, z);
+                level = man.collisionHeight(x + k, z) == y
+                    && man.blockBoxHeight(ground) == 1.0
+                    && man.worldGet(feet) == Block::Air;
+            }
+            if (level) {
+                return (true, x, y, z);
+            }
+        }
+    }
+    return (false, 0, 0, 0);
 }
 
 /**

@@ -13,7 +13,10 @@ class Motion {
     static TERMINAL_VEL : f64 = 0.9;   // max fall speed, blocks/frame
     static JUMP_VEL : f64 = 0.145;     // initial jump speed → ~1.25-block apex
     static WALK_SPEED : f64 = 0.0775;
-    static SPRINT_SPEED : f64 = 0.155; // 2× walk (Ctrl)
+    // Sprint (Ctrl) is horizontal only: a jump or a fall takes `velY` from
+    // `JUMP_VEL` and gravity alone, so it is the same height and pace at a
+    // sprint as at a walk — `--physics-check` holds it to that.
+    static SPRINT_SPEED : f64 = 0.1395; // 1.8× walk
     static SWIM_SPEED : f64 = 0.080;   // horizontal swim, ~walk pace (was sluggish)
 
     // ── Water / swimming ────────────────────────────────────────
