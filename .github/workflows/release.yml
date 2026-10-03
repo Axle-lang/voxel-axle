@@ -70,20 +70,34 @@ jobs:
         with:
           submodules: recursive
 
+      # `-O 3`, never the default: `-O 1` hands LLVM nothing to do, and for a
+      # software rasteriser that is a fifth of the frame rate (CLAUDE.md).
       - name: Build
-        run: axle build
+        run: axle build -O 3
 
-      # The package is the binary and the atlas it reads at run time, and
-      # that is the whole list: there is no shared library to ship, so
-      # nothing is copied out of the image and no launcher script has to
-      # put anything on LD_LIBRARY_PATH.
+      # The headless checks gate the release: each exits with its failure
+      # count, so a physics, light, culling or model regression stops the
+      # job before anything is packaged.
+      - name: Headless checks
+        run: |
+          set -eux
+          ./target/voxel --physics-check
+          ./target/voxel --light-check
+          ./target/voxel --cull-check
+          ./target/voxel --model-check
+
+      # The package is the binary and what it reads at run time — the atlas
+      # and the sound banks — and that is the whole list: there is no shared
+      # library to ship, so nothing is copied out of the image and no
+      # launcher script has to put anything on LD_LIBRARY_PATH.
       - name: Package
         run: |
           set -eux
           PKG=voxel-axle-linux-x86_64
-          mkdir -p "dist/$PKG"
+          mkdir -p "dist/$PKG/assets"
           cp target/voxel "dist/$PKG/"
           cp atlas.raw "dist/$PKG/"
+          cp -r assets/sounds "dist/$PKG/assets/"
           chmod +x "dist/$PKG/voxel"
           # Which smalt this binary was built against — the submodule pin,
           # recorded so a release names its own platform layer.
@@ -91,7 +105,8 @@ jobs:
           cat > "dist/$PKG/README.txt" <<EOF
           voxel — a Minecraft-style survival world, software-rendered on the CPU.
 
-          Run:  ./voxel        (atlas.raw must stay beside the binary)
+          Run:  ./voxel        from this folder: atlas.raw and assets/ are
+                               found from the working directory
 
           There is nothing to install. The binary links libX11 and libasound,
           which every Linux desktop already has; on a bare container those
@@ -178,7 +193,7 @@ jobs:
           submodules: recursive
 
       - name: Build
-        run: axle build
+        run: axle build -O 3
 
       # `axle build` names its artefact after the machine it runs on, so
       # here it is `voxel.exe` — the same command writes `voxel` in the
@@ -187,14 +202,16 @@ jobs:
         shell: pwsh
         run: |
           $PKG = 'voxel-axle-windows-x86_64'
-          New-Item -ItemType Directory -Path "dist\$PKG" -Force | Out-Null
+          New-Item -ItemType Directory -Path "dist\$PKG\assets" -Force | Out-Null
           Copy-Item 'target\voxel.exe' "dist\$PKG\"
           Copy-Item 'atlas.raw' "dist\$PKG\"
+          Copy-Item -Recurse 'assets\sounds' "dist\$PKG\assets\"
           $smalt = (git -C vendor/smalt rev-parse --short HEAD)
           @"
           voxel — a Minecraft-style survival world, software-rendered on the CPU.
 
-          Run:  voxel.exe      (atlas.raw must stay beside the binary)
+          Run:  voxel.exe      from this folder: atlas.raw and assets\ are
+                               found from the working directory
 
           There is nothing to install: kernel32, user32, gdi32 and winmm
           ship with Windows, and no DLL is bundled because none is needed.
