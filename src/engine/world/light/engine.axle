@@ -1,0 +1,294 @@
+// engine — the voxel lighting engine: the volumes, the flood, the two ray
+// bakes, and the read seam the mesher and the renderer sample.
+//
+//   volumes     the seven per-voxel byte volumes (value struct of addresses)
+//   flood       block light per channel + sky light, re-flooded on every edit
+//   sun         soft directional shadows, baked by rays on the light thread
+//   skyaccess   hemispherical sky access + one-bounce tint, same thread
+//   sample      reading it all back, per cell or per face corner
+//
+// Each component holds its own `RingView` over the voxel field and the ring,
+// both co-owned with the manager, so the light thread reaches the live world
+// with no copy; and each holds the same `LightVolumes` value, so none of them
+// owns the memory more than another. `ChunkManager` composes one of these and
+// delegates its light seams to it.
+
+use crate::engine::math::vec3::{ IVec3, vec3 };
+use crate::engine::world::voxstore::{ VoxStore, VoxData };
+use crate::engine::world::mesh::meshbuf::{ ColumnRing };
+use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{ LightVolumes, newVolumes, clearVolumes };
+use crate::engine::world::light::flood::{ LightFlood, levelAt, channelsAt };
+use crate::engine::world::light::sun::{ SunShadows };
+use crate::engine::world::light::skyaccess::{ SkyAccess };
+use crate::engine::world::light::sample::{
+    sunlitAt, skyAccessAt, bounceAt, cornerAverage,
+};
+use crate::engine::world::seams::{
+    LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels,
+};
+use crate::engine::shade::daymodel::{ SkyBodyLight, activeBody };
+use crate::engine::sky::cloud::{ cloudFieldAt };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+use crate::configs::time::{ Daylight };
+
+/**
+ * The throttled per-frame light bake capability (directional sun soft-shadows +
+ * hemispherical sky-access / one-bounce GI), run by the background light thread.
+ */
+trait LightBaker {
+    /**
+     * One pass of the throttled bake: refresh the sun shadows and drain any
+     * pending sky-access / bounce work.
+     */
+    fn stepBake(mut self) : void;
+}
+
+class LightEngine : LightSample, LightBaker {
+    ring : RingView,              // this engine's view of the world, for the reads
+    vols : LightVolumes,          // the per-voxel light volumes
+    flood : LightFlood,           // block + sky light, and the re-mesh flags
+    sun : SunShadows,             // the directional shadow bake
+    sky : SkyAccess,              // the sky-access / bounce bake
+    moment : LightMoment,         // the hour, the clock and the camera column, published
+                                  // by the main loop — everything the bake needs about now
+    lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
+
+    /**
+     * Compose the light components over a shared voxel field + ring ownership.
+     * @param field  the voxel field, co-owned with the manager
+     * @param cols   the chunk ring, co-owned with the manager
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own field : Shared<VoxData>, own cols : Shared<ColumnRing>, slots : i32) {
+        self.vols = newVolumes(slots);
+        self.ring = new RingView(new VoxStore(field), cols);
+        self.flood = new LightFlood(new RingView(new VoxStore(field), cols), self.vols, slots);
+        self.sun = new SunShadows(new RingView(new VoxStore(field), cols), self.vols, slots);
+        self.sky = new SkyAccess(new RingView(new VoxStore(field), cols), self.vols, slots);
+        self.moment = LightMoment {
+            dayTime: Daylight::START,
+            seconds: 0.0,
+            camX: 0,
+            camZ: 0,
+        };
+        self.lightRunning = new AtomicBoolean(true);
+    }
+
+    // ── The world, as the mesher reads it ───────────────────────
+
+    /**
+     * Block id at a world voxel; bedrock below 0, air above / unloaded.
+     * @param cell  the world voxel
+     * @return the block id there
+     */
+    pub(crate) fn worldGet(self, cell : IVec3) : Block {
+        return self.ring.worldGet(cell);
+    }
+
+    /**
+     * A world voxel for the mesher's neighbour reads: a wall past the ring.
+     * @param cell  the world voxel
+     * @return the block id, or Stone past the ring
+     */
+    pub(crate) fn worldGetOrWall(self, cell : IVec3) : Block {
+        return self.ring.worldGetOrWall(cell);
+    }
+
+    /**
+     * The stored level of a world cell; 0 outside the loaded ring.
+     * @param cell  the world voxel
+     * @return the cell's level, or 0 for "the id's default box"
+     */
+    pub(crate) fn worldLevel(self, cell : IVec3) : i32 {
+        return self.ring.worldLevel(cell);
+    }
+
+    // ── Slot lifecycle ──────────────────────────────────────────
+
+    /**
+     * Flag a slot's light as changed so the manager re-meshes it.
+     * @param slot  the slot index
+     */
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
+        self.flood.markDirty(slot);
+    }
+
+    /**
+     * Flag a chunk dirty, but only if it is currently loaded at (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
+    pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
+        self.flood.markDirtyAt(cx, cz);
+    }
+
+    /**
+     * Consume a slot's re-mesh flag: return whether it was set, clearing it.
+     * @param slot  the slot index
+     * @return whether the flag was set
+     */
+    pub(crate) fn takeDirty(mut self, slot : i32) : bool {
+        return self.flood.takeDirty(slot);
+    }
+
+    /**
+     * Flag a slot's RAY passes for a re-bake after its geometry changed: the
+     * hemispherical sky access, and the sun shadows too — the round-robin would
+     * reach the slot eventually, but "eventually" is a second, and a block the
+     * player just placed should cast its shadow as it lands.
+     * @param slot  the slot index
+     */
+    pub(crate) fn flagSkyAO(mut self, slot : i32) : void {
+        self.sky.markDirty(slot);
+        self.sun.markDirty(slot);
+    }
+
+    /**
+     * Reset a slot's light for a freshly (re)generated chunk, and queue both
+     * ray bakes for it.
+     * @param slot  the slot index
+     */
+    pub(crate) fn clearLight(mut self, slot : i32) : void {
+        clearVolumes(self.vols, slot);
+        self.sky.markDirty(slot);
+        self.sun.markDirty(slot);
+    }
+
+    /**
+     * Seed sky light for a freshly generated chunk.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
+        self.flood.seedSky(slot, cx, cz);
+    }
+
+    /**
+     * Recompute block + sky light after an edit at a world voxel.
+     * @param cell  the edited world voxel
+     */
+    pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
+        self.flood.lightUpdate(cell);
+    }
+
+    // ── The read seam (LightSample) ─────────────────────────────
+
+    /**
+     * Block light per channel (0..15 each) at a world voxel; 0 if unloaded.
+     * @param cell  the world voxel
+     * @return the red, green and blue block-light levels
+     */
+    fn blGetW(self, cell : IVec3) : ChannelLevels {
+        return channelsAt(self.ring, self.vols, cell);
+    }
+
+    /**
+     * Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range.
+     * @param cell  the world voxel
+     * @return the sky-light level 0..15
+     */
+    fn skGetW(self, cell : IVec3) : i32 {
+        return levelAt(self.ring, self.vols.sky(), cell);
+    }
+
+    /**
+     * Sun visibility at a world voxel: 0 (shadow) .. 255 (full sun).
+     * @param cell  the world voxel
+     * @return soft sun visibility 0..255
+     */
+    fn sunlitGet(self, cell : IVec3) : i32 {
+        return sunlitAt(self.ring, self.vols, cell);
+    }
+
+    /**
+     * Sky access 0..255 at a world voxel: 255 = fully open.
+     * @param cell  the world voxel
+     * @return the sky access 0..255
+     */
+    fn skyaccessGet(self, cell : IVec3) : i32 {
+        return skyAccessAt(self.ring, self.vols, cell);
+    }
+
+    /**
+     * Packed one-bounce coloured tint at a world voxel.
+     * @param cell  the world voxel
+     * @return the packed bounce tint (0xRRGGBB)
+     */
+    fn bounceGet(self, cell : IVec3) : i32 {
+        return bounceAt(self.ring, self.vols, cell);
+    }
+
+    /**
+     * Sun, sky access and bounce averaged over the four air cells at a face corner.
+     * @param probe  the corner's cell and its two in-plane tangent steps
+     * @return the averaged sample at that corner
+     */
+    fn cornerSample(self, probe : CornerProbe) : CornerSample {
+        return cornerAverage(self.ring, self.vols, probe);
+    }
+
+    // ── The light thread ────────────────────────────────────────
+
+    /**
+     * Light the whole loaded ring NOW, and do not come back until it is lit.
+     *
+     * The world is generated before the first frame; this is the other half of
+     * that. Left to the light thread, the ring is lit over the first tenth of a
+     * second of play, and a tenth of a second is long enough to watch the shadows
+     * and the ambient occlusion arrive — the world appears, and THEN it is lit.
+     * Called once from the startup path, where the cost is a load and not a
+     * stutter.
+     *
+     * ONE pass is the whole ring: both bakes see a backlog the size of the ring
+     * and take their crew path, which drains it rather than budgeting it. The
+     * light thread then only ever has the sun's own movement to keep up with.
+     */
+    pub(crate) fn primeLight(mut self) : void {
+        self.stepBake();
+    }
+
+    /**
+     * One pass of the whole lighting system: refresh the directional sun-shadow
+     * map and bake any pending hemispherical sky-access / colour-bounce. Run by
+     * the dedicated light thread, reading the time of day the main loop publishes.
+     */
+    fn stepBake(mut self) : void {
+        // The clouds move on their own clock and the shadows are cast through
+        // them, so the deck is re-marched before the ring is: a shadow bake
+        // reading last pass's cloud would put the dark patch where the cloud has
+        // already left.
+        const body : SkyBodyLight = activeBody(self.moment.dayTime);
+        self.sun.rebakeClouds(
+            cloudFieldAt(self.moment.seconds),
+            vec3(body.dirX, body.dirY, body.dirZ),
+            self.moment.camX,
+            self.moment.camZ
+        );
+        self.sun.step(self.moment.dayTime, Daylight::SUN_CHUNKS_PER_TICK);
+        self.sky.step(Light::SKY_AO_CHUNKS_PER_TICK);
+    }
+
+    /**
+     * Publish the moment the background light thread bakes against.
+     * @param m  the hour, clock and camera column to bake for
+     */
+    pub(crate) fn setMoment(mut self, m : LightMoment) : void {
+        self.moment = m;
+    }
+
+    /** Tell the background light thread to stop (call before joining it). */
+    pub(crate) fn stopLight(mut self) : void {
+        self.lightRunning.set(false);
+    }
+
+    /**
+     * Whether the background light thread should keep running.
+     * @return false once `stopLight` has been called
+     */
+    pub(crate) fn lightAlive(self) : bool {
+        return self.lightRunning.get();
+    }
+}

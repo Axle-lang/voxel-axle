@@ -1,0 +1,299 @@
+// skyaccess — hemispherical sky access (ambient occlusion) and the one-bounce
+// coloured tint, baked by rays.
+//
+// Every sky-lit air cell a face can read casts a fixed fan of upper-hemisphere
+// rays: the share that escapes is its sky access, and the colour of what dimmed
+// the rest is the hue its ambient takes — grass bounces green into the shade
+// under a hedge. Slots are baked when they arrive or change; a ring-sized
+// backlog goes to a crew.
+//
+// Runs on the light thread.
+
+use smalt::Mem;
+use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
+use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{ LightVolumes, nibGet, newSlotFlags };
+use crate::engine::world::light::bake::{ BAKE_WORKERS, nearSolid, terrainCeil, dirtyCount };
+use crate::engine::block::blocks::{ lightTransmit, albedoFor };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+use crate::configs::world::{ World };
+
+/** The precomputed upper-hemisphere ray directions the bake casts. */
+struct HemiRays {
+    hemiX : i64,
+    hemiY : i64,
+    hemiZ : i64,
+}
+
+/**
+ * What one hemisphere ray came back with: how much of the sky it still saw
+ * after whatever it crossed, and the colour of the first thing that dimmed it
+ * (-1 if nothing did) — the surface the one bounce takes its hue from.
+ */
+struct HemiHit {
+    open : f64,
+    albedo : i32,
+}
+
+class SkyAccess {
+    ring : RingView,      // this component's view of the world
+    vols : LightVolumes,  // the volumes; it writes `skyaccess` and the bounce tint
+    rays : HemiRays,      // M precomputed upper-hemisphere ray directions
+    cursor : i32,         // round-robin slot index for the throttled bake
+    dirty : i8[],         // per-slot "sky access needs (re)baking" flag
+
+    /**
+     * The ray table and the per-slot bookkeeping over a ring of `slots`.
+     * @param ring   a view of the world
+     * @param vols   the ring's light volumes
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own ring : RingView, vols : LightVolumes, slots : i32) {
+        self.ring = ring;
+        self.vols = vols;
+        self.cursor = 0;
+
+        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish).
+        const m : i32 = Light::SKY_AO_SAMPLES;
+        self.rays = HemiRays {
+            hemiX: Mem::take((m as i64) * 8),
+            hemiY: Mem::take((m as i64) * 8),
+            hemiZ: Mem::take((m as i64) * 8),
+        };
+        for (hi of 0..m) {
+            const yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
+            const rr : f64 = (1.0 - yy * yy).sqrt();
+            const th : f64 = (hi as f64) * 2.399963;           // golden angle
+            Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
+            Mem::putRealOf(self.rays.hemiY, hi, yy);
+            Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
+        }
+
+        self.dirty = newSlotFlags(slots);
+    }
+
+    /**
+     * Queue a slot for a re-bake: it has just arrived or its geometry changed.
+     * @param slot  the slot index
+     */
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
+        self.dirty[slot] = 1;
+    }
+
+    /**
+     * March one hemisphere ray from a cell toward the sky: how much of the sky
+     * it still sees at the end, and the colour of the first surface that dimmed
+     * it. A wall takes all of it; a block of canopy takes its share and the ray
+     * carries on, so a cell under one layer of leaves is shaded rather than
+     * sealed, and it takes the leaves' green with it as the bounce hue.
+     * @param cell  origin air cell
+     * @param dir   ray direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return the surviving sky fraction and the packed albedo that dimmed it (-1 if none)
+     */
+    fn hemiHit(self, cell : IVec3, dir : Vec3, ceil : i32) : HemiHit {
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
+        let through : f64 = 1.0;
+        let col : i32 = -1;
+        let t : f64 = 0.6;
+
+        while (t < Light::SKY_AO_REACH) {
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            if (cy > ceil) {
+                return HemiHit { open: through, albedo: col };
+            }
+            if (cy >= 0 && cy < World::HEIGHT) {
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const hb : Block = self.ring.worldGet(ivec3(cx, cy, cz));
+                const tr : f64 = lightTransmit(hb);
+                if (tr < 1.0) {
+                    if (col < 0) {
+                        col = albedoFor(hb);
+                    }
+                    through *= tr;
+                    if (through < 0.02) {
+                        return HemiHit { open: 0.0, albedo: col };
+                    }
+                }
+            }
+            t += 0.7;
+        }
+        return HemiHit { open: through, albedo: col };
+    }
+
+    /**
+     * Bake hemispherical sky access for one chunk: every open, sky-lit air cell
+     * in the active band casts the M precomputed hemisphere rays and stores the
+     * escaped fraction (0..255) plus the one-bounce coloured tint.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @param ceil  tallest terrain Y over loaded chunks
+     */
+    fn bakeChunk(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const m : i32 = Light::SKY_AO_SAMPLES;
+        let top : i32 = self.ring.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                for (y of 0..=top) {
+                    const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
+                    if (self.ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
+                        && nibGet(self.vols.sky(), off) > 0
+                        && nearSolid(self.ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                        const wx : i32 = cx * s + lx;
+                        const wz : i32 = cz * s + lz;
+                        // A ray now comes back with a FRACTION of the sky rather
+                        // than a yes or no, so the escaped share and the bounce
+                        // weight are both sums of what each ray lost, not counts
+                        // of the rays that were stopped.
+                        let esc : f64 = 0.0;
+                        let shut : f64 = 0.0;
+                        let ar : f64 = 0.0;
+                        let ag : f64 = 0.0;
+                        let ab : f64 = 0.0;
+                        for (r of 0..m) {
+                            const dir : Vec3 = vec3(
+                                Mem::realOf(self.rays.hemiX, r),
+                                Mem::realOf(self.rays.hemiY, r),
+                                Mem::realOf(self.rays.hemiZ, r)
+                            );
+                            const hit : HemiHit = self.hemiHit(ivec3(wx, y, wz), dir, ceil);
+                            esc += hit.open;
+                            if (hit.albedo >= 0) {
+                                const w : f64 = 1.0 - hit.open;
+                                ar += w * (((hit.albedo >> 16) & 0xFF) as f64);
+                                ag += w * (((hit.albedo >> 8) & 0xFF) as f64);
+                                ab += w * ((hit.albedo & 0xFF) as f64);
+                                shut += w;
+                            }
+                        }
+
+                        const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
+                        Mem::putByte(self.vols.skyaccess, off, access);
+
+                        if (Light::BOUNCE_ON && shut > 0.001) {
+                            const avr : f64 = ar / shut;
+                            const avg : f64 = ag / shut;
+                            const avb : f64 = ab / shut;
+                            let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
+                            if (lum < 1.0) {
+                                lum = 1.0;
+                            }
+                            const occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
+                            Mem::putByte(self.vols.bnR, off, bounceByte(avr / lum, occ));
+                            Mem::putByte(self.vols.bnG, off, bounceByte(avg / lum, occ));
+                            Mem::putByte(self.vols.bnB, off, bounceByte(avb / lum, occ));
+                        } else {
+                            Mem::putByte(self.vols.bnR, off, 128);
+                            Mem::putByte(self.vols.bnG, off, 128);
+                            Mem::putByte(self.vols.bnB, off, 128);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Throttled sky-access bake: process up to `budget` dirty loaded chunks per
+     * call (round-robin). Idles once every loaded chunk is baked.
+     * @param budget  max chunks to bake this call
+     */
+    pub(crate) fn step(mut self, budget : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = terrainCeil(self.ring);
+
+        // A backlog this size is a ring that just filled, not a chunk the player
+        // walked into, and dribbling it out `budget` at a time is the ambient
+        // occlusion visibly settling in over the first seconds of a run. Drain it
+        // over the crew instead; the trickle is for the one or two chunks that
+        // arrive as you walk.
+        if (dirtyCount(self.ring, self.dirty) > BAKE_WORKERS) {
+            let crew : Task<i32>[7];
+            for (i of 0..7) {
+                crew[i] = spawn skyAccessJob(self, i + 1, BAKE_WORKERS, ceil);
+            }
+            self.bakeDirty(0, BAKE_WORKERS, ceil);
+            for (i of 0..7) {
+                const r : i32 = crew[i].join();
+            }
+            return;
+        }
+
+        let done : i32 = 0;
+        let guard : i32 = 0;
+        while (done < budget && guard < slots) {
+            const slot : i32 = self.cursor;
+            self.cursor++;
+            if (self.cursor >= slots) {
+                self.cursor = 0;
+            }
+            guard++;
+            if (self.ring.cols.loaded[slot] == 1 && self.dirty[slot] == 1) {
+                self.bakeChunk(slot, self.ring.cols.cxs[slot], self.ring.cols.czs[slot], ceil);
+                self.dirty[slot] = 0;
+                done++;
+            }
+        }
+    }
+
+    /**
+     * One worker's share of the backlog: every dirty loaded slot whose index is
+     * `first` modulo `stride`. Shares never overlap, so each clears its own flags.
+     * @param first   the first slot of this share
+     * @param stride  the number of shares
+     * @param ceil    tallest terrain Y over loaded chunks
+     */
+    pub(file) fn bakeDirty(mut self, first : i32, stride : i32, ceil : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        let d : i32 = first;
+        while (d < slots) {
+            if (self.ring.cols.loaded[d] == 1 && self.dirty[d] == 1) {
+                self.bakeChunk(d, self.ring.cols.cxs[d], self.ring.cols.czs[d], ceil);
+                self.dirty[d] = 0;
+            }
+            d += stride;
+        }
+    }
+}
+
+/**
+ * Encode a bounce tint channel: normalised colour ratio `ratio` blended
+ * toward neutral by `occ`, stored as a byte where 128 = ×1.0.
+ * @param ratio  the channel's colour ratio (1.0 = neutral grey)
+ * @param occ    occlusion weight 0..1
+ * @return the packed byte (0..255, 128 = ×1.0)
+ */
+fn bounceByte(ratio : f64, occ : f64) : i32 {
+    const f : f64 = 1.0 + (ratio - 1.0) * occ;
+    let v : i32 = (f * 128.0).floorToInt() as i32;
+    if (v < 0) {
+        v = 0;
+    }
+    if (v > 255) {
+        v = 255;
+    }
+    return v;
+}
+
+/**
+ * Worker job: bake one share of the ring's pending sky-access slots.
+ * @param sky     the bake whose ring is cast
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
+fn skyAccessJob(sky : SkyAccess, first : i32, stride : i32, ceil : i32) : i32 {
+    sky.bakeDirty(first, stride, ceil);
+    return 0;
+}

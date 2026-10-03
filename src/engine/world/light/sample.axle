@@ -1,0 +1,263 @@
+// sample — reading the baked light back: one cell, or the four cells meeting at
+// a face corner, averaged.
+//
+// Every read here is pure — the volumes are written by the flood and the two
+// bakes, and what a face corner sees is computed from them on demand. Unloaded
+// or out-of-height cells answer full sun, open sky and a neutral tint, so a
+// read past the ring never darkens a face.
+
+use smalt::Mem;
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{ LightVolumes };
+use crate::engine::world::seams::{ CornerProbe, CornerSample };
+use crate::configs::world::{ World };
+
+/** What a cell past the ring, or out of height, reads as. */
+const OPEN_SUN : i32 = 255;
+const OPEN_SKY : i32 = 255;
+const NEUTRAL_BOUNCE : i32 = 0x808080;
+
+/**
+ * A chunk found once for the four cells of a face corner: which slot holds it,
+ * and where its origin sits in the world, so the four reads can subtract it
+ * rather than divide their way down to it again.
+ *
+ * `slot` is -1 when the corner straddles a chunk border or the chunk is not
+ * loaded, and the origin means nothing then.
+ */
+struct CornerChunk {
+    slot : i32,
+    ox : i32,
+    oz : i32,
+}
+
+/**
+ * The mean of one channel of four packed bounce tints.
+ * @param b0     the corner's own tint
+ * @param b1     one step along the first in-plane axis
+ * @param b2     one step along the second
+ * @param b3     one step along both
+ * @param shift  where the channel sits in the packed word
+ * @return the channel's mean, 0..255
+ */
+fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
+    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
+        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
+}
+
+/**
+ * The mean of the four cells meeting at a face corner.
+ *
+ * The bounce tint averages per channel: packed, its channels would carry each
+ * other's overflow and a corner between a green cell and a red one would come
+ * out neither.
+ * @param s0  the corner's own cell
+ * @param s1  one step along the first in-plane axis
+ * @param s2  one step along the second
+ * @param s3  one step along both
+ * @return the averaged terms
+ */
+fn blend4(
+    s0 : CornerSample,
+    s1 : CornerSample,
+    s2 : CornerSample,
+    s3 : CornerSample
+) : CornerSample {
+    const r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    const g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    const b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+
+    return CornerSample {
+        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
+        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
+        bounce: r * 65536 + g * 256 + b,
+    };
+}
+
+/**
+ * Sun visibility at a world voxel: 0 (shadow) .. 255 (full sun).
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param cell  the world voxel
+ * @return soft sun visibility 0..255
+ */
+fn sunlitAt(ring : RingView, vols : LightVolumes, cell : IVec3) : i32 {
+    const off : i64 = ring.offsetOf(cell);
+    if (off < 0) {
+        return OPEN_SUN;
+    }
+    return Mem::byteAt(vols.sunlit, off);
+}
+
+/**
+ * Sky access at a world voxel: 255 = fully open, lower = occluded.
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param cell  the world voxel
+ * @return the sky access 0..255
+ */
+fn skyAccessAt(ring : RingView, vols : LightVolumes, cell : IVec3) : i32 {
+    const off : i64 = ring.offsetOf(cell);
+    if (off < 0) {
+        return OPEN_SKY;
+    }
+    return Mem::byteAt(vols.skyaccess, off);
+}
+
+/**
+ * Packed one-bounce coloured tint (r<<16|g<<8|b, each 128 = ×1.0) at a world
+ * voxel.
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param cell  the world voxel
+ * @return the packed bounce tint (0xRRGGBB)
+ */
+fn bounceAt(ring : RingView, vols : LightVolumes, cell : IVec3) : i32 {
+    const off : i64 = ring.offsetOf(cell);
+    if (off < 0) {
+        return NEUTRAL_BOUNCE;
+    }
+    return (Mem::byteAt(vols.bnR, off) << 16)
+        | (Mem::byteAt(vols.bnG, off) << 8)
+        | Mem::byteAt(vols.bnB, off);
+}
+
+/**
+ * The three ray-baked volumes at a cell whose chunk is already known.
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param slot  the slot that owns the cell
+ * @param lx    local x inside that chunk
+ * @param y     the world y
+ * @param lz    local z inside that chunk
+ * @return the three terms at that cell
+ */
+fn cellIn(ring : RingView, vols : LightVolumes, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
+    if (y < 0 || y >= World::HEIGHT) {
+        return CornerSample {
+            sun: OPEN_SUN,
+            sky: OPEN_SKY,
+            bounce: NEUTRAL_BOUNCE,
+        };
+    }
+
+    const off : i64 = ring.store.voxIdx(slot, lx, y, lz) as i64;
+    return CornerSample {
+        sun: Mem::byteAt(vols.sunlit, off),
+        sky: Mem::byteAt(vols.skyaccess, off),
+        bounce: (Mem::byteAt(vols.bnR, off) << 16)
+            | (Mem::byteAt(vols.bnG, off) << 8)
+            | Mem::byteAt(vols.bnB, off),
+    };
+}
+
+/**
+ * All three ray-baked volumes at ONE world cell, resolved once.
+ *
+ * The walk from a world cell to a chunk slot to a voxel index is the
+ * expensive part — three bytes at the end of it are not — so the three
+ * volumes are read together rather than a seam at a time.
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param cell  the world voxel
+ * @return its sun visibility, sky access and packed bounce tint
+ */
+fn cellSample(ring : RingView, vols : LightVolumes, cell : IVec3) : CornerSample {
+    if (cell.y < 0 || cell.y >= World::HEIGHT) {
+        return CornerSample {
+            sun: OPEN_SUN,
+            sky: OPEN_SKY,
+            bounce: NEUTRAL_BOUNCE,
+        };
+    }
+
+    const s : i32 = World::CHUNK_SIZE;
+    const cx : i32 = ring.floorDiv(cell.x, s);
+    const cz : i32 = ring.floorDiv(cell.z, s);
+    const slot : i32 = ring.slotFor(cx, cz);
+    if (!ring.owns(slot, cx, cz)) {
+        return CornerSample {
+            sun: OPEN_SUN,
+            sky: OPEN_SKY,
+            bounce: NEUTRAL_BOUNCE,
+        };
+    }
+    return cellIn(ring, vols, slot, cell.x - cx * s, cell.y, cell.z - cz * s);
+}
+
+/**
+ * The chunk all four cells of a corner sit in, and where its origin is.
+ *
+ * The two in-plane steps are along different axes, so no axis has two
+ * contributors and the four cells' spread on each axis is exactly the gap
+ * between the near corner and the far one. If those two land in the same
+ * chunk, so does everything between them.
+ * @param ring  the chunk ring
+ * @param b     the corner's own cell
+ * @param c3    the diagonal cell, one step along each axis
+ * @return the shared chunk, its slot -1 if the corner straddles a border or
+ *         the chunk is not loaded
+ */
+fn cornerSlot(ring : RingView, b : IVec3, c3 : IVec3) : CornerChunk {
+    const s : i32 = World::CHUNK_SIZE;
+    const cx : i32 = ring.floorDiv(b.x, s);
+    const cz : i32 = ring.floorDiv(b.z, s);
+    const miss : CornerChunk = CornerChunk {
+        slot: -1,
+        ox: 0,
+        oz: 0,
+    };
+    if (cx != ring.floorDiv(c3.x, s) || cz != ring.floorDiv(c3.z, s)) {
+        return miss;
+    }
+
+    const slot : i32 = ring.slotFor(cx, cz);
+    if (!ring.owns(slot, cx, cz)) {
+        return miss;
+    }
+    return CornerChunk {
+        slot,
+        ox: cx * s,
+        oz: cz * s,
+    };
+}
+
+/**
+ * The three ray-baked volumes averaged over the 4 air cells meeting at a face
+ * corner, which is what makes smooth lighting smooth: a term taken once per
+ * FACE is constant over the whole quad, and a greedy quad is up to
+ * `MESH_MAX_RUN` cells of surface — that is the tiling the shading showed.
+ * @param ring   the chunk ring
+ * @param vols   the light volumes
+ * @param probe  the corner's cell and its two in-plane tangent steps
+ * @return the averaged sample at that corner
+ */
+fn cornerAverage(ring : RingView, vols : LightVolumes, probe : CornerProbe) : CornerSample {
+    const b : IVec3 = probe.base;
+    const t1 : IVec3 = probe.t1;
+    const t2 : IVec3 = probe.t2;
+    const c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
+    const c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
+    const c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+
+    // Four cells one step apart are in one chunk unless the corner sits on
+    // a border, and this is read at every corner of every quad in the
+    // frame. Finding the chunk once, where they share it, is the same four
+    // reads without four walks down the ring to reach them.
+    const cc : CornerChunk = cornerSlot(ring, b, c3);
+    if (cc.slot < 0) {
+        return blend4(
+            cellSample(ring, vols, b),
+            cellSample(ring, vols, c1),
+            cellSample(ring, vols, c2),
+            cellSample(ring, vols, c3)
+        );
+    }
+    return blend4(
+        cellIn(ring, vols, cc.slot, b.x - cc.ox, b.y, b.z - cc.oz),
+        cellIn(ring, vols, cc.slot, c1.x - cc.ox, c1.y, c1.z - cc.oz),
+        cellIn(ring, vols, cc.slot, c2.x - cc.ox, c2.y, c2.z - cc.oz),
+        cellIn(ring, vols, cc.slot, c3.x - cc.ox, c3.y, c3.z - cc.oz)
+    );
+}

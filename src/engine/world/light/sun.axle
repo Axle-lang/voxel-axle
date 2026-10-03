@@ -1,0 +1,473 @@
+// sun — soft directional shadows: per-voxel sun visibility, baked by rays.
+//
+// Every sky-lit air cell that a face can read casts a small fan of rays over the
+// sun's disc and stores the share of the sun that gets through — walls stop a
+// ray, a canopy dims it, the cloud deck dims the whole column. Slots that have
+// never been baked go first and on a crew; the rest are refreshed round-robin as
+// the sun turns, gliding toward the new answer so the shadow never ticks.
+//
+// Runs on the light thread.
+
+use smalt::Mem;
+use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
+use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
+use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{ LightVolumes, nibGet, newSlotFlags };
+use crate::engine::world::light::bake::{ BAKE_WORKERS, nearSolid, terrainCeil, dirtyCount };
+use crate::engine::block::blocks::{ lightTransmit };
+use crate::engine::shade::daymodel::{ SkyBodyLight, activeBody };
+use crate::engine::sky::cloud::{ CloudField };
+use crate::engine::sky::cloudlight::{ CloudMap };
+use crate::configs::blocks::{ Block };
+use crate::configs::time::{ Daylight };
+use crate::configs::world::{ World };
+
+class SunShadows {
+    ring : RingView,         // this component's view of the world
+    vols : LightVolumes,     // the volumes; it writes `sunlit`
+    cursor : i32,            // round-robin slot index for the throttled refresh
+    dirty : i8[],            // per-slot "sun shadows never baked here" flag — a slot
+                             // carrying it jumps the round-robin queue, so a chunk
+                             // arrives WITH its shadows instead of gaining them a
+                             // second later as the cursor wanders past
+    baked : i64,             // per-slot direction of the light at that slot's last
+                             // bake, three f32 a slot. A slot the light has barely
+                             // moved over since would measure what it already
+                             // holds, so it is skipped; the all-zero a slot starts
+                             // with matches nothing, so a fresh slot always bakes
+    clouds : CloudMap,       // the sun's transmittance through the deck, per column
+
+    /**
+     * The bake's bookkeeping over a ring of `slots`.
+     * @param ring   a view of the world
+     * @param vols   the ring's light volumes
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own ring : RingView, vols : LightVolumes, slots : i32) {
+        self.ring = ring;
+        self.vols = vols;
+        self.cursor = 0;
+        self.dirty = newSlotFlags(slots);
+        self.baked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
+        self.clouds = new CloudMap();
+    }
+
+    /**
+     * Send a slot to the front of the queue: it has just arrived or changed.
+     * @param slot  the slot index
+     */
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
+        self.dirty[slot] = 1;
+    }
+
+    /**
+     * Re-march the cloud deck's shadow for the moment being baked, so the
+     * shadows are cast through where the clouds are now.
+     * @param field  the cloud field at this moment
+     * @param dir    the light's direction (unit)
+     * @param camX   the camera's world x, which the map is centred on
+     * @param camZ   the camera's world z
+     */
+    pub(crate) fn rebakeClouds(mut self, field : CloudField, dir : Vec3, camX : i32, camZ : i32) : void {
+        self.clouds.rebake(field, dir, camX, camZ);
+    }
+
+    /**
+     * March a ray from an air cell toward the sun and return how much of the
+     * sun survives the trip: 1 if it escapes above all terrain (`ceil`) or runs
+     * the full reach unobstructed, 0 behind a wall, and a fraction through a
+     * canopy — each block of leaves crossed keeps `Light::LEAF_TRANSMIT` of what
+     * is left, so the shade deepens with the depth of the canopy over the cell.
+     *
+     * The march samples cells rather than crossing their faces, so a block can
+     * be sampled twice at this step; the leaf term is a look, not a measurement,
+     * and a canopy sampled twice reads as one that is twice as thick, which is
+     * the direction a leaf block is wrong in anyway.
+     * @param cell  origin air cell
+     * @param dir   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return the surviving fraction of sunlight, 0..1
+     */
+    fn rayTransmit(self, cell : IVec3, dir : Vec3, ceil : i32) : f64 {
+        const s : i32 = World::CHUNK_SIZE;
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
+        let through : f64 = 1.0;
+        let t : f64 = 0.5;
+
+        // The chunk the last step landed in, and what it took to find it. A step
+        // is six tenths of a block and a chunk is sixteen across, so twenty-odd
+        // consecutive steps share a chunk: asking the ring which slot holds it
+        // once per chunk instead of once per step is the same answer, found far
+        // less often. An impossible column to start, so the first step resolves.
+        let ccx : i32 = -1000000;
+        let ccz : i32 = -1000000;
+        let cslot : i32 = 0;
+        let cowns : bool = false;
+        let ctop : i32 = 0;
+
+        while (t < Daylight::SUN_SHADOW_REACH) {
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            if (cy > ceil) {
+                return through;
+            }
+            if (cy >= 0 && cy < World::HEIGHT) {
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const bx : i32 = self.ring.floorDiv(cx, s);
+                const bz : i32 = self.ring.floorDiv(cz, s);
+                if (bx != ccx || bz != ccz) {
+                    ccx = bx;
+                    ccz = bz;
+                    cslot = self.ring.slotFor(bx, bz);
+                    cowns = self.ring.owns(cslot, bx, bz);
+                    ctop = self.ring.store.faceTop(cslot);
+                }
+                // A chunk the ring does not hold reads as air, and so does
+                // everything above a chunk's own watermark — nothing solid was
+                // ever written up there. Air passes the whole ray, so neither
+                // case is worth a fetch.
+                if (cowns && cy <= ctop) {
+                    const hit : Block = self.ring.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s));
+                    const tr : f64 = lightTransmit(hit);
+                    if (tr < 1.0) {
+                        through *= tr;
+                        if (through < 0.02) {
+                            return 0.0;
+                        }
+                    }
+                }
+            }
+            t += 0.6;
+        }
+        return through;
+    }
+
+    /**
+     * Soft sun visibility (penumbra): cast Daylight::SUN_SHADOW_SAMPLES rays over the
+     * sun's angular disc and return the average share of the sun that survives
+     * the trip (0..255) — the disc gives the edge of a shadow its penumbra, the
+     * per-ray transmittance gives a canopy its dapple.
+     * @param cell  origin air cell
+     * @param dir   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return soft visibility 0..255
+     */
+    fn raySoft(self, cell : IVec3, dir : Vec3, ceil : i32) : i32 {
+        let n : i32 = Daylight::SUN_SHADOW_SAMPLES;
+        if (n < 1) {
+            n = 1;
+        }
+        let total : f64 = self.rayTransmit(cell, dir, ceil);
+        if (n == 1) {
+            return (total * 255.0).floorToInt() as i32;
+        }
+
+        let ux : f64 = 0.0;
+        let uy : f64 = 1.0;
+        let uz : f64 = 0.0;
+        if (dir.y > 0.9 || dir.y < -0.9) {
+            ux = 1.0;
+            uy = 0.0;
+            uz = 0.0;
+        }
+
+        let tx : f64 = uy * dir.z - uz * dir.y;
+        let ty : f64 = uz * dir.x - ux * dir.z;
+        let tz : f64 = ux * dir.y - uy * dir.x;
+        let tl : f64 = (tx * tx + ty * ty + tz * tz).sqrt();
+        if (tl < 0.000001) {
+            tl = 0.000001;
+        }
+        tx /= tl;
+        ty /= tl;
+        tz /= tl;
+
+        const bx : f64 = dir.y * tz - dir.z * ty;
+        const by : f64 = dir.z * tx - dir.x * tz;
+        const bz : f64 = dir.x * ty - dir.y * tx;
+
+        // The disc is sampled over its AREA, on a golden-angle spiral, and the
+        // SAME pattern in every cell. It used to be a ring, rotated by a hash of
+        // the cell — which decorrelates neighbours, and with six rays over a
+        // penumbra two cells wide that is not dithering, it is noise: adjacent
+        // cells disagree by a sixth for no reason in the world. One fixed
+        // pattern makes the penumbra a gradient again, and an even spread over
+        // the disc weights the middle of the sun like the sun does.
+        const r : f64 = Daylight::SUN_DISC_ANGLE;
+        let cnt : i32 = 1;
+        for (i of 1..n) {
+            const u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
+            const ang : f64 = (i as f64) * 2.399963;
+            const ox : f64 = ang.cos() * r * u;
+            const oy : f64 = ang.sin() * r * u;
+            const dx : f64 = dir.x + tx * ox + bx * oy;
+            const dy : f64 = dir.y + ty * ox + by * oy;
+            const dz : f64 = dir.z + tz * ox + bz * oy;
+            let dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
+            if (dl < 0.000001) {
+                dl = 0.000001;
+            }
+            const ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
+            total += self.rayTransmit(cell, ray, ceil);
+            cnt++;
+        }
+        return (total * 255.0 / (cnt as f64)).floorToInt() as i32;
+    }
+
+    /**
+     * Recompute sun visibility for one chunk: every sky-lit air cell that
+     * borders a block gets a ray cast toward the sun.
+     *
+     * `snap` says whether the measurement REPLACES what is stored or is glided
+     * toward. A slot being tracked as the sun moves glides, because a cell is
+     * only looked at once per sweep of the ring and a full replacement makes the
+     * shadow tick forward a sweep at a time; a slot that has just arrived or just
+     * been edited snaps, because it has nothing to glide from.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @param sun   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @param snap  write the measurement outright rather than gliding toward it
+     */
+    fn bakeChunk(
+        mut self,
+        slot : i32,
+        cx : i32,
+        cz : i32,
+        sun : Vec3,
+        ceil : i32,
+        snap : bool
+    ) : void {
+        self.markBaked(slot, sun);
+
+        const s : i32 = World::CHUNK_SIZE;
+        let top : i32 = self.ring.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                // What the cloud deck leaves of the sun over this column. Once
+                // per column, not per cell: the deck is a hundred blocks up, so
+                // it shades a whole column alike.
+                const cloudT : f64 = self.clouds.transmit(
+                    (cx * s + lx) as f64,
+                    (cz * s + lz) as f64
+                );
+                for (y of 0..=top) {
+                    const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
+                    if (self.ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
+                        && nibGet(self.vols.sky(), off) > 0
+                        && nearSolid(self.ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                        const cell : IVec3 = ivec3(cx * s + lx, y, cz * s + lz);
+                        const soft : i32 = self.raySoft(cell, sun, ceil);
+                        let v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
+                        if (!snap) {
+                            v = glideTo(Mem::byteAt(self.vols.sunlit, off), v);
+                        }
+                        Mem::putByte(self.vols.sunlit, off, v);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Record the direction this slot was just baked under.
+     * @param slot  the slot index
+     * @param sun   the light direction the bake used (unit)
+     */
+    fn markBaked(mut self, slot : i32, sun : Vec3) : void {
+        const o : i64 = (slot as i64) * 3;
+        putFloatOf(self.baked, o, sun.x);
+        putFloatOf(self.baked, o + 1, sun.y);
+        putFloatOf(self.baked, o + 2, sun.z);
+    }
+
+    /**
+     * Whether the light has turned far enough since this slot's last bake for a
+     * fresh one to be able to land anywhere else.
+     *
+     * Both directions are unit, so their dot product is the cosine of the angle
+     * between them, and a slot that has never been baked holds the zero vector —
+     * a dot of zero, which no threshold passes.
+     * @param slot  the slot index
+     * @param sun   the light direction now (unit)
+     * @return true when the slot is worth baking again
+     */
+    fn movedFor(self, slot : i32, sun : Vec3) : bool {
+        const o : i64 = (slot as i64) * 3;
+        const dot : f64 = floatOf(self.baked, o) * sun.x
+            + floatOf(self.baked, o + 1) * sun.y
+            + floatOf(self.baked, o + 2) * sun.z;
+        return dot < Daylight::SUN_STILL_COS;
+    }
+
+    /**
+     * One worker's share of the priority bake: every dirty loaded slot whose
+     * index is `first` modulo `stride`, written outright and un-flagged. The
+     * shares never overlap, so each clears its own flags as it goes.
+     * @param first   the first slot of this share
+     * @param stride  the number of shares
+     * @param sun     sun direction (unit)
+     * @param ceil    tallest terrain Y over loaded chunks
+     */
+    pub(file) fn bakeDirty(mut self, first : i32, stride : i32, sun : Vec3, ceil : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        let d : i32 = first;
+        while (d < slots) {
+            if (self.ring.cols.loaded[d] == 1 && self.dirty[d] == 1) {
+                self.bakeChunk(
+                    d,
+                    self.ring.cols.cxs[d],
+                    self.ring.cols.czs[d],
+                    sun,
+                    ceil,
+                    true
+                );
+                self.dirty[d] = 0;
+            }
+            d += stride;
+        }
+    }
+
+    /**
+     * Directional-shadow bake, in two passes over the ring.
+     *
+     * FIRST every slot that has never been baked — a chunk that just streamed
+     * in, or one the player just edited. Those are not throttled: a slot whose
+     * sun map is still the `clearVolumes` default reads as FULL SUN everywhere,
+     * so leaving it to the round-robin is not "a shadow that is slightly late",
+     * it is a lit chunk sitting among shaded ones until the cursor happens by.
+     * That is the chunk-by-chunk reveal you see for the first second of a run.
+     *
+     * THEN the round-robin, `budget` slots a call, which is only there to track
+     * the sun as it moves — and the sun moves a fraction of a degree per sweep,
+     * so that pass has nothing urgent to do and can stay cheap.
+     *
+     * The direction is whichever body is up, asked of `shade::daymodel` — the
+     * same function the renderer shades with. It has to be the same one: a bake
+     * that decided for itself where the light was would put the shadows
+     * somewhere the shading does not agree with, and at night it would leave the
+     * moon casting none at all.
+     * @param dayTime  time of day (0..1)
+     * @param budget   max already-baked chunks to refresh this call
+     */
+    pub(crate) fn step(mut self, dayTime : f64, budget : i32) : void {
+        const body : SkyBodyLight = activeBody(dayTime);
+
+        // Nothing is casting anything worth baking — the handover at the horizon.
+        // The maps keep whatever they last held, which is what the light they are
+        // about is doing too.
+        if (body.strength < 0.002) {
+            return;
+        }
+
+        const sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = terrainCeil(self.ring);
+        const fresh : i32 = dirtyCount(self.ring, self.dirty);
+        if (fresh > BAKE_WORKERS) {
+            // A whole ring at once — the start of a run, or a teleport — is about
+            // a second of rays. Done on this one thread, that second is exactly
+            // how long the world stands there unshaded before the shadows drop
+            // in, which is the arrival you can see. Split over a crew it is a
+            // fraction of a frame.
+            //
+            // The shares are disjoint by slot, and a slot's bake WRITES only its
+            // own volume while it READS the neighbours' voxels, which nothing
+            // here changes: no lock, nothing shared but the world itself.
+            // Seven spawned and one run here: an array size has to be a literal,
+            // so the 7 and `BAKE_WORKERS` move together.
+            let crew : Task<i32>[7];
+            for (i of 0..7) {
+                crew[i] = spawn sunBakeJob(self, i + 1, BAKE_WORKERS, sun, ceil);
+            }
+            self.bakeDirty(0, BAKE_WORKERS, sun, ceil);
+            for (i of 0..7) {
+                const r : i32 = crew[i].join();
+            }
+        } else if (fresh > 0) {
+            // A chunk or two walked into: less work than starting the threads
+            // that would share it.
+            self.bakeDirty(0, 1, sun, ceil);
+        }
+
+        // A ring that just filled has already cost a full bake this call; the
+        // refresh can wait for the next one rather than doubling that spike.
+        if (fresh >= budget) {
+            return;
+        }
+
+        let done : i32 = 0;
+        let guard : i32 = 0;
+        while (done < budget && guard < slots) {
+            const slot : i32 = self.cursor;
+            self.cursor++;
+            if (self.cursor >= slots) {
+                self.cursor = 0;
+            }
+            guard++;
+            if (self.ring.cols.loaded[slot] == 1 && self.movedFor(slot, sun)) {
+                self.bakeChunk(
+                    slot,
+                    self.ring.cols.cxs[slot],
+                    self.ring.cols.czs[slot],
+                    sun,
+                    ceil,
+                    false
+                );
+                done++;
+            }
+        }
+    }
+}
+
+/**
+ * One sweep's worth of movement from a stored sun visibility toward a fresh
+ * measurement: `Daylight::SUN_GLIDE` of the way, but never less than a whole
+ * level, or a difference of one would never be paid off and the shadow would
+ * settle a step short of where the sun put it.
+ * @param old  the stored visibility 0..255
+ * @param v    the freshly measured visibility 0..255
+ * @return where the cell moves to this sweep
+ */
+fn glideTo(old : i32, v : i32) : i32 {
+    const dv : i32 = v - old;
+    if (dv == 0) {
+        return v;
+    }
+
+    let stepv : i32 = ((dv as f64) * Daylight::SUN_GLIDE).floorToInt() as i32;
+    if (dv > 0 && stepv < 1) {
+        stepv = 1;
+    }
+    if (dv < 0 && stepv > -1) {
+        stepv = -1;
+    }
+    return old + stepv;
+}
+
+/**
+ * Worker job: cast one share of the ring's never-shadowed slots.
+ * @param sun     the bake whose ring is cast
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param dir     sun direction (unit)
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
+fn sunBakeJob(
+    sun : SunShadows,
+    first : i32,
+    stride : i32,
+    dir : Vec3,
+    ceil : i32
+) : i32 {
+    sun.bakeDirty(first, stride, dir, ceil);
+    return 0;
+}

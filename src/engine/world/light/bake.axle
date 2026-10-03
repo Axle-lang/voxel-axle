@@ -1,0 +1,107 @@
+// bake — what the two ray bakes (sun shadows, sky access) share: the crew size,
+// the gate that skips cells no face reads, and the two ring-wide counts.
+
+use crate::engine::math::vec3::{ ivec3 };
+use crate::engine::world::ring::{ RingView };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/**
+ * Threads a priority bake is split over.
+ *
+ * It only ever runs on a ring that has just filled — the start of a run, or a
+ * walk into new chunks — so it is a burst, not a load: the render is between
+ * frames or waiting on the very chunks this is lighting. Sized for the burst,
+ * not for a steady share of the machine. Mirrored by the `Task` arrays the
+ * bakes spawn into, whose size must be a literal.
+ */
+const BAKE_WORKERS : i32 = 8;
+
+/**
+ * Whether any of a cell's 26 neighbours holds a block.
+ *
+ * The gate on the ray bakes. Sun visibility and sky access are only ever READ
+ * at a face's probe cell and at the four cells meeting at each of its corners,
+ * and all of those touch a block — so a cell with nothing but air around it is
+ * a ray cast for no one. Most of a chunk's column is exactly that, and the ray
+ * is four hundred voxel reads while this is at most twenty-six and usually
+ * stops on the first.
+ *
+ * Twenty-six rather than six because a corner reads DIAGONAL neighbours: at
+ * six, the cell off the lip of a cliff would go unbaked and stay at full sun,
+ * and a bright fringe would run along every edge inside a shadow.
+ * @param ring  the chunk ring
+ * @param slot  the slot index
+ * @param lx    local x
+ * @param y     the world y
+ * @param lz    local z
+ * @param wx    the world x of the same cell
+ * @param wz    the world z of the same cell
+ * @return whether a block sits within the cell's 3×3×3 neighbourhood
+ */
+fn nearSolid(
+    ring : RingView,
+    slot : i32,
+    lx : i32,
+    y : i32,
+    lz : i32,
+    wx : i32,
+    wz : i32
+) : bool {
+    // Inside the chunk the neighbours are this slot's own cells; on its
+    // border one step crosses into another chunk, and only then is the
+    // slot lookup paid.
+    const s : i32 = World::CHUNK_SIZE;
+    const inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
+
+    for (dz of -1..=1) {
+        for (dx of -1..=1) {
+            for (dy of -1..=1) {
+                let b : Block = Block::Air;
+                if (inner) {
+                    b = ring.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz));
+                } else {
+                    b = ring.worldGet(ivec3(wx + dx, y + dy, wz + dz));
+                }
+                if (b != Block::Air) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * The tallest terrain over the loaded ring — where a ray that has climbed
+ * past it is certainly in the open, and can stop.
+ * @param ring  the chunk ring
+ * @return the highest recorded face Y of any loaded slot
+ */
+fn terrainCeil(ring : RingView) : i32 {
+    let ceil : i32 = 0;
+    for (j of 0..World::SPAN * World::SPAN) {
+        if (ring.cols.loaded[j] == 1 && ring.store.faceTop(j) > ceil) {
+            ceil = ring.store.faceTop(j);
+        }
+    }
+    return ceil;
+}
+
+/**
+ * How many loaded slots carry a per-slot flag — what separates "the ring just
+ * filled" from "the player stepped into a chunk", and so whether a bake is
+ * worth a crew or belongs on this thread.
+ * @param ring   the chunk ring
+ * @param flags  the per-slot flag array
+ * @return the number of loaded slots flagged
+ */
+fn dirtyCount(ring : RingView, flags : i8[]) : i32 {
+    let n : i32 = 0;
+    for (j of 0..World::SPAN * World::SPAN) {
+        if (ring.cols.loaded[j] == 1 && flags[j] == 1) {
+            n++;
+        }
+    }
+    return n;
+}

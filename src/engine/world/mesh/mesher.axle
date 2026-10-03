@@ -29,7 +29,7 @@ use crate::engine::block::box::{ boxOf };
 const MESH_MAX_RUN : i32 = 8;
 use crate::engine::world::seams::{ ChannelLevels };
 use crate::engine::world::voxstore::VoxStore;
-use crate::engine::world::light::lightstore::{ LightEngine };
+use crate::engine::world::light::engine::{ LightEngine };
 use crate::engine::world::mesh::meshbuf::{ FaceMesh, TorchField };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };

@@ -1,4 +1,4 @@
-// manager — the streaming voxel world (the kernel conductor).
+// chunks — the streaming voxel world (the world's conductor).
 //
 // A fixed ring of `World::SPAN × World::SPAN` slots follows the camera: a chunk keeps its
 // slot (addressed by chunk-coord modulo `World::SPAN`) as the player moves, so crossing
@@ -7,15 +7,15 @@
 // chunks' edge columns, so the mesher culls seam faces without touching another
 // slot.
 //
-// ChunkManager is now a THIN CONDUCTOR that composes four focused leaves and
-// delegates into them, keeping the kernel seams' public surface unchanged:
-//   * VoxStore     (voxstore.axle)    — raw voxel storage + face-Y watermark
-//   * LightEngine  (lightstore.axle)  — the whole lighting engine (block/sky/sun
-//                                       flood + shadows + sky-AO/GI), owns the
-//                                       LightStore + the day-cycle / light thread
-//   * ChunkMesher  (chunkmesher.axle) — turns a slot's voxels into render faces +
-//                                       torches + the per-column collision top
-//   * TerrainGen   (terraingen.axle)  — heightmap + voxel + tree generation
+// ChunkManager is a THIN CONDUCTOR that composes focused leaves and delegates
+// into them, keeping the seams' public surface unchanged:
+//   * VoxStore     (world::voxstore)     — raw voxel storage + face-Y watermark
+//   * RingView     (world::ring)         — world cell → slot addressing
+//   * LightEngine  (world::light::engine) — block/sky flood, sun shadows,
+//                                          sky access + bounce, the light thread
+//   * ChunkMesher  (world::mesh::mesher) — a slot's voxels → render faces +
+//                                          torches + the per-column collision top
+//   * Generator    (injected by the app) — terrain for a freshly streamed slot
 // The conductor keeps only streaming (ensureLoaded/regen), the world-edit path
 // (setVoxel/break/place), the mesh-flush that bridges light→mesh, and thin
 // delegators for every seams method — so the surface downstream depends
@@ -25,8 +25,9 @@ use std::sys::sleep;
 use crate::engine::block::blocks::{ isSolid, isCollidable };
 use crate::engine::block::box::{ boxOf, BlockBox };
 use crate::engine::world::voxstore::{ VoxStore, VoxData };
+use crate::engine::world::ring::{ RingView };
 use crate::engine::world::mesh::meshbuf::{ ColumnRing };
-use crate::engine::world::light::lightstore::{ LightEngine };
+use crate::engine::world::light::engine::{ LightEngine };
 use crate::engine::world::mesh::mesher::{ ChunkMesher, MeshSource };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::engine::world::seams::{
@@ -74,6 +75,7 @@ trait Generator {
 class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     pub(crate) cols : Shared<ColumnRing>, // per-slot chunk ownership
     pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
+    ring : RingView,                 // world cell → slot addressing over the same field
     pub(crate) leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
     gen : dyn Generator[],           // terrain generation seam (concrete impl injected by
                                      // the app), held in a one-slot array: a trait-typed
@@ -94,8 +96,9 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         const field : Shared<VoxData> = new shared VoxData(slots);
         self.cols = new shared ColumnRing(slots);
         self.store = new VoxStore(field);
+        self.ring = new RingView(new VoxStore(field), self.cols);
         self.gen = malloc<dyn Generator>(1);
-        self.leng = new LightEngine(new VoxStore(field), self.cols, slots);
+        self.leng = new LightEngine(field, self.cols, slots);
 
         for (i of 0..slots) {
             self.cols.loaded[i] = 0;
@@ -114,69 +117,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.gen[0] = g;
     }
 
-    // ── Grid math ───────────────────────────────────────────────
-
-    /**
-     * Wrap a chunk coordinate into [0, span) for slot addressing.
-     * @param v  the chunk coordinate
-     * @return the wrapped index
-     */
-    fn wrap(self, v : i32) : i32 {
-        const s : i32 = World::SPAN;
-        let m : i32 = v - (v / s) * s;
-        if (m < 0) {
-            m += s;
-        }
-        return m;
-    }
-
-    /**
-     * Slot index for chunk coords (cx, cz).
-     * @param cx  the chunk x coordinate
-     * @param cz  the chunk z coordinate
-     * @return the slot index
-     */
-    fn slotFor(self, cx : i32, cz : i32) : i32 {
-        return self.wrap(cz) * World::SPAN + self.wrap(cx);
-    }
-
-    /**
-     * Floor division of `a` by `b` (toward negative infinity).
-     * @param a  the dividend
-     * @param b  the divisor
-     * @return the floored quotient
-     */
-    fn floorDiv(self, a : i32, b : i32) : i32 {
-        let q : i32 = a / b;
-        if (a - q * b < 0) {
-            q--;
-        }
-        return q;
-    }
-
     // ── Voxel access (delegates to the store) ───────────────────
-
-    /**
-     * Flat voxel-array index for a local coordinate.
-     * @param slot  the slot index
-     * @param lx    the local x coordinate
-     * @param ly    the local y coordinate
-     * @param lz    the local z coordinate
-     * @return the flat array index
-     */
-    fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        return self.store.voxIdx(slot, lx, ly, lz);
-    }
-
-    /**
-     * Block id at a local voxel; bedrock below 0, air above.
-     * @param slot   the slot index
-     * @param local  the local voxel coordinate
-     * @return the block id
-     */
-    fn getVox(self, slot : i32, local : IVec3) : Block {
-        return self.store.getVox(slot, local);
-    }
 
     /**
      * Write block `id` at a local voxel (no bounds check).
@@ -208,12 +149,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      */
     fn columnHeight(self, wx : i32, wz : i32) : i32 {
         const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(wx, s);
-        const cz : i32 = self.floorDiv(wz, s);
-        const slot : i32 = self.slotFor(cx, cz);
-        if (self.cols.loaded[slot] == 0
-            || self.cols.cxs[slot] != cx
-            || self.cols.czs[slot] != cz) {
+        const cx : i32 = self.ring.floorDiv(wx, s);
+        const cz : i32 = self.ring.floorDiv(wz, s);
+        const slot : i32 = self.ring.slotFor(cx, cz);
+        if (!self.ring.owns(slot, cx, cz)) {
             return World::SEA_LEVEL;
         }
         return self.gen[0].heightAt(slot, wx - cx * s, wz - cz * s);
@@ -228,12 +167,10 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      */
     fn collisionHeight(self, wx : i32, wz : i32) : i32 {
         const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(wx, s);
-        const cz : i32 = self.floorDiv(wz, s);
-        const slot : i32 = self.slotFor(cx, cz);
-        if (self.cols.loaded[slot] == 0
-            || self.cols.cxs[slot] != cx
-            || self.cols.czs[slot] != cz) {
+        const cx : i32 = self.ring.floorDiv(wx, s);
+        const cz : i32 = self.ring.floorDiv(wz, s);
+        const slot : i32 = self.ring.slotFor(cx, cz);
+        if (!self.ring.owns(slot, cx, cz)) {
             return World::SEA_LEVEL;
         }
         const column : i32 = slot * s * s + (wz - cz * s) * s + (wx - cx * s);
@@ -246,7 +183,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the block id
      */
     fn worldGet(self, cell : IVec3) : Block {
-        return self.leng.worldGet(cell);
+        return self.ring.worldGet(cell);
     }
 
     /**
@@ -317,7 +254,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the cell's box within its cell
      */
     fn blockBox(self, cell : IVec3) : BlockBox {
-        return boxOf(self.worldGet(cell), self.leng.worldLevel(cell));
+        return boxOf(self.worldGet(cell), self.ring.worldLevel(cell));
     }
 
     /**
@@ -339,7 +276,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      * @return the stored level
      */
     pub(crate) fn blockLevel(self, cell : IVec3) : i32 {
-        return self.leng.worldLevel(cell);
+        return self.ring.worldLevel(cell);
     }
 
     /**
@@ -380,10 +317,8 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
                     if (cheb == d) {
                         const cx : i32 = camCX + dx;
                         const cz : i32 = camCZ + dz;
-                        const slot : i32 = self.slotFor(cx, cz);
-                        if (self.cols.loaded[slot] == 0
-                            || self.cols.cxs[slot] != cx
-                            || self.cols.czs[slot] != cz) {
+                        const slot : i32 = self.ring.slotFor(cx, cz);
+                        if (!self.ring.owns(slot, cx, cz)) {
                             self.regen(slot, cx, cz);
                             built++;
                         }
@@ -482,8 +417,8 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         }
 
         const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(wx, s);
-        const cz : i32 = self.floorDiv(wz, s);
+        const cx : i32 = self.ring.floorDiv(wx, s);
+        const cz : i32 = self.ring.floorDiv(wz, s);
         for (dcz of -1..2) {
             for (dcx of -1..2) {
                 const ccx : i32 = cx + dcx;
@@ -491,10 +426,8 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
                 const lx : i32 = wx - ccx * s;
                 const lz : i32 = wz - ccz * s;
                 if (lx >= -1 && lx <= s && lz >= -1 && lz <= s) {
-                    const slot : i32 = self.slotFor(ccx, ccz);
-                    if (self.cols.loaded[slot] == 1
-                        && self.cols.cxs[slot] == ccx
-                        && self.cols.czs[slot] == ccz) {
+                    const slot : i32 = self.ring.slotFor(ccx, ccz);
+                    if (self.ring.owns(slot, ccx, ccz)) {
                         if (dcx == 0 && dcz == 0) {
                             let v : Block = id;
                             self.setVoxLocal(slot, ivec3(lx, wy, lz), v);

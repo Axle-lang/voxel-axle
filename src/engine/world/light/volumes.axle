@@ -1,0 +1,163 @@
+// volumes — the per-voxel light data of the chunk ring.
+//
+// Seven byte volumes, all in the shared `VoxStore.voxIdx` layout: block light
+// per channel and sky light (four-bit levels, two to a byte), soft sun
+// visibility, hemispherical sky access, and the one-bounce coloured tint.
+// `LightVolumes` is a value struct of the seven addresses, so every light
+// component carries a copy and none of them owns the memory more than another.
+//
+// Who writes what: the flood (light::flood) the four levels, the sun bake
+// (light::sun) the visibility, the sky bake (light::skyaccess) the access and
+// the tint. Everyone reads.
+
+use smalt::Mem;
+use crate::configs::world::{ World };
+
+/**
+ * One four-bit plane inside a byte volume: the volume, and which half of each
+ * byte is this plane's.
+ *
+ * Block light per channel and sky light are levels 0..15, and a level was
+ * stored in a byte of its own — four planes, forty-eight megabytes, half of
+ * every byte always zero. Two planes share a byte now; the flood and the
+ * readers go through this handle and never see the other half.
+ */
+struct Nibble {
+    base : i64,   // the byte volume, in voxIdx layout
+    shift : i32,  // 0 for the low half, 4 for the high
+}
+
+/**
+ * The plane's level at a byte offset.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @return the level 0..15
+ */
+fn nibGet(p : Nibble, off : i64) : i32 {
+    return (Mem::byteAt(p.base, off) >> p.shift) & 15;
+}
+
+/**
+ * Store a level in the plane's half of the byte, leaving the other half as
+ * it was. Whole-byte read-modify-write; the two halves of a byte are only ever
+ * written by the one thread that runs the floods, so nothing is torn.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @param v    the level 0..15
+ */
+fn nibPut(p : Nibble, off : i64, v : i32) : void {
+    const keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
+    Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
+}
+
+/**
+ * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
+ * block light per CHANNEL and sky light (0..15, two planes to a byte), soft
+ * sun visibility + hemispherical sky access (0..255), and the one-bounce
+ * coloured indirect tint (r/g/b, 128 = neutral).
+ */
+struct LightVolumes {
+    pub(crate) lightRG : i64,   // per-voxel block light 0..15, red in the low nibble and
+                                // green in the high: a source floods each channel from its
+                                // own level, so the light carries its colour and its reach
+    pub(crate) lightBS : i64,   // ...blue in the low nibble, and SKY light 0..15 (open-to-
+                                // sky exposure) in the high
+    pub(crate) sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
+                                // 0 = full shadow, between = penumbra)
+    pub(crate) skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (AO / GI)
+    pub(crate) bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
+    pub(crate) bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
+    pub(crate) bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
+
+    /**
+     * The red block-light plane.
+     * @return its handle
+     */
+    pub(crate) fn red(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 0 };
+    }
+
+    /**
+     * The green block-light plane.
+     * @return its handle
+     */
+    pub(crate) fn green(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 4 };
+    }
+
+    /**
+     * The blue block-light plane.
+     * @return its handle
+     */
+    pub(crate) fn blue(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 0 };
+    }
+
+    /**
+     * The sky-light plane.
+     * @return its handle
+     */
+    pub(crate) fn sky(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 4 };
+    }
+}
+
+/**
+ * The ring's light volumes, zeroed.
+ *
+ * Zeroed, not merely taken: a slot's volumes are given their real values by
+ * `clearVolumes` when a chunk lands in it, and until then every read of them —
+ * the mesher's corner average, the renderer's sample — would be reading
+ * whatever the allocator last left there.
+ * @param slots  the number of ring slots (span * span)
+ * @return the seven volumes
+ */
+fn newVolumes(slots : i32) : LightVolumes {
+    const s : i32 = World::CHUNK_SIZE;
+    const vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
+    return LightVolumes {
+        lightRG: Mem::takeZeroed(vol),
+        lightBS: Mem::takeZeroed(vol),
+        sunlit: Mem::takeZeroed(vol),
+        skyaccess: Mem::takeZeroed(vol),
+        bnR: Mem::takeZeroed(vol),
+        bnG: Mem::takeZeroed(vol),
+        bnB: Mem::takeZeroed(vol),
+    };
+}
+
+/**
+ * Reset one slot's volumes for a freshly (re)generated chunk: block + sky
+ * light to 0, sun visibility + sky access to full, the colour-bounce tint to
+ * neutral.
+ * @param vols  the ring's volumes
+ * @param slot  the slot index
+ */
+fn clearVolumes(vols : LightVolumes, slot : i32) : void {
+    const s : i32 = World::CHUNK_SIZE;
+    const n : i32 = s * s * World::HEIGHT;
+    const base : i64 = (slot as i64) * (n as i64);
+    for (i of 0..n) {
+        const at : i64 = base + (i as i64);
+        Mem::putByte(vols.lightRG, at, 0);
+        Mem::putByte(vols.lightBS, at, 0);
+        Mem::putByte(vols.sunlit, at, 255);
+        Mem::putByte(vols.skyaccess, at, 255);
+        Mem::putByte(vols.bnR, at, 128);
+        Mem::putByte(vols.bnG, at, 128);
+        Mem::putByte(vols.bnB, at, 128);
+    }
+}
+
+/**
+ * A per-slot flag array, every flag down.
+ * @param slots  the number of ring slots
+ * @return the flags
+ */
+fn newSlotFlags(slots : i32) : i8[] {
+    let flags : i8[] = malloc<i8>(slots);
+    for (i of 0..slots) {
+        flags[i] = 0;
+    }
+    return flags;
+}

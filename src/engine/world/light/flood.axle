@@ -1,0 +1,496 @@
+// flood — block light per channel and sky light, flooded through the voxels.
+//
+// The four-bit levels: a source floods each of its channels outward, losing a
+// level per block, and a column open to the sky is 15 down to its first opaque
+// block with a sideways gradient into overhangs. An edit removes what ran
+// through the cell and lets the neighbours flow back in. Every slot whose
+// FACES read a changed cell is flagged for a re-mesh, which the manager runs.
+//
+// Runs on the main thread, during loading and after every edit.
+
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{
+    LightVolumes, Nibble, nibGet, nibPut, newSlotFlags,
+};
+use crate::engine::world::seams::{ ChannelLevels };
+use crate::engine::block::blocks::{ isOpaque };
+use crate::engine::block::props::{ emissionOf, Emission };
+use crate::configs::light::{ Light };
+use crate::configs::world::{ World };
+
+/**
+ * One entry of the block-light removal stack: a voxel + its old light level.
+ *
+ * At the width the values need. `x` and `z` are world columns and stay whole
+ * words; `y` is a level of the world and a step either side of one, which is
+ * a short; a light level is 0..15, which is a byte. The stack holds
+ * `Light::QUEUE_CAP` of these, so the four bytes that leaves are a quarter of
+ * a megabyte. The x/z pair leads so the short and the byte share the tail
+ * word rather than each taking one.
+ */
+struct LightRemoval {
+    x : i32,
+    z : i32,
+    y : i16,
+    lvl : i8,
+}
+
+/**
+ * Light level (0..15) of one plane at a world voxel; 0 if unloaded / out of
+ * range. `p` selects a block-light channel or the sky light.
+ * @param ring  the chunk ring
+ * @param p     the plane
+ * @param cell  the world voxel
+ * @return the level 0..15
+ */
+fn levelAt(ring : RingView, p : Nibble, cell : IVec3) : i32 {
+    const off : i64 = ring.offsetOf(cell);
+    if (off < 0) {
+        return 0;
+    }
+    return nibGet(p, off);
+}
+
+/**
+ * Block light per channel (0..15 each) at a world voxel; 0 if unloaded.
+ * @param ring  the chunk ring
+ * @param vols  the light volumes
+ * @param cell  the world voxel
+ * @return the red, green and blue block-light levels
+ */
+fn channelsAt(ring : RingView, vols : LightVolumes, cell : IVec3) : ChannelLevels {
+    return ChannelLevels {
+        r: levelAt(ring, vols.red(), cell),
+        g: levelAt(ring, vols.green(), cell),
+        b: levelAt(ring, vols.blue(), cell),
+    };
+}
+
+class LightFlood {
+    ring : RingView,        // this component's view of the world
+    vols : LightVolumes,    // the volumes it floods
+    lq : IVec3[],           // block-light flood (add) stack — one voxel per entry
+    lqn : i32,              // its depth
+    rq : LightRemoval[],    // block-light removal stack — voxel + its old level
+    rqn : i32,              // its depth
+    ldirty : i8[],          // per-slot "light changed → re-mesh" flag
+
+    /**
+     * The flood stacks and the per-slot re-mesh flags.
+     * @param ring   a view of the world
+     * @param vols   the ring's light volumes
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own ring : RingView, vols : LightVolumes, slots : i32) {
+        self.ring = ring;
+        self.vols = vols;
+        self.ldirty = newSlotFlags(slots);
+        const lcap : i32 = Light::QUEUE_CAP;
+        self.lq = malloc<IVec3>(lcap);
+        self.lqn = 0;
+        self.rq = malloc<LightRemoval>(lcap);
+        self.rqn = 0;
+    }
+
+    // ── Per-slot mesh-dirty bridge (read back by the manager's flush) ──
+
+    /**
+     * Flag a slot's light as changed so the manager re-meshes it.
+     * @param slot  the slot index
+     */
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
+        self.ldirty[slot] = 1;
+    }
+
+    /**
+     * Flag a chunk dirty, but only if it is currently loaded at (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
+    pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
+        const slot : i32 = self.ring.slotFor(cx, cz);
+        if (self.ring.owns(slot, cx, cz)) {
+            self.ldirty[slot] = 1;
+        }
+    }
+
+    /**
+     * Consume a slot's dirty flag: return whether it was set, clearing it.
+     * @param slot  the slot index
+     * @return whether the flag was set
+     */
+    pub(crate) fn takeDirty(mut self, slot : i32) : bool {
+        if (self.ldirty[slot] == 1) {
+            self.ldirty[slot] = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // ── Levels ──────────────────────────────────────────────────
+
+    /**
+     * Set one plane's level at a world voxel (owner chunk), flagging for
+     * re-mesh every slot whose FACES read that cell.
+     *
+     * That is not only the slot the cell belongs to. A face is lit at its four
+     * corners, and a corner averages the four air cells meeting there — so a
+     * face on the near side of a chunk border takes part of its light from the
+     * cell across it. Flagging only the owner leaves the neighbour's border
+     * faces holding the light they were baked with.
+     *
+     * It shows as a cave that will not go dark. Plugging the hole is correct in
+     * the volume — the removal flood does reach — but the flood runs up to
+     * fifteen blocks from the block you placed, and everything it darkened
+     * across a border kept its old bright bake. Another block somewhere else
+     * dirties another slot and another piece of the cave finally goes out,
+     * which is why it took several.
+     * @param p     the plane
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
+    fn setLevel(mut self, p : Nibble, cell : IVec3, v : i32) : void {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.ring.floorDiv(cell.x, s);
+        const cz : i32 = self.ring.floorDiv(cell.z, s);
+        const slot : i32 = self.ring.slotFor(cx, cz);
+        if (!self.ring.owns(slot, cx, cz)) {
+            return;
+        }
+
+        const lx : i32 = cell.x - cx * s;
+        const lz : i32 = cell.z - cz * s;
+        const off : i64 = self.ring.store.voxIdx(slot, lx, cell.y, lz) as i64;
+        if (nibGet(p, off) != v) {
+            nibPut(p, off, v);
+            self.ldirty[slot] = 1;
+            if (lx == 0) {
+                self.markDirtyAt(cx - 1, cz);
+            }
+            if (lx == s - 1) {
+                self.markDirtyAt(cx + 1, cz);
+            }
+            if (lz == 0) {
+                self.markDirtyAt(cx, cz - 1);
+            }
+            if (lz == s - 1) {
+                self.markDirtyAt(cx, cz + 1);
+            }
+        }
+    }
+
+    /**
+     * Recompute a column's sky light: 15 from the top down to the first opaque
+     * block, 0 below it.
+     * @param wx  world x
+     * @param wz  world z
+     */
+    fn skyColumn(mut self, wx : i32, wz : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.ring.floorDiv(wx, s);
+        const cz : i32 = self.ring.floorDiv(wz, s);
+        const slot : i32 = self.ring.slotFor(cx, cz);
+        if (!self.ring.owns(slot, cx, cz)) {
+            return;
+        }
+
+        const lx : i32 = wx - cx * s;
+        const lz : i32 = wz - cz * s;
+        let lit : i32 = 15;
+        let y : i32 = World::HEIGHT - 1;
+        while (y >= 0) {
+            if (lit > 0 && isOpaque(self.ring.store.getVox(slot, ivec3(lx, y, lz)))) {
+                lit = 0;
+            }
+            const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
+            const sky : Nibble = self.vols.sky();
+            if (nibGet(sky, off) != lit) {
+                nibPut(sky, off, lit);
+                self.ldirty[slot] = 1;
+            }
+            y--;
+        }
+    }
+
+    /**
+     * Seed sky light for a freshly generated chunk: set each column's vertical
+     * exposure, then flood the sideways gradient so overhung / roofed spots fade
+     * in instead of leaving a hard black patch.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                self.skyColumn(cx * s + lx, cz * s + lz);
+            }
+        }
+
+        self.lqn = 0;
+        let top : i32 = self.ring.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (bz of 0..s) {
+            for (bx of 0..s) {
+                for (by of 0..=top) {
+                    const sky : Nibble = self.vols.sky();
+                    const off : i64 = self.ring.store.voxIdx(slot, bx, by, bz) as i64;
+                    if (nibGet(sky, off) == 15) {
+                        self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
+                    }
+                }
+            }
+        }
+        self.floodAdd(self.vols.sky());
+    }
+
+    // ── The flood stacks ────────────────────────────────────────
+
+    /**
+     * Spread one plane's light into a neighbour, losing one level per block,
+     * when it would be brighter there (and the neighbour isn't opaque).
+     * @param p          the plane
+     * @param neighbour  the neighbour world voxel
+     * @param lv         this cell's level (the neighbour gets lv-1)
+     */
+    fn trySpread(mut self, p : Nibble, neighbour : IVec3, lv : i32) : void {
+        if (isOpaque(self.ring.worldGet(neighbour))) {
+            return;
+        }
+        if (levelAt(self.ring, p, neighbour) < lv - 1) {
+            self.setLevel(p, neighbour, lv - 1);
+            self.lpush(neighbour);
+        }
+    }
+
+    /**
+     * Flood one plane's add-stack to completion: each popped cell spreads to
+     * its 6 neighbours.
+     * @param p  the plane
+     */
+    fn floodAdd(mut self, p : Nibble) : void {
+        while (self.lqn > 0) {
+            self.lqn--;
+            const entry : IVec3 = self.lq[self.lqn];
+            const lv : i32 = levelAt(self.ring, p, entry);
+            if (lv > 1) {
+                self.trySpread(p, ivec3(entry.x + 1, entry.y, entry.z), lv);
+                self.trySpread(p, ivec3(entry.x - 1, entry.y, entry.z), lv);
+                self.trySpread(p, ivec3(entry.x, entry.y + 1, entry.z), lv);
+                self.trySpread(p, ivec3(entry.x, entry.y - 1, entry.z), lv);
+                self.trySpread(p, ivec3(entry.x, entry.y, entry.z + 1), lv);
+                self.trySpread(p, ivec3(entry.x, entry.y, entry.z - 1), lv);
+            }
+        }
+    }
+
+    /**
+     * One removal neighbour step: a neighbour dimmer than the removed level is
+     * cleared and queued for further removal; an equal/brighter neighbour is a
+     * surviving source, queued onto the add-stack to refill.
+     * @param p          the plane
+     * @param neighbour  the neighbour world voxel
+     * @param lvl        the level being removed from the parent cell
+     */
+    fn tryRemove(mut self, p : Nibble, neighbour : IVec3, lvl : i32) : void {
+        const nl : i32 = levelAt(self.ring, p, neighbour);
+        if (nl != 0) {
+            if (nl < lvl) {
+                self.setLevel(p, neighbour, 0);
+                self.rpush(neighbour, nl);
+            } else {
+                self.lpush(neighbour);
+            }
+        }
+    }
+
+    /**
+     * Flood one plane's removal stack, feeding the add-stack from surviving
+     * (brighter/equal) sources so they refill the cleared region.
+     * @param p  the plane
+     */
+    fn floodRemove(mut self, p : Nibble) : void {
+        while (self.rqn > 0) {
+            self.rqn--;
+            const entry : LightRemoval = self.rq[self.rqn];
+            const ey : i32 = entry.y as i32;
+            const lvl : i32 = entry.lvl as i32;
+            self.tryRemove(p, ivec3(entry.x + 1, ey, entry.z), lvl);
+            self.tryRemove(p, ivec3(entry.x - 1, ey, entry.z), lvl);
+            self.tryRemove(p, ivec3(entry.x, ey + 1, entry.z), lvl);
+            self.tryRemove(p, ivec3(entry.x, ey - 1, entry.z), lvl);
+            self.tryRemove(p, ivec3(entry.x, ey, entry.z + 1), lvl);
+            self.tryRemove(p, ivec3(entry.x, ey, entry.z - 1), lvl);
+        }
+    }
+
+    /**
+     * Push a cell onto the (shared block/sky) light add-stack; dropped if full.
+     * @param cell  the world voxel to push
+     */
+    fn lpush(mut self, cell : IVec3) : void {
+        if (self.lqn >= Light::QUEUE_CAP) {
+            return;
+        }
+        self.lq[self.lqn] = IVec3 {
+            x: cell.x,
+            y: cell.y,
+            z: cell.z,
+        };
+        self.lqn++;
+    }
+
+    /**
+     * Push a cell plus its old level onto the light removal-stack; dropped if full.
+     * @param cell  the world voxel to push
+     * @param lvl   the level it held before removal
+     */
+    fn rpush(mut self, cell : IVec3, lvl : i32) : void {
+        if (self.rqn >= Light::QUEUE_CAP) {
+            return;
+        }
+        self.rq[self.rqn] = LightRemoval {
+            x: cell.x,
+            z: cell.z,
+            y: cell.y as i16,
+            lvl: lvl as i8,
+        };
+        self.rqn++;
+    }
+
+    // ── Edits ───────────────────────────────────────────────────
+
+    /**
+     * Re-flood ONE block-light channel around an edited cell: remove the level
+     * that was there and everything it fed, re-seed this block's own emission,
+     * then let the six neighbours flow back in.
+     *
+     * A channel at a time, because the flood stacks are shared and because the
+     * channels do not interact: what red does around a torch says nothing about
+     * what blue does, beyond the level each started at.
+     * @param p     the channel's plane
+     * @param cell  the edited world voxel
+     * @param had   the level that cell held before the edit
+     * @param emit  the level the block now there emits on this channel
+     */
+    fn refloodChannel(mut self, p : Nibble, cell : IVec3, had : i32, emit : i32) : void {
+        self.lqn = 0;
+        self.rqn = 0;
+        self.setLevel(p, cell, 0);
+        self.rpush(cell, had + 1);
+        self.floodRemove(p);
+
+        if (emit > 0) {
+            self.setLevel(p, cell, emit);
+            self.lpush(cell);
+        }
+
+        self.lpush(ivec3(cell.x + 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x - 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x, cell.y + 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y - 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y, cell.z + 1));
+        self.lpush(ivec3(cell.x, cell.y, cell.z - 1));
+        self.floodAdd(p);
+    }
+
+    /**
+     * Recompute block + sky light after ANY edit at a world voxel. Clears the
+     * light that ran through the cell, re-seeds emission, then re-floods from the
+     * cell's neighbours; reconciles the edited column's sky exposure and the
+     * sideways sky gradient. Flags every touched slot (plus border neighbours)
+     * dirty — the MANAGER runs the actual re-mesh flush afterwards.
+     * @param cell  the edited world voxel
+     */
+    pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
+        const wx : i32 = cell.x;
+        const wy : i32 = cell.y;
+        const wz : i32 = cell.z;
+
+        // 1..3. Block light, once per channel: clear what ran through the cell,
+        // re-seed this block's own emission, then let the neighbours flow back
+        // in. The three channels share the flood stacks, so they run in turn.
+        const cur : ChannelLevels = channelsAt(self.ring, self.vols, cell);
+        const emit : Emission = emissionOf(self.ring.worldGet(ivec3(wx, wy, wz)));
+        self.refloodChannel(self.vols.red(), cell, cur.r, emit.r);
+        self.refloodChannel(self.vols.green(), cell, cur.g, emit.g);
+        self.refloodChannel(self.vols.blue(), cell, cur.b, emit.b);
+
+        // 4. Sky light: reconcile the edited column's vertical exposure — seed a
+        // REMOVAL where a cell darkened and an ADD where it brightened — then
+        // flood both, so sky light recedes as well as fills.
+        self.lqn = 0;
+        self.rqn = 0;
+        const scx : i32 = self.ring.floorDiv(wx, World::CHUNK_SIZE);
+        const scz : i32 = self.ring.floorDiv(wz, World::CHUNK_SIZE);
+        const sslot : i32 = self.ring.slotFor(scx, scz);
+        if (self.ring.owns(sslot, scx, scz)) {
+            const slx : i32 = wx - scx * World::CHUNK_SIZE;
+            const slz : i32 = wz - scz * World::CHUNK_SIZE;
+            let lit : i32 = 15;
+            let cy : i32 = World::HEIGHT - 1;
+            while (cy >= 0) {
+                if (lit > 0 && isOpaque(self.ring.store.getVox(sslot, ivec3(slx, cy, slz)))) {
+                    lit = 0;
+                }
+                const coff : i64 = self.ring.store.voxIdx(sslot, slx, cy, slz) as i64;
+                const sky : Nibble = self.vols.sky();
+                const oldv : i32 = nibGet(sky, coff);
+                if (oldv > lit) {
+                    nibPut(sky, coff, lit);
+                    self.ldirty[sslot] = 1;
+                    self.rpush(ivec3(wx, cy, wz), oldv);
+                } else if (lit > oldv) {
+                    nibPut(sky, coff, lit);
+                    self.ldirty[sslot] = 1;
+                    self.lpush(ivec3(wx, cy, wz));
+                }
+                cy--;
+            }
+        }
+        self.floodRemove(self.vols.sky());
+
+        // Also seed the add from the edited cell + its 6 neighbours, so the
+        // sideways sky gradient flows into a newly opened space even when the
+        // edit doesn't change the column.
+        self.lpush(cell);
+        self.lpush(ivec3(wx + 1, wy, wz));
+        self.lpush(ivec3(wx - 1, wy, wz));
+        self.lpush(ivec3(wx, wy + 1, wz));
+        self.lpush(ivec3(wx, wy - 1, wz));
+        self.lpush(ivec3(wx, wy, wz + 1));
+        self.lpush(ivec3(wx, wy, wz - 1));
+        self.floodAdd(self.vols.sky());
+
+        // A border face is baked from the NEIGHBOUR chunk's light, which didn't
+        // change — re-flag the edited chunk plus any border neighbour so their
+        // shared faces re-bake with the final light.
+        const ecs : i32 = World::CHUNK_SIZE;
+        const ecx : i32 = self.ring.floorDiv(wx, ecs);
+        const ecz : i32 = self.ring.floorDiv(wz, ecs);
+        const elx : i32 = wx - ecx * ecs;
+        const elz : i32 = wz - ecz * ecs;
+        self.markDirtyAt(ecx, ecz);
+        if (elx == 0) {
+            self.markDirtyAt(ecx - 1, ecz);
+        }
+        if (elx == ecs - 1) {
+            self.markDirtyAt(ecx + 1, ecz);
+        }
+        if (elz == 0) {
+            self.markDirtyAt(ecx, ecz - 1);
+        }
+        if (elz == ecs - 1) {
+            self.markDirtyAt(ecx, ecz + 1);
+        }
+    }
+}

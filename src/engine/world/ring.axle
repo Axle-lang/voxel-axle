@@ -1,0 +1,184 @@
+// ring — the chunk ring, addressed by world cell.
+//
+// A fixed `World::SPAN × World::SPAN` ring of slots follows the camera: a chunk
+// keeps its slot (chunk coordinate modulo the span) while it is loaded, so the
+// walk from a world cell to its voxel is floor-divide, wrap, check the slot
+// still holds that chunk, subtract the origin. Every reader of the field took
+// that walk on its own; this is the one copy of it.
+//
+// A `RingView` is a view, not an owner: the voxel field and the ring's per-slot
+// coordinates are co-owned with the manager, so any number of views — one per
+// light component — reach the same live world with no copy.
+
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::world::voxstore::VoxStore;
+use crate::engine::world::mesh::meshbuf::{ ColumnRing };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+class RingView {
+    pub(crate) store : VoxStore,          // this view of the voxel field
+    pub(crate) cols : Shared<ColumnRing>, // the ring's loaded flags + chunk coords, co-owned
+
+    /**
+     * A view over a shared voxel field and ring.
+     * @param store  a view of the voxel field
+     * @param cols   the chunk ring, co-owned with the manager
+     */
+    constructor(own store : VoxStore, own cols : Shared<ColumnRing>) {
+        self.store = store;
+        self.cols = cols;
+    }
+
+    /**
+     * Floor division of `a` by `b` (toward negative infinity).
+     * @param a  the dividend
+     * @param b  the divisor
+     * @return the floored quotient
+     */
+    pub(crate) fn floorDiv(self, a : i32, b : i32) : i32 {
+        let q : i32 = a / b;
+        if (a - q * b < 0) {
+            q--;
+        }
+        return q;
+    }
+
+    /**
+     * Wrap a chunk coordinate into [0, span) for slot addressing.
+     * @param v  the chunk coordinate
+     * @return the coordinate wrapped into [0, span)
+     */
+    pub(crate) fn wrap(self, v : i32) : i32 {
+        const s : i32 = World::SPAN;
+        let m : i32 = v - (v / s) * s;
+        if (m < 0) {
+            m += s;
+        }
+        return m;
+    }
+
+    /**
+     * Slot index for chunk coords (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     * @return the ring slot that chunk maps to
+     */
+    pub(crate) fn slotFor(self, cx : i32, cz : i32) : i32 {
+        return self.wrap(cz) * World::SPAN + self.wrap(cx);
+    }
+
+    /**
+     * True if `slot` currently holds chunk (cx, cz).
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @return whether the slot is loaded with exactly that chunk
+     */
+    pub(crate) fn owns(self, slot : i32, cx : i32, cz : i32) : bool {
+        return self.cols.loaded[slot] == 1
+            && self.cols.cxs[slot] == cx
+            && self.cols.czs[slot] == cz;
+    }
+
+    /**
+     * Block id at a world voxel; bedrock below 0, air above / unloaded.
+     * @param cell  the world voxel
+     * @return the block id there
+     */
+    pub(crate) fn worldGet(self, cell : IVec3) : Block {
+        if (cell.y < 0) {
+            return Block::Stone;
+        }
+        if (cell.y >= World::HEIGHT) {
+            return Block::Air;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return Block::Air;
+        }
+        return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
+     * A world voxel for the MESHER's neighbour reads: the block that is there,
+     * or a wall where the ring holds no chunk yet.
+     *
+     * The difference from `worldGet` is what an unloaded neighbour means. To
+     * the light it is open air, which is right — the sky is up there. To a face
+     * it would be a window: every chunk on the ring's edge would grow a wall of
+     * faces toward the chunks that have not arrived, and drop them the moment
+     * they do. A wall says there is nothing to draw, and when the neighbour
+     * lands, `regen` flags this chunk and the faces that are really open are
+     * meshed then.
+     * @param cell  the world voxel
+     * @return the block id, or Stone past the ring
+     */
+    pub(crate) fn worldGetOrWall(self, cell : IVec3) : Block {
+        if (cell.y < 0) {
+            return Block::Stone;
+        }
+        if (cell.y >= World::HEIGHT) {
+            return Block::Air;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return Block::Stone;
+        }
+        return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
+     * The stored LEVEL of a world cell; 0 outside the loaded ring.
+     *
+     * The other half of a voxel. A block id says what is there and the
+     * level says how much of the cell it fills, and both have to be read
+     * through the same slot lookup or a partial block's height and its
+     * identity can come from two different chunks.
+     * @param cell  the world voxel
+     * @return the cell's level, or 0 for "the id's default box"
+     */
+    pub(crate) fn worldLevel(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 0;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 0;
+        }
+        return self.store.getLevel(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
+     * The voxIdx offset of a world cell, or -1 when it is out of height or its
+     * chunk is not on the ring — the walk every per-voxel volume read takes.
+     * @param cell  the world voxel
+     * @return the cell's offset into a volume, or -1
+     */
+    pub(crate) fn offsetOf(self, cell : IVec3) : i64 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return -1;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return -1;
+        }
+        return self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+    }
+}
