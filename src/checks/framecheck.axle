@@ -1,0 +1,217 @@
+// framecheck — what a frame contains, decided once, printed.
+//
+// Every backend draws the `FrameDesc` the frame builder decides, so what is in
+// a frame — which creatures and how they are lit, which torches, the hour's
+// light, the cloud deck, the aimed block — is one decision, and this prints it.
+// A change to the game that changes what a frame shows changes this output,
+// once, for every backend; a change to a backend cannot.
+//
+// The world is the reference column of the pinned captures, with its creatures
+// spawned and a torch planted, seen from a fixed sweep of yaws, pitches and
+// hours. The output is diffed like the other checks; the run also fails on a
+// frame that breaks what a backend relies on: a box or torch the builder had
+// no room for, a torch outside every loaded chunk.
+//
+// `voxel --frame-check` runs it and exits with the failure count.
+
+use crate::engine::world::chunks::{ ChunkManager };
+use crate::engine::entity::player::{ Player };
+use crate::engine::entity::mobs::{ MobManager };
+use crate::engine::entity::model::{ MODEL_MAX_PARTS };
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::sky::viewray::{ ViewRay };
+use crate::engine::sky::clouddome::{ CloudSample };
+use crate::engine::render::frame::framedesc::{ FrameDesc, FrameClock, HudState };
+use crate::engine::render::frame::framebuilder::{
+    FrameBuilder, FrameSource, FrameRequest, Aim,
+};
+use crate::app::view::{ viewOf };
+use crate::app::session::boot::{ newWorld, placePlayer, plantTorch, momentAt, chunkOf };
+use crate::game::entities::fauna::Fauna;
+use crate::configs::mobs::{ Mobs };
+use crate::configs::world::{ World };
+
+/** The pinned captures' column, so this frame and the reference image agree. */
+const REF_COLUMN_X : i32 = 294456;
+const REF_COLUMN_Z : i32 = 109296;
+
+/** The sweep: yaws a quarter turn apart, three pitches, three hours. */
+const SWEEP_YAWS : i32 = 4;
+const SWEEP_PITCHES : i32 = 3;
+const SWEEP_HOURS : i32 = 3;
+
+/** Mob maintenance passes run before the frames, so the creatures are there. */
+const SWEEP_SPAWN_PASSES : i32 = 4;
+
+/**
+ * The pitch of one step of the sweep: down at the ground, level, up at the sky.
+ * @param i  the step, 0..SWEEP_PITCHES
+ * @return the pitch, in radians
+ */
+fn pitchAt(i : i32) : f64 {
+    if (i == 0) {
+        return 0.0 - 1.0;
+    }
+    if (i == 1) {
+        return 0.0;
+    }
+    return 0.8;
+}
+
+/**
+ * The hour of one step of the sweep: sunrise, the reference afternoon, night.
+ * @param i  the step, 0..SWEEP_HOURS
+ * @return the time of day, in [0, 1)
+ */
+fn hourAt(i : i32) : f64 {
+    if (i == 0) {
+        return 0.27;
+    }
+    if (i == 1) {
+        return 0.42;
+    }
+    return 0.9;
+}
+
+/**
+ * Builds the swept frames over the reference world and prints each one.
+ * @return the number of frames that broke an invariant
+ */
+fn runFrameCheck() : i32 {
+    let man : ChunkManager = newWorld();
+    let player : Player = placePlayer(man, REF_COLUMN_X, REF_COLUMN_Z);
+    plantTorch(man, player);
+    man.setMoment(momentAt(player, hourAt(1), 0.0));
+    man.primeLight();
+
+    let mobs : MobManager = new MobManager();
+    mobs.attachSpawner(new Fauna());
+    for (i of 0..SWEEP_SPAWN_PASSES) {
+        mobs.maintain(man, player);
+    }
+    Console::println("  creatures ${mobs.actorCount()}");
+
+    let frames : FrameBuilder = new FrameBuilder();
+    const below : IVec3 = ivec3(
+        player.pos.x.floorToInt() as i32,
+        (player.pos.y - 0.5).floorToInt() as i32,
+        player.pos.z.floorToInt() as i32
+    );
+
+    let fails : i32 = 0;
+    for (h of 0..SWEEP_HOURS) {
+        for (p of 0..SWEEP_PITCHES) {
+            for (y of 0..SWEEP_YAWS) {
+                player.aimAt((y as f64) * 1.5707963, pitchAt(p));
+                player.refresh();
+
+                const frame : FrameDesc = frames.build(
+                    FrameSource {
+                        man,
+                        mobs,
+                    },
+                    FrameRequest {
+                        view: viewOf(player),
+                        clock: FrameClock {
+                            dayTime: hourAt(h),
+                            seconds: ((h * SWEEP_PITCHES + p) * SWEEP_YAWS + y) as f64,
+                            ripple: 0.0,
+                            underwater: false,
+                        },
+                        aim: Aim {
+                            on: true,
+                            cell: below,
+                        },
+                        hud: HudState {
+                            paused: false,
+                            hover: -1,
+                            hp: player.hp,
+                            maxHp: player.maxHp,
+                            hotbar: player.hotbar,
+                            selected: player.selected,
+                            creative: false,
+                        },
+                    }
+                );
+                printFrame(frame, hourAt(h), p, y);
+                fails += brokenFrame(man, frame);
+            }
+        }
+    }
+
+    man.stopLight();
+    Console::println("frame failures: ${fails}");
+    return fails;
+}
+
+/**
+ * One line per frame: what it holds, rounded where a float is only a summary.
+ * @param f      the frame
+ * @param hour   its time of day
+ * @param pitch  its pitch step
+ * @param yaw    its yaw step
+ */
+fn printFrame(f : FrameDesc, hour : f64, pitch : i32, yaw : i32) : void {
+    const zenith : CloudSample = f.clouds.sample(ViewRay {
+        dx: 0.0,
+        dy: 1.0,
+        dz: 0.0,
+        inv: 1.0,
+    });
+    const deck : i32 = (zenith.a * 1000.0).round() as i32;
+    const sun : i32 = (f.day.dirStrength * 1000.0).round() as i32;
+    const amb : i32 = (f.day.skyAmbient * 1000.0).round() as i32;
+    let lit : f64 = 0.0;
+    for (i of 0..f.boxCount) {
+        lit += f.boxes[i].light.g;
+    }
+    const mobLit : i32 = (lit * 1000.0 / (f.boxCount.max(1) as f64)).round() as i32;
+
+    Console::println("  t=${hour} pitch${pitch} yaw${yaw}:"
+        + " boxes=${f.boxCount} lit=${mobLit} torches=${f.torchCount}"
+        + " sky=${f.day.skyColR},${f.day.skyColG},${f.day.skyColB}"
+        + " sun=${sun} amb=${amb} deck=${deck}"
+        + " aim=${f.aim.cell.x},${f.aim.cell.y},${f.aim.cell.z}/${f.aim.topH}");
+}
+
+/**
+ * Whether a frame breaks what a backend relies on: every torch it lists stands
+ * in a loaded chunk, and its counts fit the builder's buffers.
+ * @param man  the world the frame was built from
+ * @param f    the frame
+ * @return 1 when it does, 0 otherwise
+ */
+fn brokenFrame(man : ChunkManager, f : FrameDesc) : i32 {
+    const boxRoom : i32 = Mobs::CAP * MODEL_MAX_PARTS;
+    const torchRoom : i32 = World::SPAN * World::SPAN * World::MAX_TORCHES_PER_CHUNK;
+    if (f.boxCount > boxRoom || f.torchCount > torchRoom) {
+        Console::println("    FAIL: counts over capacity");
+        return 1;
+    }
+
+    for (i of 0..f.torchCount) {
+        const t : IVec3 = f.torches[i];
+        if (!loadedAt(man, chunkOf(t.x as f64), chunkOf(t.z as f64))) {
+            Console::println("    FAIL: torch at (${t.x}, ${t.y}, ${t.z}) outside the ring");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * Whether the ring holds this chunk.
+ * @param man  the world
+ * @param cx   chunk x
+ * @param cz   chunk z
+ * @return true when a loaded slot holds it
+ */
+fn loadedAt(man : ChunkManager, cx : i32, cz : i32) : bool {
+    for (slot of 0..World::SPAN * World::SPAN) {
+        const sc = man.slotChunk(slot);
+        if (sc.loaded && sc.cx == cx && sc.cz == cz) {
+            return true;
+        }
+    }
+    return false;
+}

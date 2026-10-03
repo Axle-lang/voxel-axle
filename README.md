@@ -296,7 +296,7 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 - `--daytime <0..1>` starts the day clock at that hour (0.42 mid-morning, 0.75 sunset, 0.9 night), so a capture can be taken at the hour that shows what it is about instead of waiting four real minutes for the sky to come round.
 - smalt's own limits, and what each would take to lift, are in [`vendor/smalt/LIMITATIONS.md`](vendor/smalt/LIMITATIONS.md).
 - Other run flags: `--size <w> <h>` opens the window at that size, `--walk <blocks>` sprints straight ahead that far (a repeatable streaming load), `--torch` plants a torch in front of the start.
-- Headless checks: `--physics-check`, `--light-check`, `--biome-scan`, `--cull-check`, `--model-check` — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#verifying-a-refactor).
+- Headless checks: `--physics-check`, `--light-check`, `--biome-scan`, `--cull-check`, `--frame-check`, `--model-check` — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#verifying-a-refactor).
 
 ---
 

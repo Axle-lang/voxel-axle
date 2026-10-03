@@ -28,6 +28,7 @@ use crate::checks::lightcheck::runLightCheck;
 use crate::checks::biomecheck::runBiomeScan;
 use crate::checks::cullcheck::runCullCheck;
 use crate::checks::modelcheck::runModelCheck;
+use crate::checks::framecheck::runFrameCheck;
 
 /**
  * Runs a headless check when one is asked for, the game otherwise.
@@ -43,7 +44,9 @@ use crate::checks::modelcheck::runModelCheck;
  * - `--cull-check` sweeps the camera and reports any chunk the frustum dropped
  *   while part of it was on screen — a hole in one frame at one angle;
  * - `--model-check` asks every species for its body through the render seam —
- *   a lost override renders as nothing, not as an error.
+ *   a lost override renders as nothing, not as an error;
+ * - `--frame-check` prints what a swept set of frames contains, as every
+ *   backend receives it — what is drawn changes here first, once.
  * @return the process exit code: 0 on success, the failure count for a check
  */
 fn main() : i32 {
@@ -61,6 +64,9 @@ fn main() : i32 {
     }
     if (hasFlag("--model-check")) {
         return runModelCheck();
+    }
+    if (hasFlag("--frame-check")) {
+        return runFrameCheck();
     }
 
     try {

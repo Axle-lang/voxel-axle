@@ -13,9 +13,12 @@ plan — read it before moving or adding a file.
 - `src/engine/` never imports `src/game/`, `src/app/` or `src/checks/`;
   content reaches it through injection seams (`Generator`, `MobSpawner`,
   `ActorVisual.buildModel`).
-- Backend-neutral rendering (`engine/render/view`, `engine/shade`,
-  `engine/sky`) never imports `engine/render/cpu` — that is the line a GPU
-  backend (`engine/render/gpu`, next to `cpu`) will plug in at.
+- Backend-neutral rendering (`engine/render/view`, `engine/render/frame`,
+  `engine/shade`, `engine/sky`) never imports `engine/render/cpu` — that is
+  the line a GPU backend (`engine/render/gpu`, next to `cpu`) will plug in at.
+- The game draws through one call, `RenderBackend.draw(frame, world, win)`.
+  What a frame shows is decided in `engine/render/frame/framebuilder`, never
+  in a backend; a backend imports no creature, world manager or frame builder.
 - Nothing under `engine/render` or `engine/sky` names the player: the
   renderer is handed a `View` (`app/view.axle`) and builds one `Camera`.
 - A file that grows past ~700 lines is doing more than one job: split it
@@ -135,9 +138,10 @@ comparing two runs, pass `--at` or you are comparing two worlds.
 
 Before and after any structural change, run the headless checks and diff
 their output: `--physics-check`, `--light-check`, `--biome-scan`,
-`--cull-check` print byte-identical text when behaviour is unchanged, and
-`--model-check` exits non-zero if a species lost its body. They do not cover
-the game loop or the renderer — finish with one pinned `--snap`.
+`--cull-check`, `--frame-check` print byte-identical text when behaviour is
+unchanged, and `--model-check` exits non-zero if a species lost its body.
+`tools/check_layers.sh` holds the dependency rules. None of them draws a
+pixel — finish with one pinned `--snap`.
 
 Useful Axle commands: `axle build <in>`, `axle run <in>`,
 `axle check <in>` (type-check only).

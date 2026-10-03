@@ -1,7 +1,7 @@
 # Architecture
 
 How the source tree is cut, which way dependencies are allowed to point, and
-where a GPU renderer will plug in.
+how a frame gets from the game to a backend.
 
 ## The four roots
 
@@ -42,16 +42,23 @@ engine/
   shade/         backend-neutral shading formulas: gamma, corner light, face
                  light, the day model (sun direction, sky colours, curve)
   sky/           backend-neutral sky MODEL: atmosphere (SkyDome), cloud field,
-                 cloud light on the ground, view ray
+                 cloud light on the ground, view ray, the cloud deck
+                 (cloudsky marches it, clouddome reads it)
   render/
+    backend        RenderBackend — the one call the game makes per frame
     view/          backend-neutral: View, Camera, Lens, Projected · frustum
-    cpu/           the software renderer
-      renderer       the frame conductor
+    frame/         backend-neutral: what a frame shows, decided once
+      framedesc      FrameDesc — camera, hour, deck, creature boxes, torches,
+                     aimed block, HUD state
+      framebuilder   FrameBuilder — reads the game into a FrameDesc
+      boxpose        where a creature's box stands (corners, normals)
+    cpu/           the software backend
+      cpubackend     CpuBackend — the target, the pass order, the overlay
+      renderer       the passes it composes
       raster/        framebuf · triangle · mip
       world/         chunkview (terrain faces → triangle queues → banded fill)
-      mobs/          mobview (draws the BoxModel each actor describes)
-      sky/           the sky PAINTER: skyengine · backdrop · fogtables ·
-                     viewrays · clouddome (read side) · cloudsky (marcher)
+      mobs/          mobview (draws the frame's creature boxes)
+      sky/           the sky PAINTER: skyengine · backdrop · fogtables · viewrays
       atlas · bloom · postfx · selection
   ui/            the overlay, drawn through smalt's `Frame`: hud · health ·
                  hotbar · menu · uiscale · widget
@@ -66,14 +73,15 @@ Dependencies point down this list and never up:
 ```
 configs, smalt
   └ engine/math
-      └ engine/block, engine/shade, engine/sky        (models — no pixels, no threads)
+      └ engine/block, engine/shade, engine/sky        (models — no pixels)
           └ engine/world                              (may read the sky model: cloud shadows)
               └ engine/entity, engine/audio, engine/io
                   └ engine/render/view                (neutral: camera, frustum)
-                      └ engine/render/cpu, engine/ui  (the backend and the overlay)
-                          └ game                      (content: implements the engine's seams)
-                              └ app                   (wires everything, runs the loop)
-                                  └ checks, main
+                      └ engine/render/frame           (neutral: reads the game into a frame)
+                          └ engine/render/cpu, engine/ui  (a backend, and the overlay it draws)
+                              └ game                  (content: implements the engine's seams)
+                                  └ app               (wires everything, runs the loop)
+                                      └ checks, main
 ```
 
 What that rule means in practice, and what it bought:
@@ -83,9 +91,13 @@ What that rule means in practice, and what it bought:
   `Generator` (world::chunks), `MobSpawner` (entity::mob), and
   `ActorVisual.buildModel` (entity::seams), which each species overrides.
 - **Nothing under `engine/render` or `engine/sky` names the player.** The app
-  hands the renderer a `View` once a frame (`app/view.axle` is the one place
-  that maps the body to the eye); the renderer builds the frame's `Camera` from
-  it and every pass projects through that one value.
+  hands the frame builder a `View` once a frame (`app/view.axle` is the one
+  place that maps the body to the eye); the frame's `Camera` is built from it
+  and every pass projects through that one value.
+- **A backend reads the game only through its frame.** `engine/render/cpu`
+  (and a GPU backend beside it) imports no creature, not the world's manager,
+  light or block sim, and not the frame builder; the world reaches it
+  read-only through `world::seams::TerrainView`.
 - **The sky model does not import the renderer.** `sky/atmosphere` answers a
   direction's colour; the pixel-to-direction inverse, the dithered packing and
   the screen-space fog grid are the CPU painter's and live under `render/cpu/sky`.
@@ -96,14 +108,41 @@ What that rule means in practice, and what it bought:
 Same-domain files may import each other freely. A `seams.axle` file holds the
 contracts its domain *provides*; injection seams live with their consumer.
 
+`tools/check_layers.sh` enforces the engine-below-game rule and the backend
+rules (`--selftest` proves each rule rejects what it is for).
+
+## One frame, one call
+
+The game calls one function to put a frame on screen:
+
+```
+const frame = self.frames.build(FrameSource { man, mobs }, FrameRequest { view, clock, aim, hud });
+self.backend[0].draw(frame, self.man, self.display.win);
+```
+
+`FrameBuilder.build` is where everything a frame shows is decided, once: the
+hour's light, the camera, the cloud deck (the one piece of state a frame moves
+on — it is marched here, and how fast depends on whether the sky can be seen,
+judged from the view and the world rather than from what a backend painted),
+every creature's boxes and the light it stands in, the torches in view, the
+aimed block's outline, the HUD. `RenderBackend.draw` translates that into
+pixels and decides nothing the game reads back. Two backends handed the same
+frame cannot disagree about what is in it, and a change to the game is made
+on the frame side, once.
+
+`--frame-check` prints what a swept set of frames contains, so a change to
+what is drawn shows up there, for every backend at once.
+
 ## Where a GPU renderer goes
 
-The cut above is the one a second backend needs. `render/view`, `shade` and
-`sky` are shared; a GPU backend is a sibling of `render/cpu`:
+The cut above is the one a second backend needs. `render/view`, `render/frame`,
+`shade` and `sky` are shared; a GPU backend is a sibling of `render/cpu`,
+another `RenderBackend`:
 
 ```
 engine/render/
   view/   shared — Camera (→ view/projection matrices), frustum (→ draw list)
+  frame/  shared — the FrameDesc both backends draw
   cpu/    software rasteriser
   gpu/    the new backend, on smalt's `gpu::Renderer` (Vulkan, software fallback)
 ```
@@ -114,8 +153,9 @@ What each piece becomes on the GPU side:
 |---|---|
 | `render/view::Camera`, `frustum` | shared as is: uniforms + per-chunk draw list |
 | `sky::atmosphere::SkyDome`, `shade::daymodel::DayState` | uniforms of a fullscreen sky pass |
-| `render/cpu/sky/*` (painter, fog grid, cloud table) | the sky shader (and a compute pass for the cloud march) |
-| `entity::model::BoxModel` | per-instance box data |
+| `sky::clouddome::CloudDome` (`FrameDesc.clouds`) | a texture the sky pass reads |
+| `render/cpu/sky/*` (painter, fog grid) | the sky shader |
+| `FrameDesc.boxes` (placed by `frame::boxpose`) | per-frame dynamic mesh |
 | `world::mesh` face records (`meshbuf`) | per-chunk instanced-quad buffers |
 | `world::light::volumes` | 3-D textures sampled per fragment |
 | `render/cpu/{bloom,postfx}` | post-process passes |
@@ -123,9 +163,10 @@ What each piece becomes on the GPU side:
 
 Steps that remain before a GPU backend can be written, in order:
 
-1. **A `RenderBackend` seam** (`beginFrame(FrameView)`, `submit(scene)`,
-   `post()`, `overlay()`, `present()`), implemented by the CPU renderer, held as
-   a one-slot `dyn RenderBackend[]` (a trait-typed field cannot hold a class).
+1. **A `RenderBackend` seam.** Done: `render::backend::RenderBackend`
+   (`draw`, `resize`, `capture`, `name`, `report`, `close`), implemented by
+   `render::cpu::cpubackend::CpuBackend`, held by the game as a one-slot
+   `dyn RenderBackend[]` (a trait-typed field cannot hold a class).
 2. **Make the chunk mesh self-contained.** Partly done: the face corner table
    is one copy (`world/mesh/facegeom`), and the mesher records each face's
    kind, its four corner heights (sloped water, partial-block tops) and its
@@ -150,7 +191,9 @@ axle build -O 3
 ./target/voxel --light-check     # flood, shadows, cloud light, against a real ring
 ./target/voxel --biome-scan      # biome tally over a wide grid
 ./target/voxel --cull-check      # frustum never drops a visible chunk
+./target/voxel --frame-check     # what a swept set of frames contains
 ./target/voxel --model-check     # every species describes a body
+tools/check_layers.sh            # the dependency rules above
 ```
 
 Capture their output before a structural change and `diff` it after: a pure
@@ -177,8 +220,8 @@ Kept here so they are not mistaken for the design:
   volumes, the mesh, the sky tables). Harmless for a process that is exiting,
   but a renderer that can be torn down and rebuilt — a GPU backend falling back
   to software — will need `close()` all the way down.
-- `render/cpu/world/chunkview` (1250 lines) mixes scene extraction (corner
-  probes, water heights, shadow-run splitting) with CPU clipping and queueing;
-  it splits along a `FaceSink` seam as part of GPU step 2.
+- `render/cpu/world/chunkview` (about 1050 lines) mixes scene extraction
+  (corner probes, shadow-run splitting) with CPU clipping and queueing; it
+  splits along a `FaceSink` seam as part of GPU step 2.
 - The headless checks build into the release binary; an Axle workspace
   (core lib + game bin + checks bin) would keep them out.
