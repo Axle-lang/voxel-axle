@@ -5,6 +5,7 @@
 // fills a pixel, so a GPU backend builds its view and projection from the same
 // `Camera` the software rasteriser projects through.
 
+use smalt::Mat4;
 use crate::engine::math::vec3::{ Vec3 };
 use crate::configs::screen::{ Screen };
 
@@ -240,5 +241,72 @@ fn cameraOf(view : View, lens : Lens) : Camera {
         cosp: view.cosp,
         sinp: view.sinp,
         lens,
+    };
+}
+
+/** The depths a projection keeps, along the view: nothing nearer than `near` or past `far`. */
+struct DepthRange {
+    pub(crate) near : f64,
+    pub(crate) far : f64,
+}
+
+/**
+ * The camera's projection as one matrix, for a backend that projects on a GPU: the
+ * same rotation and the same lens as `toCamera` and `screenOf`, so a corner lands on
+ * the pixel the software rasteriser puts it on.
+ *
+ * In OpenGL's clip convention (y up, depth -1 at `near` and +1 at `far`), and relative
+ * to `origin` rather than to the world's own zero: a world point is passed in as its
+ * offset from `origin`. Kept near the eye, that keeps every coordinate a 32-bit float
+ * carries small, where the world's own, hundreds of thousands of blocks out, would cost
+ * the picture its last few bits.
+ * @param cam     the frame's camera
+ * @param origin  the world point the matrix measures from
+ * @param depth   the depths it keeps
+ * @return clip = matrix * (point - origin, 1)
+ */
+fn clipMatrix(cam : Camera, origin : Vec3, depth : DepthRange) : Mat4 {
+    const ex : f64 = cam.eye.x - origin.x;
+    const ey : f64 = cam.eye.y - origin.y;
+    const ez : f64 = cam.eye.z - origin.z;
+
+    // The rotation `toCamera` applies: x right, y up, z forward.
+    const r0x : f64 = cam.cosy;
+    const r0z : f64 = cam.siny;
+    const r1x : f64 = cam.siny * cam.sinp;
+    const r1y : f64 = cam.cosp;
+    const r1z : f64 = 0.0 - cam.cosy * cam.sinp;
+    const r2x : f64 = 0.0 - cam.siny * cam.cosp;
+    const r2y : f64 = cam.sinp;
+    const r2z : f64 = cam.cosy * cam.cosp;
+
+    // The lens `screenOf` applies, as a perspective with w = forward depth.
+    const sx : f64 = cam.lens.focal / cam.lens.hw;
+    const sy : f64 = cam.lens.focal / cam.lens.hh;
+    const near : f64 = depth.near;
+    const far : f64 = depth.far;
+    const a : f64 = (far + near) / (far - near);
+    const b : f64 = 0.0 - 2.0 * far * near / (far - near);
+
+    const t0 : f64 = 0.0 - (r0x * ex + r0z * ez);
+    const t1 : f64 = 0.0 - (r1x * ex + r1y * ey + r1z * ez);
+    const t2 : f64 = 0.0 - (r2x * ex + r2y * ey + r2z * ez);
+    return Mat4 {
+        m00: sx * r0x,
+        m01: 0.0,
+        m02: sx * r0z,
+        m03: sx * t0,
+        m10: sy * r1x,
+        m11: sy * r1y,
+        m12: sy * r1z,
+        m13: sy * t1,
+        m20: a * r2x,
+        m21: a * r2y,
+        m22: a * r2z,
+        m23: a * t2 + b,
+        m30: r2x,
+        m31: r2y,
+        m32: r2z,
+        m33: t2,
     };
 }

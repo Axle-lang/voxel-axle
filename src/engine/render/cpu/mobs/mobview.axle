@@ -1,18 +1,15 @@
 // mobview — the mob box-model renderer.
 //
-// Mobs (and torches) are drawn as little stacks of shaded, atlas-textured
+// Mobs and torches are drawn as little stacks of shaded, atlas-textured
 // cuboids sharing the world z-buffer. The frame hands over every creature's
-// boxes already placed and lit (`FrameDesc.boxes`); this file only knows how to
-// draw an oriented box — the per-face project + backface-cull + raster — so a
-// new species never touches it.
+// boxes already placed and lit (`FrameDesc.boxes`, and `boxpose::torchBox`);
+// this file only knows how to draw an oriented box — the per-face project +
+// backface-cull + raster — so a new species never touches it.
 //
-// Per frame the Renderer hands in a `MobScene` value (atlas + fog colour + the
-// day/night state); MobView never stores frame state beyond the light of the
-// box being drawn. The block torches reuse `drawQuad` directly, so it is the
-// one public quad primitive.
+// Per frame the SoftRenderer hands in a `MobScene` value (atlas + fog colour +
+// the day/night state); MobView keeps no frame state of its own.
 
 use smalt::Mem;
-use smalt::Color;
 use crate::engine::ui::widget::{tintIf};
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::raster::triangle::{
@@ -21,13 +18,12 @@ use crate::engine::render::cpu::raster::triangle::{
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::render::view::camera::{ Camera, Projected };
-use crate::engine::shade::facelight::{ sunExposure };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::math::vec3::{ Vec3, vec3 };
 use crate::engine::render::frame::framedesc::{ MobBox };
 use crate::engine::render::frame::boxpose::{
-    BoxPose, poseOf, boxCorner, rightNormal, upNormal, forwardNormal,
+    BoxPose, BoxFace, BoxFaceLight, poseOf, boxCorner, boxFaceCount, boxFaceOf, boxFaceLight,
 };
 use crate::configs::atlas::{ Atlas };
 use crate::configs::screen::{ Screen };
@@ -45,11 +41,12 @@ struct MobScene {
     ds : DayState,
 }
 
-/** One box face's surface: flat fill colour, atlas tile (<0 = flat), hurt tint. */
-struct Material {
+/** One box face's surface: flat fill colour, atlas tile (<0 = flat), hurt tint, and the light its box stands in. */
+struct BoxSurface {
     color : i32,
     tile : i32,
     hurt : bool,
+    light : LinRgb,
 }
 
 /** One corner of a face being clipped: camera-space position and texture u/v. */
@@ -68,7 +65,6 @@ class MobView {
     obx : i64,      // oriented-box world corners (8 per body part)
     oby : i64,
     obz : i64,
-    mobLight : LinRgb, // ambient light on the box currently being drawn, per channel
 
     /** Allocate the clipping scratch and the oriented-box corner buffers. */
     constructor() {
@@ -77,7 +73,6 @@ class MobView {
         self.obx = Mem::take(8 * 8);
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
-        self.mobLight = LinRgb { r: 1.0, g: 1.0, b: 1.0 };
     }
 
     /**
@@ -163,35 +158,9 @@ class MobView {
     }
 
     /**
-     * Set the light every following quad is drawn in, until the next mob sets
-     * its own. What the torch pass needs: a torch is the SOURCE, so it is not
-     * lit by the room the way an animal standing in it is — left to take the
-     * ambient it would be a black post in the middle of the pool of light it
-     * is casting.
-     * @param l  the light to draw in
-     */
-    pub(crate) fn setLight(mut self, l : LinRgb) : void {
-        self.mobLight = l;
-    }
-
-    /**
-     * Mob Lambert term for a face normal, lifted by ambient and exposed by the
-     * same sun the world faces get — a mob has no shadow map, so it sees the
-     * whole of it. Kept local so mobview has no back-reference to Renderer.
-     * @param nx  normal x
-     * @param ny  normal y
-     * @param nz  normal z
-     * @param ds  the day/night state (sun direction)
-     * @return the mob face's light factor
-     */
-    fn shadeMob(self, nx : f64, ny : f64, nz : f64, ds : DayState) : f64 {
-        return sunExposure(vec3(nx, ny, nz), vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
-    }
-
-    /**
      * One face of a mob box: project 4 corners, backface-cull against the eye,
      * then fill atlas-textured (or flat-shaded). `mat.hurt` tints the face red
-     * for the damage flash. Public because the block torches reuse it.
+     * for the damage flash.
      * @param cam    the frame's camera
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param a      world-space corner a
@@ -202,7 +171,7 @@ class MobView {
      * @param mat    the face surface (colour / tile / hurt)
      * @param scene  the per-frame mob context (atlas, fog, day-state, lens)
      */
-    pub(crate) fn drawQuad(
+    fn drawQuad(
         mut self,
         cam : Camera,
         fb : FrameBuf,
@@ -211,7 +180,7 @@ class MobView {
         c : Vec3,
         d : Vec3,
         n : Vec3,
-        mat : Material,
+        mat : BoxSurface,
         scene : MobScene
     ) : void {
         const mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
@@ -248,24 +217,12 @@ class MobView {
             return;
         }
 
-        // Mobs are little multi-box models: the full terrain light contrast
-        // (0.5..1.0) makes every box edge read as a hard seam. Compress it
-        // toward bright so adjacent faces blend and the model looks rounded
-        // rather than crated.
-        const shade : f64 = 0.80 + 0.20 * self.shadeMob(n.x, n.y, n.z, scene.ds);
-        const bright : f64 = shade * self.mobLight.g;
-
-        // A struck mob glows red: lift the red multiplier, damp green/blue.
-        let tr : f64 = shade * self.mobLight.r;
-        let tg : f64 = bright;
-        let tb : f64 = shade * self.mobLight.b;
-        if (mat.hurt) {
-            tr = bright + 0.6;
-            tg = bright * 0.4;
-            tb = bright * 0.4;
-        }
+        const lit : BoxFaceLight = boxFaceLight(n, mat.light, mat.hurt, scene.ds);
+        const tr : f64 = lit.tint.r;
+        const tg : f64 = lit.tint.g;
+        const tb : f64 = lit.tint.b;
         const textured : bool = Atlas::USE_MOB_TEXTURES && mat.tile >= 0;
-        const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
+        const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), lit.bright);
         const band : Band = Band { x0: 0, x1: fb.w };
 
         // A fan from the first corner: unclipped, that is (a, b, c) then
@@ -336,7 +293,7 @@ class MobView {
         i2 : i32,
         i3 : i32,
         n : Vec3,
-        mat : Material,
+        mat : BoxSurface,
         scene : MobScene
     ) : void {
         const c0 : Vec3 = vec3(
@@ -383,7 +340,7 @@ class MobView {
      * @param b      the box, placed and lit
      * @param scene  the per-frame mob context
      */
-    fn drawBox(mut self, cam : Camera, fb : FrameBuf, b : MobBox, scene : MobScene) : void {
+    pub(crate) fn drawBox(mut self, cam : Camera, fb : FrameBuf, b : MobBox, scene : MobScene) : void {
         const p : BoxPose = poseOf(b);
         for (ci of 0..8) {
             const c : Vec3 = boxCorner(b, p, ci);
@@ -392,87 +349,29 @@ class MobView {
             Mem::putRealOf(self.obz, ci, c.z);
         }
 
-        const rn : Vec3 = rightNormal(p);
-        const un : Vec3 = upNormal(p);
-        const fwd : Vec3 = forwardNormal(p);
-        const skin : Material = Material {
+        const skin : BoxSurface = BoxSurface {
             color: b.part.color,
             tile: b.part.skinTile,
             hurt: b.hurt,
+            light: b.light,
         };
-        const faceM : Material = Material {
+        const faceM : BoxSurface = BoxSurface {
             color: b.part.color,
             tile: b.part.faceTile,
             hurt: b.hurt,
+            light: b.light,
         };
-
-        self.oquad(
-            cam,
-            fb,
-            1,
-            5,
-            7,
-            3,
-            rn,
-            skin,
-            scene
-        );
-        self.oquad(
-            cam,
-            fb,
-            4,
-            0,
-            2,
-            6,
-            vec3(0.0 - rn.x, 0.0 - rn.y, 0.0 - rn.z),
-            skin,
-            scene
-        );
-        self.oquad(
-            cam,
-            fb,
-            2,
-            3,
-            7,
-            6,
-            un,
-            skin,
-            scene
-        );
-        self.oquad(
-            cam,
-            fb,
-            4,
-            5,
-            7,
-            6,
-            fwd,
-            faceM,
-            scene
-        );
-        self.oquad(
-            cam,
-            fb,
-            1,
-            0,
-            2,
-            3,
-            vec3(0.0 - fwd.x, 0.0, 0.0 - fwd.z),
-            skin,
-            scene
-        );
-
-        // Once tipping over, the underside comes into view, so draw it too.
-        if (b.topple > 0.0) {
+        for (i of 0..boxFaceCount(b)) {
+            const f : BoxFace = boxFaceOf(p, i);
             self.oquad(
                 cam,
                 fb,
-                0,
-                1,
-                5,
-                4,
-                vec3(0.0 - un.x, 0.0 - un.y, 0.0 - un.z),
-                skin,
+                f.a,
+                f.b,
+                f.c,
+                f.d,
+                f.normal,
+                f.front ? faceM : skin,
                 scene
             );
         }
@@ -496,9 +395,7 @@ class MobView {
         n : i32
     ) : void {
         for (i of 0..n) {
-            const b : MobBox = boxes[i];
-            self.mobLight = b.light;
-            self.drawBox(cam, fb, b, scene);
+            self.drawBox(cam, fb, boxes[i], scene);
         }
     }
 }

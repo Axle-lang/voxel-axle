@@ -14,15 +14,17 @@
 
 use smalt::Mem;
 use std::time::monotonicNanos;
-use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
 use crate::engine::shade::daymodel::{ DayLighting, DayState };
 use crate::engine::shade::gamma::{ LinRgb };
-use crate::engine::render::view::camera::{ Camera, Lens, View, lensFor, cameraOf };
+use crate::engine::render::view::camera::{ Camera, Lens, Projected, View, lensFor, cameraOf };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
 use crate::engine::sky::cloud::{ cloudFieldAt };
 use crate::engine::sky::cloudsky::{ CloudSky };
+use crate::engine::sky::clouddome::{ CloudDome, CloudSample };
+use crate::engine::sky::viewray::{ ViewRay };
 use crate::engine::render::frame::framedesc::{
-    FrameDesc, FrameClock, MobBox, AimBox, HudState,
+    FrameDesc, FrameClock, MobBox, AimBox, HudState, SunShafts,
 };
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::world::seams::{ ChannelLevels };
@@ -31,6 +33,7 @@ use crate::engine::entity::seams::{ ActorVisual };
 use crate::engine::entity::model::{ BoxModel, MODEL_MAX_PARTS };
 use crate::configs::light::{ Light };
 use crate::configs::mobs::{ Mobs };
+use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
 use crate::configs::world::{ World };
 
@@ -119,6 +122,7 @@ class FrameBuilder {
             day: ds,
             lcurve: self.day.curve(),
             clouds: self.clouds.dome(),
+            shafts: sunShaftsOf(ds, cam, self.clouds.dome()),
             boxes: self.boxes,
             boxCount: self.boxCount,
             torches: self.torches,
@@ -255,4 +259,47 @@ class FrameBuilder {
             }
         }
     }
+}
+
+/**
+ * The sun's shafts for this hour and view: none with the sun below the horizon or
+ * behind the camera; otherwise fading in as the sun climbs, scaled by daylight, and
+ * cut by the cloud in front of the sun — shafts are made of the light that got past
+ * the deck. The cloud is read once, at the sun, not per step of the march.
+ * @param ds      the hour's light
+ * @param cam     this frame's camera
+ * @param clouds  the deck as it stands
+ * @return the shafts
+ */
+fn sunShaftsOf(ds : DayState, cam : Camera, clouds : CloudDome) : SunShafts {
+    const none : SunShafts = SunShafts {
+        on: false,
+        sx: 0.0,
+        sy: 0.0,
+        expo: 0.0,
+    };
+    if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
+        return none;
+    }
+    const pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
+    if (pr.cz < 0.05) {
+        return none;
+    }
+    const climb : f64 = (ds.sunY * 4.0).min(1.0);
+    const sunCloud : CloudSample = clouds.sample(ViewRay {
+        dx: ds.sunX,
+        dy: ds.sunY,
+        dz: ds.sunZ,
+        inv: 1.0,
+    });
+    const expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
+    if (expo < 0.002) {
+        return none;
+    }
+    return SunShafts {
+        on: true,
+        sx: pr.sx,
+        sy: pr.sy,
+        expo,
+    };
 }

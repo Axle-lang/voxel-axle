@@ -38,6 +38,18 @@ struct MobBox {
     pub(crate) light : LinRgb,   // ambient light at the creature, per channel
 }
 
+/**
+ * The sun's crepuscular shafts this frame: where the sun stands on the screen (in
+ * the camera lens's pixels) and how strong the shafts are — `on` false when there
+ * are none, the sun being down, behind the eye, or behind a cloud.
+ */
+struct SunShafts {
+    pub(crate) on : bool,
+    pub(crate) sx : f64,
+    pub(crate) sy : f64,
+    pub(crate) expo : f64,
+}
+
 /** The block the player is aiming at, outlined in the frame. */
 struct AimBox {
     pub(crate) on : bool,
@@ -63,6 +75,7 @@ struct FrameDesc {
     pub(crate) day : DayState,
     pub(crate) lcurve : i64,          // the brightness curve, 16 f64s by light level
     pub(crate) clouds : CloudDome,    // the cloud deck as it stands this frame
+    pub(crate) shafts : SunShafts,
     pub(crate) boxes : MobBox[],
     pub(crate) boxCount : i32,
     pub(crate) torches : IVec3[],     // the torch cells in visible chunks

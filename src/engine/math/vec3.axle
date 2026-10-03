@@ -29,7 +29,7 @@ struct Vec3 : Spatial {
      * @param o  the vector to add
      * @return self + o
      */
-    fn add(self, o : Vec3) : Vec3 {
+    pub(crate) fn add(self, o : Vec3) : Vec3 {
         return Vec3 {
             x: self.x + o.x,
             y: self.y + o.y,
@@ -42,7 +42,7 @@ struct Vec3 : Spatial {
      * @param o  the vector to subtract
      * @return self - o
      */
-    fn sub(self, o : Vec3) : Vec3 {
+    pub(crate) fn sub(self, o : Vec3) : Vec3 {
         return Vec3 {
             x: self.x - o.x,
             y: self.y - o.y,
@@ -55,7 +55,7 @@ struct Vec3 : Spatial {
      * @param s  the factor
      * @return self * s
      */
-    fn scale(self, s : f64) : Vec3 {
+    pub(crate) fn scale(self, s : f64) : Vec3 {
         return Vec3 {
             x: self.x * s,
             y: self.y * s,
@@ -77,7 +77,7 @@ struct Vec3 : Spatial {
      * @param o  the other vector
      * @return self × o
      */
-    fn cross(self, o : Vec3) : Vec3 {
+    pub(crate) fn cross(self, o : Vec3) : Vec3 {
         return Vec3 {
             x: self.y * o.z - self.z * o.y,
             y: self.z * o.x - self.x * o.z,
@@ -97,7 +97,7 @@ struct Vec3 : Spatial {
      * Euclidean length / magnitude.
      * @return |self|
      */
-    fn length(self) : f64 {
+    pub(crate) fn length(self) : f64 {
         return (self.lengthSq()).sqrt();
     }
 
@@ -106,7 +106,7 @@ struct Vec3 : Spatial {
      * (no divide-by-zero).
      * @return self / |self|, or self if it has zero length
      */
-    fn normalize(self) : Vec3 {
+    pub(crate) fn normalize(self) : Vec3 {
         const len : f64 = self.length();
         if (len == 0.0) {
             return Vec3 {

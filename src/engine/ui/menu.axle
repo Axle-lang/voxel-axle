@@ -177,6 +177,19 @@ fn drawButton(
     font.drawCentred(f, Rect::make(bx, by, btnW(ui), btnH(ui)), label, txt);
 }
 
+/** The pause veil: the world behind the menu goes `VEIL_NUM / VEIL_DEN` of the way to black. */
+const VEIL_NUM : i32 = 65;
+const VEIL_DEN : i32 = 100;
+
+/**
+ * How much of the world shows through the pause veil — for a backend whose overlay
+ * cannot darken what is under it, and darkens the frame itself instead.
+ * @return the share of the world's colour kept, 0..1
+ */
+fn veilKeep() : f64 {
+    return ((VEIL_DEN - VEIL_NUM) as f64) / (VEIL_DEN as f64);
+}
+
 /**
  * The pause overlay as a Widget: the dimmed backdrop, panel, title, the two
  * buttons and the hint, with `hover` selecting the highlighted button. Modelling
@@ -191,7 +204,7 @@ struct PauseWidget : Widget {
      * @param f  the frame to draw into.
      */
     fn draw(self, f : Frame) : void {
-        f.shade(f.clipRect(), 0x000000, 65, 100);
+        f.shade(f.clipRect(), 0x000000, VEIL_NUM, VEIL_DEN);
 
         const ui : UiScale = uiScaleFor(f.h);
         const px : i32 = panelX(f.w, ui);
@@ -199,8 +212,9 @@ struct PauseWidget : Widget {
         const pw : i32 = panelW(ui);
         const ph : i32 = panelH(ui);
 
+        // Black as 1, 1, 1: a GPU overlay keys pure black out as "nothing drawn here".
         const dropShadow : Rect = Rect::make(px + ui.px(6), py + ui.px(8), pw, ph);
-        f.fillRect(dropShadow, Color::packBytes(0, 0, 0));
+        f.fillRect(dropShadow, Color::packBytes(1, 1, 1));
         const panel : Rect = Rect::make(px, py, pw, ph);
         f.fillRect(panel, Color::packBytes(24, 26, 32));
         const accentBar : Rect = Rect::make(px, py, pw, ui.px(6));

@@ -1,8 +1,8 @@
-// selection — the targeted-block wireframe, split out of Renderer.
+// selection — the targeted-block wireframe, split out of SoftRenderer.
 //
-// A small owned helper (the Renderer holds one) that draws the soft,
+// A small owned helper (the SoftRenderer holds one) that draws the soft,
 // depth-tested outline on the block the player is looking at. It keeps its OWN
-// 8-corner projection scratch, so it never touches the Renderer's world-face
+// 8-corner projection scratch, so it never touches the SoftRenderer's world-face
 // buffers — one-way dependency (render → selection), no import cycle. Hidden
 // (back) edges are culled against the z-buffer so the box reads as an outline
 // on the block, not a see-through cage.

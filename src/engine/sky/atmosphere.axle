@@ -56,16 +56,16 @@ fn shoulder(x : f64) : f64 {
  * way `DayState` does.
  */
 struct SkyDome {
-    zenR : f64,
-    zenG : f64,
-    zenB : f64,
-    horR : f64,
-    horG : f64,
-    horB : f64,
-    sunX : f64,
-    sunY : f64,
-    sunZ : f64,
-    haloFade : f64,
+    pub(crate) zenR : f64,
+    pub(crate) zenG : f64,
+    pub(crate) zenB : f64,
+    pub(crate) horR : f64,
+    pub(crate) horG : f64,
+    pub(crate) horB : f64,
+    pub(crate) sunX : f64,
+    pub(crate) sunY : f64,
+    pub(crate) sunZ : f64,
+    pub(crate) haloFade : f64,
 
     /**
      * The sky's colour along a direction. It need not be unit: the ray carries

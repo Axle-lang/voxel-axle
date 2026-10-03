@@ -15,7 +15,7 @@ use crate::configs::atlas::{ Atlas };
 /**
  * The texture-atlas kernel: owns the anisotropic mip chain built from the loaded
  * atlas and hands out a `MipAtlas` view through the `MipSource` seam. The
- * Renderer holds one; `setAtlas` / `atlasBase` delegate here, and both the world
+ * SoftRenderer holds one; `setAtlas` / `atlasBase` delegate here, and both the world
  * raster and the mob pass sample through `mip()` instead of reaching at the raw
  * mip pointers.
  */

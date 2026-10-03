@@ -21,7 +21,7 @@ use crate::configs::cloud::{ Cloud };
  * half pixels, the same everywhere. The corners outside the disc are not
  * directions and are skipped.
  */
-const SKY_N : i32 = 448;
+pub(crate) const SKY_N : i32 = 448;
 
 /**
  * What the cloud contributes along one direction: its colour, premultiplied by
@@ -32,6 +32,13 @@ struct CloudSample {
     pub(crate) g : f64,
     pub(crate) b : f64,
     pub(crate) a : f64,
+}
+
+/** One cell as it is stored: the three quantities as sixteen-bit fractions, 0..65535. */
+struct CloudRaw {
+    pub(crate) cov : i32,
+    pub(crate) lit : i32,
+    pub(crate) amb : i32,
 }
 
 /** One cell of the table: the three slow quantities, all premultiplied by coverage. */
@@ -55,10 +62,10 @@ struct CloudCell {
  * cell and a fresh one be lit identically.
  */
 struct DeckLight {
-    dir : Vec3,       // the body's direction, for the phase function
-    body : LinRgb,    // the body's light: its tint times its strength
-    sky : LinRgb,     // the sky's own light on the deck, in the sky's own colour
-    ground : LinRgb,  // what the ground throws back up into the shadowed bases
+    pub(crate) dir : Vec3,       // the body's direction, for the phase function
+    pub(crate) body : LinRgb,    // the body's light: its tint times its strength
+    pub(crate) sky : LinRgb,     // the sky's own light on the deck, in the sky's own colour
+    pub(crate) ground : LinRgb,  // what the ground throws back up into the shadowed bases
 }
 
 /**
@@ -121,8 +128,8 @@ struct CloudDome {
     cov : i64,
     lit : i64,
     amb : i64,
-    light : DeckLight,
-    on : bool,
+    pub(crate) light : DeckLight,
+    pub(crate) on : bool,
 
     /**
      * The cloud along a world direction. It need not be unit: the ray carries
@@ -187,6 +194,20 @@ struct CloudDome {
             cov: tabGet(self.cov, idx),
             lit: tabGet(self.lit, idx),
             amb: tabGet(self.amb, idx),
+        };
+    }
+
+    /**
+     * One cell's three stored quantities as they are held, sixteen bits each — what a
+     * backend copies into a texture of its own.
+     * @param idx  the cell index, 0..cells()
+     * @return the raw cell
+     */
+    pub(crate) fn rawAt(self, idx : i64) : CloudRaw {
+        return CloudRaw {
+            cov: halfOf(self.cov, idx),
+            lit: halfOf(self.lit, idx),
+            amb: halfOf(self.amb, idx),
         };
     }
 

@@ -1,11 +1,18 @@
-// boxpose — where a creature's box stands in the world: its eight corners and
-// the normals of its faces, from the box, the creature's heading and how far
-// its death has toppled it.
+// boxpose — where a creature's box stands in the world (its eight corners and the
+// normals of its faces, from the box, the creature's heading and how far its death
+// has toppled it), and the light each face of it is drawn in.
 //
-// The one copy of that math, for every backend that draws a `MobBox`.
+// The one copy of that math, for every backend that draws a `MobBox` or a torch.
 
-use crate::engine::math::vec3::{ Vec3, vec3 };
+use smalt::Color;
+use crate::engine::math::vec3::{ Vec3, IVec3, vec3 };
+use crate::engine::entity::model::{ BoxPart };
+use crate::engine::shade::daymodel::{ DayState };
+use crate::engine::shade::facelight::{ sunExposure };
+use crate::engine::shade::gamma::{ LinRgb };
 use crate::engine::render::frame::framedesc::{ MobBox };
+use crate::configs::atlas::{ Tile };
+use crate::configs::light::{ Light };
 
 /**
  * The creature's frame for one box: its forward and right axes on the ground,
@@ -90,4 +97,139 @@ fn upNormal(p : BoxPose) : Vec3 {
  */
 fn forwardNormal(p : BoxPose) : Vec3 {
     return vec3(p.fwdx, 0.0, p.fwdz);
+}
+
+/**
+ * One face of a placed box: its four corners (`boxCorner` indices; their texture runs
+ * bottom-left, bottom-right, top-right, top-left), its normal, and whether it is the
+ * front, which carries the box's face tile.
+ */
+struct BoxFace {
+    pub(crate) a : i32,
+    pub(crate) b : i32,
+    pub(crate) c : i32,
+    pub(crate) d : i32,
+    pub(crate) normal : Vec3,
+    pub(crate) front : bool,
+}
+
+/**
+ * How many faces of a box are drawn: all but the underside, until a death topples it
+ * into view.
+ * @param b  the box
+ * @return 5 or 6
+ */
+fn boxFaceCount(b : MobBox) : i32 {
+    return b.topple > 0.0 ? 6 : 5;
+}
+
+/**
+ * One of the faces of a placed box, in the order they are drawn.
+ * @param p  the box's pose
+ * @param i  the face, 0 .. `boxFaceCount`
+ * @return the face
+ */
+fn boxFaceOf(p : BoxPose, i : i32) : BoxFace {
+    const rn : Vec3 = rightNormal(p);
+    const un : Vec3 = upNormal(p);
+    const fwd : Vec3 = forwardNormal(p);
+    return match i {
+        0 => quadOf(1, 5, 7, 3, rn, false),
+        1 => quadOf(4, 0, 2, 6, vec3(0.0 - rn.x, 0.0 - rn.y, 0.0 - rn.z), false),
+        2 => quadOf(2, 3, 7, 6, un, false),
+        3 => quadOf(4, 5, 7, 6, fwd, true),
+        4 => quadOf(1, 0, 2, 3, vec3(0.0 - fwd.x, 0.0, 0.0 - fwd.z), false),
+        _ => quadOf(0, 1, 5, 4, vec3(0.0 - un.x, 0.0 - un.y, 0.0 - un.z), false),
+    };
+}
+
+/**
+ * A box face from its corners and normal.
+ * @param a       the bottom-left corner
+ * @param b       the bottom-right corner
+ * @param c       the top-right corner
+ * @param d       the top-left corner
+ * @param normal  the face's normal
+ * @param front   whether it is the front
+ * @return the face
+ */
+fn quadOf(a : i32, b : i32, c : i32, d : i32, normal : Vec3, front : bool) : BoxFace {
+    return BoxFace {
+        a,
+        b,
+        c,
+        d,
+        normal,
+        front,
+    };
+}
+
+/** The light one face of a box is drawn in: per channel for a textured face, and the one brightness a flat face is shaded by. */
+struct BoxFaceLight {
+    pub(crate) tint : LinRgb,
+    pub(crate) bright : f64,
+}
+
+/**
+ * The light on a box face turned toward `n`, for a creature (or torch) standing in
+ * `light`. The sun's term is compressed toward bright — the full terrain contrast
+ * makes every box edge of a small model read as a seam — and a struck creature
+ * glows red.
+ * @param n      the face's (unit) normal
+ * @param light  the light the creature stands in, per channel
+ * @param hurt   whether the damage flash is on
+ * @param ds     the hour's light
+ * @return the face's tint and brightness
+ */
+fn boxFaceLight(n : Vec3, light : LinRgb, hurt : bool, ds : DayState) : BoxFaceLight {
+    const shade : f64 = 0.80 + 0.20 * sunExposure(n, vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
+    const bright : f64 = shade * light.g;
+    if (hurt) {
+        return BoxFaceLight {
+            tint: LinRgb {
+                r: bright + 0.6,
+                g: bright * 0.4,
+                b: bright * 0.4,
+            },
+            bright,
+        };
+    }
+    return BoxFaceLight {
+        tint: LinRgb {
+            r: shade * light.r,
+            g: bright,
+            b: shade * light.b,
+        },
+        bright,
+    };
+}
+
+/**
+ * A torch as the box it is drawn as: a thin post standing in its cell, lit by its own
+ * glow — it is the source of the light around it, so the room's light would draw it as
+ * a dark post in the middle of its own pool.
+ * @param cell  the torch's cell
+ * @return its box
+ */
+fn torchBox(cell : IVec3) : MobBox {
+    const halfWidth : f64 = 0.09;
+    const height : f64 = 0.55;
+    return MobBox {
+        part: BoxPart {
+            ctr: vec3(0.0, height * 0.5, 0.0),
+            half: vec3(halfWidth, height * 0.5, halfWidth),
+            color: Color::packBytes(240, 180, 70),
+            skinTile: Tile::TORCH,
+            faceTile: Tile::TORCH,
+        },
+        pos: vec3((cell.x as f64) + 0.5, cell.y as f64, (cell.z as f64) + 0.5),
+        heading: 0.0,
+        topple: 0.0,
+        hurt: false,
+        light: LinRgb {
+            r: Light::TORCH_GLOW,
+            g: Light::TORCH_GLOW * 0.86,
+            b: Light::TORCH_GLOW * 0.62,
+        },
+    };
 }

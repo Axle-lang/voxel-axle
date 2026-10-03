@@ -2,12 +2,14 @@
 
 use smalt::{ Platform, PlatformError, Window, WindowDesc };
 use crate::engine::render::view::camera::{ Viewport, viewportFor };
+use crate::engine::render::backend::{ RenderBackend };
 
 const WINDOW_TITLE : string = "Axle Voxel — survival";
 
 /**
- * The window, and the render size that follows its shape up to a pixel
- * budget. Whatever draws into it owns its own target and is told this size.
+ * The window, and the render size that follows its shape — up to a pixel
+ * budget, for a backend that has one. Whatever draws into it owns its own
+ * target and is told this size.
  */
 class Display {
     platform : Platform,
@@ -33,7 +35,7 @@ class Display {
     }
 
     /**
-     * The render width — not the window's, once the pixel budget caps it.
+     * The render width — not the window's, once a pixel budget caps it.
      * @return the width, in pixels
      */
     pub(crate) fn width(self) : i32 {
@@ -41,7 +43,7 @@ class Display {
     }
 
     /**
-     * The render height — not the window's, once the pixel budget caps it.
+     * The render height — not the window's, once a pixel budget caps it.
      * @return the height, in pixels
      */
     pub(crate) fn height(self) : i32 {
@@ -61,18 +63,19 @@ class Display {
     }
 
     /**
-     * Matches the render size to the window — both axes, up to a pixel budget —
-     * so going fullscreen widens the view instead of zooming into it.
+     * Matches the render size to the window — both axes, up to the backend's
+     * pixel budget — so going fullscreen widens the view instead of zooming into it.
+     * @param backend  what draws the frames, which decides the size it renders at
      * @return whether the render size changed
      */
-    pub(crate) fn fit(mut self) : bool {
+    pub(crate) fn fit(mut self, backend : dyn RenderBackend) : bool {
         const winW = self.win.width();
         const winH = self.win.height();
         if (winW < 1 || winH < 1) {
             return false;
         }
 
-        const want = viewportFor(winW, winH);
+        const want = backend.viewportFor(winW, winH);
         if (want.w == self.width() && want.h == self.height()) {
             return false;
         }

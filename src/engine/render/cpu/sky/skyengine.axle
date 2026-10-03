@@ -49,7 +49,7 @@ class SkyEngine {
     dome : SkyDome,        // this frame's colour field
     rays : ViewRays,       // …and how a pixel becomes a direction in it
     lastFog : FogTable,    // the view of the fog tables this frame was built with
-    pool : Shared<WorkerPool>, // the render crew, co-owned with the Renderer
+    pool : Shared<WorkerPool>, // the render crew, co-owned with the SoftRenderer
     paintPass : i32,       // the sky paint's handle into that pool
     paintNow : Shared<SkyPaintFrame[]>, // one slot: what the paint is to draw this frame
     fogUs : i64,           // microseconds the fog build has taken, over the run

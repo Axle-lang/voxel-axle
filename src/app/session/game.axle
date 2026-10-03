@@ -86,6 +86,7 @@ class Game {
     walk : ScriptedWalk,
     dayStart : f64 = dayTimeArg(),
     snapAtMs : i64 = snapDeadline(),
+    snapAsked : bool = false,
     startMs : i64,
 
     running : bool = true,
@@ -233,9 +234,12 @@ class Game {
         }
     }
 
-    /** Follows a resize of the window, and redraws a paused screen after one. */
+    /**
+     * Follows a resize of the window — or a change of backend — and redraws a
+     * paused screen after one.
+     */
     fn fitToWindow(mut self) : void {
-        if (!self.display.fit()) {
+        if (!self.display.fit(self.backend[0])) {
             return;
         }
         self.backend[0].resize(self.display.width(), self.display.height());
@@ -298,7 +302,7 @@ class Game {
      * @return whether this frame must render
      */
     fn needsDraw(mut self, hover : i32) : bool {
-        if (!self.paused) {
+        if (!self.paused || self.snapAsked) {
             return true;
         }
         const changed = hover != self.lastHover;
@@ -329,17 +333,32 @@ class Game {
         );
         self.backend[0].draw(frame, self.man, self.display.win);
         self.man.frameDone();
+        if (self.backend[0].isLost()) {
+            Console::println("the GPU was lost; carrying on with the software renderer");
+            self.backend[0].close();
+            self.backend[0] = new CpuBackend(self.display.width(), self.display.height());
+            // A capture the lost backend was asked for is asked of this one.
+            self.snapAsked = false;
+        }
     }
 
-    /** `--snap`: once its deadline passes, writes the capture, reports, and quits. */
+    /**
+     * `--snap`: once its deadline passes, has the next frame written, then reports and
+     * quits — the frame after the deadline, because a GPU reads back what it is drawing.
+     */
     fn snapshotIfDue(mut self) : void {
         const elapsed = self.clock.ticks() - self.startMs;
         if (self.snapAtMs <= 0 || elapsed < self.snapAtMs) {
             return;
         }
+        if (!self.snapAsked) {
+            self.backend[0].captureNext(SNAP_PATH);
+            self.snapAsked = true;
+            return;
+        }
 
         self.running = false;
-        if (!self.backend[0].capture(SNAP_PATH)) {
+        if (!self.backend[0].captured()) {
             Console::println("could not write ${SNAP_PATH}");
             return;
         }

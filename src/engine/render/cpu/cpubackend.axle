@@ -11,10 +11,11 @@ use crate::engine::io::assets::Assets;
 use crate::engine::math::narrow::{ FLOAT_BYTES };
 use crate::engine::render::backend::{ RenderBackend };
 use crate::engine::render::frame::framedesc::{ FrameDesc };
-use crate::engine::render::cpu::renderer::Renderer;
+use crate::engine::render::view::camera::{ Viewport, viewportFor };
+use crate::engine::render::cpu::renderer::SoftRenderer;
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::world::seams::{ TerrainView };
-use crate::engine::ui::hud::drawHud;
+use crate::engine::ui::hud::{ drawHud, drawCrosshair };
 use crate::engine::ui::menu::{ drawPauseMenu };
 use crate::configs::atlas::{ Atlas };
 
@@ -28,11 +29,13 @@ struct PassTimes {
 }
 
 class CpuBackend : RenderBackend {
-    renderer : Renderer,
+    renderer : SoftRenderer,
     screen : Surface,  // the framebuffer the passes fill and the window shows
     zbuf : i64,        // its depth buffer, one f32 per pixel
     font : BitmapFont = BitmapFont::baked(Face::Ui),
     times : PassTimes = PassTimes { },
+    capturePath : string = "",  // the file the next frame is written to; empty for none
+    written : bool = false,
 
     /**
      * A target of this size, and the renderer with `atlas.raw` loaded into its
@@ -43,7 +46,7 @@ class CpuBackend : RenderBackend {
     constructor(w : i32, h : i32) {
         self.screen = new Surface(w, h);
         self.zbuf = takeDepth(w, h);
-        self.renderer = new Renderer();
+        self.renderer = new SoftRenderer();
 
         // Level 0 of the mip chain is a full copy, so the file's buffer goes at once.
         const tile = Atlas::TILE_PX as i64;
@@ -87,6 +90,11 @@ class CpuBackend : RenderBackend {
         self.screen.present(win);
         self.times.blit += (monotonicNanos() - start) / 1000;
         self.times.frames++;
+
+        if (self.capturePath.byteLength != 0) {
+            self.written = Bmp::write(self.capturePath, self.screen.frame());
+            self.capturePath = "";
+        }
     }
 
     /**
@@ -150,7 +158,17 @@ class CpuBackend : RenderBackend {
             selected: frame.hud.selected,
             creative: frame.hud.creative
         );
-        self.renderer.crosshair(fb);
+        drawCrosshair(self.screen.frame());
+    }
+
+    /**
+     * The window's shape, scaled down to the pixel budget a CPU can fill.
+     * @param winW  the window's width in pixels
+     * @param winH  the window's height in pixels
+     * @return the render size
+     */
+    pub(crate) fn viewportFor(self, winW : i32, winH : i32) : Viewport {
+        return viewportFor(winW, winH);
     }
 
     /**
@@ -165,12 +183,28 @@ class CpuBackend : RenderBackend {
     }
 
     /**
-     * Write the last frame shown to a BMP file.
+     * Write the next frame drawn to a BMP file.
      * @param path  the file to write
-     * @return whether the file was written
      */
-    pub(crate) fn capture(mut self, path : string) : bool {
-        return Bmp::write(path, self.screen.frame());
+    pub(crate) fn captureNext(mut self, path : string) : void {
+        self.capturePath = path;
+        self.written = false;
+    }
+
+    /**
+     * Whether the capture asked for has been written.
+     * @return true once it is
+     */
+    pub(crate) fn captured(self) : bool {
+        return self.written;
+    }
+
+    /**
+     * The CPU is never lost.
+     * @return false
+     */
+    pub(crate) fn isLost(self) : bool {
+        return false;
     }
 
     /**

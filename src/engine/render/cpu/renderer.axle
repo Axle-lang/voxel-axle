@@ -19,30 +19,25 @@
 // hour's light, the creatures' boxes, the torches, the aimed block — and draws
 // what it says; nothing below it knows there is a player or a mob.
 
-use smalt::Mem;
 use smalt::{ Job, WorkerPool };
 use std::time::monotonicNanos;
 use smalt::Color;
 use crate::engine::render::cpu::bloom::Bloom;
-use crate::engine::sky::viewray::{ ViewRay };
-use crate::engine::sky::clouddome::{ CloudSample };
 use crate::engine::render::cpu::sky::skyengine::{ SkyEngine };
 use crate::engine::render::cpu::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::engine::render::cpu::atlas::{ TextureAtlas };
 use crate::engine::render::cpu::world::chunkview::{ ChunkRenderer, buildSlotsJob };
 use crate::engine::shade::daymodel::{ DayState };
-use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene, Material };
+use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene };
 use crate::engine::render::cpu::selection::Selection;
 use crate::engine::render::cpu::raster::framebuf::{ clearFrame, clearDepth, FrameBuf };
-use crate::engine::render::view::camera::{ lensFor, cameraOf, Camera, Projected, View };
+use crate::engine::render::view::camera::{ lensFor, cameraOf, Camera, View };
 use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::render::frame::boxpose::{ torchBox };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
-use crate::engine::shade::gamma::{ Gamma, GammaTables, LinRgb };
-use crate::engine::math::vec3::{ IVec3, vec3 };
+use crate::engine::shade::gamma::{ Gamma, GammaTables };
+use crate::engine::math::vec3::{ vec3 };
 use crate::engine::world::seams::{ TerrainView };
-use crate::configs::atlas::{ Tile };
-use crate::configs::light::{ Light };
-use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
 use crate::configs::water::{ Water };
 
@@ -62,7 +57,7 @@ const RASTER_BANDS : i32 = 12;
  * One was not enough for the reason the frame timings gave: the projection /
  * clip / light pass over eighty-eight thousand faces ran on ONE thread and was
  * two thirds of the world pass, while the fill it feeds already spread over
- * twelve. The Renderer, which fills the queues, and the banded fill, which
+ * twelve. The SoftRenderer, which fills the queues, and the banded fill, which
  * drains them, both hold the crew as a `Shared<RasterCrew>`.
  */
 class RasterCrew {
@@ -166,18 +161,18 @@ class RasterCrew {
  * The banded fill, as a pass the worker pool can run.
  *
  * A pass is attached to the pool once and run every frame after, so its
- * inputs are co-owned with the Renderer: the crew whose queues it drains, and
- * a one-slot frame the Renderer writes before each pass and the pass reads
+ * inputs are co-owned with the SoftRenderer: the crew whose queues it drains, and
+ * a one-slot frame the SoftRenderer writes before each pass and the pass reads
  * during one.
  */
 class BandFill : Job {
-    crew : Shared<RasterCrew>,  // the queues to fill from, co-owned with the Renderer
+    crew : Shared<RasterCrew>,  // the queues to fill from, co-owned with the SoftRenderer
     frame : Shared<FrameBuf[]>, // one slot: the target this frame, written before the pass
 
     /**
      * Build the pass around the crew it drains and the frame slot it reads.
      * @param crew   the raster crew
-     * @param frame  the one-slot render target the Renderer publishes into
+     * @param frame  the one-slot render target the SoftRenderer publishes into
      */
     constructor(own crew : Shared<RasterCrew>, own frame : Shared<FrameBuf[]>) {
         self.crew = crew;
@@ -208,7 +203,7 @@ class BandFill : Job {
  * of its own beyond the projection half-width — every heavy job lives in a
  * component it delegates to.
  */
-class Renderer {
+class SoftRenderer {
     cam : Camera,         // this frame's camera, as the frame describes it
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
@@ -231,7 +226,7 @@ class Renderer {
     frame : Shared<FrameBuf[]>, // one slot: this frame's target, published to the passes
 
     /**
-     * Build a Renderer: set the projection width from config and construct the
+     * Build a SoftRenderer: set the projection width from config and construct the
      * render components (each owns its own scratch / buffers).
      */
     constructor() {
@@ -433,57 +428,22 @@ class Renderer {
     // ── Post-processing (god-rays, bloom, underwater) ──
 
     /**
-     * Volumetric god-rays (crepuscular shafts): a screen-space radial scatter
-     * from the sun's projected position. Each pixel marches toward the sun and
-     * sums the visible-sky mask (z-buffer cleared = sky) with per-step decay, so
-     * terrain silhouettes carve warm bright shafts out of the sky glow. Additive,
-     * warm-tinted, scaled by daylight. Skipped with the sun below the horizon or
-     * behind the camera. Call after the opaque world + mobs + torches are drawn.
+     * Volumetric god-rays (crepuscular shafts): each pixel marches toward the sun
+     * on screen and sums the visible-sky mask (z-buffer cleared = sky) with
+     * per-step decay, so terrain silhouettes carve warm shafts out of the sky
+     * glow. Where the sun stands and how strong the shafts are is the frame's
+     * (`FrameDesc.shafts`). Call after the opaque world + mobs + torches.
      * @param frame  what this frame shows
      * @param fb     the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn godRays(self, frame : FrameDesc, fb : FrameBuf) : void {
-        const ds : DayState = frame.day;
-        if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
+        if (!frame.shafts.on) {
             return;
         }
-
-        // Project the sun direction to screen through the shared camera.
-        const pr : Projected = self.cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
-        if (pr.cz < 0.05) {
-            return;   // sun behind the camera
-        }
-
-        // Overall exposure: fade in as the sun climbs, scale by daylight.
-        let climb : f64 = ds.sunY * 4.0;
-        if (climb > 1.0) {
-            climb = 1.0;
-        }
-
-        // Shafts are made of the light that got past the deck, so a sun behind a
-        // cloud casts none. Sampled once, at the sun — not per march step per
-        // pixel, which is twenty-four cloud reads a pixel and was, measured, the
-        // single most expensive thing in a sunset frame.
-        const sunRay : ViewRay = ViewRay {
-            dx: ds.sunX,
-            dy: ds.sunY,
-            dz: ds.sunZ,
-            inv: 1.0,
-        };
-        const sunCloud : CloudSample = frame.clouds.sample(sunRay);
-        const expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
-        if (expo < 0.002) {
-            return;
-        }
-        if (expo <= 0.0) {
-            return;
-        }
-
-        // The scatter is a PostEffect over the finished frame.
         let fx : GodRayFX = new GodRayFX(SunScreen {
-            sunSx: pr.sx,
-            sunSy: pr.sy,
-            expo,
+            sunSx: frame.shafts.sx,
+            sunSy: frame.shafts.sy,
+            expo: frame.shafts.expo,
         });
         fx.apply(fb);
     }
@@ -513,98 +473,18 @@ class Renderer {
         fx.apply(fb);
     }
 
-    // ── Torches (thin upright posts, drawn via the mob quad path) ──
+    // ── Torches (thin upright posts, drawn as boxes) ──
 
     /**
-     * Draw the frame's torches as thin upright posts (4 side quads + a top),
-     * reusing the oriented-quad path. Torch voxels emit no cube faces in the
-     * mesh; the frame lists the ones in view.
+     * Draw the frame's torches, each the post `torchBox` describes. Torch voxels emit
+     * no cube faces in the mesh; the frame lists the ones in view.
      * @param frame  what this frame shows
      * @param fb     the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn renderTorches(self, frame : FrameDesc, fb : FrameBuf) : void {
-        const hw : f64 = 0.09;
-        const ht : f64 = 0.55;
-        const mat : Material = Material {
-            color: Color::packBytes(240, 180, 70),
-            tile: Tile::TORCH,
-            hurt: false,
-        };
         const scene : MobScene = self.mobScene(frame.day);
-
-        // A torch is drawn in its own light, above white, so it reads as the
-        // source of the pool around it and the bloom catches the flame.
-        self.mobs.setLight(LinRgb {
-            r: Light::TORCH_GLOW,
-            g: Light::TORCH_GLOW * 0.86,
-            b: Light::TORCH_GLOW * 0.62,
-        });
-
         for (ti of 0..frame.torchCount) {
-            const cell : IVec3 = frame.torches[ti];
-            const cx : f64 = (cell.x as f64) + 0.5;
-            const cz : f64 = (cell.z as f64) + 0.5;
-            const x0 : f64 = cx - hw;
-            const x1 : f64 = cx + hw;
-            const z0 : f64 = cz - hw;
-            const z1 : f64 = cz + hw;
-            const y0 : f64 = cell.y as f64;
-            const y1 : f64 = y0 + ht;
-            self.mobs.drawQuad(
-                self.cam,
-                fb,
-                vec3(x1, y0, z1),
-                vec3(x1, y0, z0),
-                vec3(x1, y1, z0),
-                vec3(x1, y1, z1),
-                vec3(1.0, 0.0, 0.0),
-                mat,
-                scene
-            );
-            self.mobs.drawQuad(
-                self.cam,
-                fb,
-                vec3(x0, y0, z0),
-                vec3(x0, y0, z1),
-                vec3(x0, y1, z1),
-                vec3(x0, y1, z0),
-                vec3(0.0 - 1.0, 0.0, 0.0),
-                mat,
-                scene
-            );
-            self.mobs.drawQuad(
-                self.cam,
-                fb,
-                vec3(x0, y0, z1),
-                vec3(x1, y0, z1),
-                vec3(x1, y1, z1),
-                vec3(x0, y1, z1),
-                vec3(0.0, 0.0, 1.0),
-                mat,
-                scene
-            );
-            self.mobs.drawQuad(
-                self.cam,
-                fb,
-                vec3(x1, y0, z0),
-                vec3(x0, y0, z0),
-                vec3(x0, y1, z0),
-                vec3(x1, y1, z0),
-                vec3(0.0, 0.0, 0.0 - 1.0),
-                mat,
-                scene
-            );
-            self.mobs.drawQuad(
-                self.cam,
-                fb,
-                vec3(x0, y1, z0),
-                vec3(x1, y1, z0),
-                vec3(x1, y1, z1),
-                vec3(x0, y1, z1),
-                vec3(0.0, 1.0, 0.0),
-                mat,
-                scene
-            );
+            self.mobs.drawBox(self.cam, fb, torchBox(frame.torches[ti]), scene);
         }
     }
 
@@ -640,23 +520,6 @@ class Renderer {
             frame.boxes,
             frame.boxCount
         );
-    }
-
-    /**
-     * Draw the centre-screen crosshair.
-     * @param fb  the render target (framebuffer + z-buffer + size)
-     */
-    pub(crate) fn crosshair(self, fb : FrameBuf) : void {
-        const pixels : i64 = fb.pixels;
-        const w : i32 = fb.w;
-        const h : i32 = fb.h;
-        const cx : i32 = w / 2;
-        const cy : i32 = h / 2;
-        const white : i32 = Color::packBytes(255, 255, 255);
-        for (i of -6..7) {
-            Mem::putWordOf(pixels, cy * w + cx + i, white);
-            Mem::putWordOf(pixels, (cy + i) * w + cx, white);
-        }
     }
 
     // ── Selection wireframe (drawn by gfx/selection.axle) ──

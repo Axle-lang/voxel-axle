@@ -3,7 +3,7 @@
 //
 // Both implement `PostEffect`: they consume the finished framebuffer (colour
 // + depth) and blend over it in place, so the frame's post chain is a set of
-// uniform steps rather than a hand-ordered list of methods on the Renderer.
+// uniform steps rather than a hand-ordered list of methods on the SoftRenderer.
 // Bloom, the third of them, is big enough to own its own file.
 //
 // The god-rays are a screen-space radial scatter from the sun's projected
@@ -35,7 +35,7 @@ struct SunScreen {
  * The volumetric god-ray scatter as a PostEffect: a screen-space radial march
  * from the sun's projected position, summing the visible-sky mask (z-buffer
  * cleared → sky) with per-step decay so terrain silhouettes carve warm shafts.
- * Built each frame by Renderer.godRays (which does the sun projection + exposure
+ * Built each frame by SoftRenderer.godRays (which does the sun projection + exposure
  * gate), then applied over the finished frame. Splits the rows across two threads
  * (disjoint output rows → race-free).
  */
@@ -136,7 +136,7 @@ class GodRayFX : PostEffect {
  * The living-water post-pass as a PostEffect: fog every pixel toward the water
  * colour by its real z-buffer depth, add a moving caustic light pattern, and
  * drift rising bubbles up the frame, so being submerged feels like a living
- * volume. Built each frame by Renderer.underwaterOverlay with the animation
+ * volume. Built each frame by SoftRenderer.underwaterOverlay with the animation
  * phase; single-threaded (it reads and writes overlapping rows).
  */
 class UnderwaterFX : PostEffect {

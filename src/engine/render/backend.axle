@@ -8,6 +8,7 @@
 
 use smalt::Window;
 use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::render::view::camera::{ Viewport };
 use crate::engine::world::seams::{ TerrainView };
 
 trait RenderBackend {
@@ -21,6 +22,14 @@ trait RenderBackend {
     fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void;
 
     /**
+     * The size this backend renders a window of this size at.
+     * @param winW  the window's width in pixels
+     * @param winH  the window's height in pixels
+     * @return the render size
+     */
+    fn viewportFor(self, winW : i32, winH : i32) : Viewport;
+
+    /**
      * Render at this size from the next frame on.
      * @param w  the target's width in pixels
      * @param h  the target's height in pixels
@@ -28,11 +37,24 @@ trait RenderBackend {
     fn resize(mut self, w : i32, h : i32) : void;
 
     /**
-     * Write the last frame shown to a BMP file.
+     * Write the next frame drawn to a BMP file — the next, because a GPU backend can
+     * only read back a frame it is drawing.
      * @param path  the file to write
-     * @return whether the file was written
      */
-    fn capture(mut self, path : string) : bool;
+    fn captureNext(mut self, path : string) : void;
+
+    /**
+     * Whether the capture asked for has been written.
+     * @return true once the file is on disk
+     */
+    fn captured(self) : bool;
+
+    /**
+     * Whether the backend can no longer draw — its GPU was lost. The game then carries
+     * on with the software one.
+     * @return true for good once it is
+     */
+    fn isLost(self) : bool;
 
     /**
      * What is drawing, for the start-up line.

@@ -1,4 +1,4 @@
-// bloom — the soft-glow post-process, split out of Renderer.
+// bloom — the soft-glow post-process, split out of SoftRenderer.
 //
 // A self-contained LEAF mini-manager: it owns its six half-resolution scratch
 // buffers and reads/writes only the framebuffer pixels — no day-state, no

@@ -1,6 +1,7 @@
-// hud — composes the on-screen overlay: the hotbar along the bottom and
-// the heart row just above it (Minecraft layout, left-aligned with the
-// hotbar). Drawn straight into the framebuffer after the world and mobs.
+// hud — composes the on-screen overlay: the hotbar along the bottom, the
+// heart row just above it (Minecraft layout, left-aligned with the hotbar),
+// and the crosshair. Drawn into whatever `Frame` the backend lends — the
+// framebuffer itself on the CPU, the 2-D layer over the 3-D frame on the GPU.
 // Stateless: reads hp + the hotbar and paints pixels.
 
 use smalt::{BitmapFont, Color, Rect};
@@ -131,4 +132,16 @@ fn drawHud(
         f.roundBorder(box, ui.px(5), 0x4CC2FF);
         font.drawCentred(f, box, label, 0xDCEEFF);
     }
+}
+
+/**
+ * The centre-screen crosshair: a white cross, thirteen pixels each way.
+ * @param f  the frame to draw into
+ */
+fn drawCrosshair(f : Frame) : void {
+    const cx : i32 = f.w / 2;
+    const cy : i32 = f.h / 2;
+    const white : i32 = Color::packBytes(255, 255, 255);
+    f.hLine(cx - 6, cy, 13, white);
+    f.vLine(cx, cy - 6, 13, white);
 }
