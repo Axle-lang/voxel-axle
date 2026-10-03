@@ -89,19 +89,85 @@ fn terrainCeil(ring : RingView) : i32 {
 }
 
 /**
- * How many loaded slots carry a per-slot flag — what separates "the ring just
- * filled" from "the player stepped into a chunk", and so whether a bake is
- * worth a crew or belongs on this thread.
- * @param ring   the chunk ring
- * @param flags  the per-slot flag array
- * @return the number of loaded slots flagged
+ * Which slots a ray bake still owes, shared by two threads without a lock.
+ *
+ * A flag that the main thread raises and the light thread clears loses
+ * requests: a slot re-flagged while its bake is running — a chunk streamed
+ * into it, a block placed — is cleared when that bake finishes, and the new
+ * request is never served. So each slot carries two counters instead, each
+ * written by ONE thread: the main thread bumps `want` when the slot needs a
+ * bake, the light thread records in `done` the `want` it read before it
+ * started. A slot is owed work while they differ, and a request that lands
+ * mid-bake leaves them different.
  */
-fn dirtyCount(ring : RingView, flags : i8[]) : i32 {
-    let n : i32 = 0;
-    for (j of 0..World::SPAN * World::SPAN) {
-        if (ring.cols.loaded[j] == 1 && flags[j] == 1) {
-            n++;
+class BakeQueue {
+    want : i32[],  // bumped by the main thread per request
+    done : i32[],  // the request the light thread last finished, per slot
+
+    /**
+     * Nothing owed, over a ring of `slots`.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        self.want = malloc<i32>(slots);
+        self.done = malloc<i32>(slots);
+        for (i of 0..slots) {
+            self.want[i] = 0;
+            self.done[i] = 0;
         }
     }
-    return n;
+
+    /**
+     * Ask for a slot to be baked (main thread).
+     * @param slot  the slot index
+     */
+    pub(crate) fn request(mut self, slot : i32) : void {
+        self.want[slot] = self.want[slot] + 1;
+    }
+
+    /**
+     * Whether a slot is owed a bake.
+     * @param slot  the slot index
+     * @return true while a request is unserved
+     */
+    pub(crate) fn owed(self, slot : i32) : bool {
+        return self.want[slot] != self.done[slot];
+    }
+
+    /**
+     * The request a bake about to start is serving (light thread). Read it
+     * BEFORE baking, and hand it to `finish` after.
+     * @param slot  the slot index
+     * @return the request being served
+     */
+    pub(crate) fn claim(self, slot : i32) : i32 {
+        return self.want[slot];
+    }
+
+    /**
+     * Record that the request `claimed` was served (light thread). A request
+     * made since stays owed.
+     * @param slot     the slot index
+     * @param claimed  what `claim` answered before the bake
+     */
+    pub(crate) fn finish(mut self, slot : i32, claimed : i32) : void {
+        self.done[slot] = claimed;
+    }
+
+    /**
+     * How many loaded slots are owed a bake — what separates "the ring just
+     * filled" from "the player stepped into a chunk", and so whether a bake is
+     * worth a crew or belongs on this thread.
+     * @param ring  the chunk ring
+     * @return the number of loaded slots owed
+     */
+    pub(crate) fn owedCount(self, ring : RingView) : i32 {
+        let n : i32 = 0;
+        for (j of 0..World::SPAN * World::SPAN) {
+            if (ring.cols.loaded[j] == 1 && self.owed(j)) {
+                n++;
+            }
+        }
+        return n;
+    }
 }

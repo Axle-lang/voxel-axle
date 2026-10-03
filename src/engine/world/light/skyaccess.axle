@@ -12,8 +12,8 @@
 use smalt::Mem;
 use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::engine::world::ring::{ RingView };
-use crate::engine::world::light::volumes::{ LightVolumes, nibGet, newSlotFlags };
-use crate::engine::world::light::bake::{ BAKE_WORKERS, nearSolid, terrainCeil, dirtyCount };
+use crate::engine::world::light::volumes::{ LightVolumes, nibGet };
+use crate::engine::world::light::bake::{ BAKE_WORKERS, BakeQueue, nearSolid, terrainCeil };
 use crate::engine::block::blocks::{ lightTransmit, albedoFor };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
@@ -41,7 +41,7 @@ class SkyAccess {
     vols : LightVolumes,  // the volumes; it writes `skyaccess` and the bounce tint
     rays : HemiRays,      // M precomputed upper-hemisphere ray directions
     cursor : i32,         // round-robin slot index for the throttled bake
-    dirty : i8[],         // per-slot "sky access needs (re)baking" flag
+    queue : BakeQueue,    // slots whose sky access is owed a (re)bake
     crew : Task<i32>[],   // the spawned shares of a backlog bake
 
     /**
@@ -71,7 +71,7 @@ class SkyAccess {
             Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
         }
 
-        self.dirty = newSlotFlags(slots);
+        self.queue = new BakeQueue(slots);
         self.crew = malloc<Task<i32>>(BAKE_WORKERS - 1);
     }
 
@@ -80,7 +80,7 @@ class SkyAccess {
      * @param slot  the slot index
      */
     pub(crate) fn markDirty(mut self, slot : i32) : void {
-        self.dirty[slot] = 1;
+        self.queue.request(slot);
     }
 
     /**
@@ -219,7 +219,7 @@ class SkyAccess {
         // occlusion visibly settling in over the first seconds of a run. Drain it
         // over the crew instead; the trickle is for the one or two chunks that
         // arrive as you walk.
-        if (dirtyCount(self.ring, self.dirty) > BAKE_WORKERS) {
+        if (self.queue.owedCount(self.ring) > BAKE_WORKERS) {
             for (i of 0..BAKE_WORKERS - 1) {
                 self.crew[i] = spawn skyAccessJob(self, i + 1, BAKE_WORKERS, ceil);
             }
@@ -239,17 +239,18 @@ class SkyAccess {
                 self.cursor = 0;
             }
             guard++;
-            if (self.ring.cols.loaded[slot] == 1 && self.dirty[slot] == 1) {
+            if (self.ring.cols.loaded[slot] == 1 && self.queue.owed(slot)) {
+                const claimed : i32 = self.queue.claim(slot);
                 self.bakeChunk(slot, self.ring.cols.cxs[slot], self.ring.cols.czs[slot], ceil);
-                self.dirty[slot] = 0;
+                self.queue.finish(slot, claimed);
                 done++;
             }
         }
     }
 
     /**
-     * One worker's share of the backlog: every dirty loaded slot whose index is
-     * `first` modulo `stride`. Shares never overlap, so each clears its own flags.
+     * One worker's share of the backlog: every owed loaded slot whose index is
+     * `first` modulo `stride`. Shares never overlap, so each settles its own slots.
      * @param first   the first slot of this share
      * @param stride  the number of shares
      * @param ceil    tallest terrain Y over loaded chunks
@@ -258,9 +259,10 @@ class SkyAccess {
         const slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
-            if (self.ring.cols.loaded[d] == 1 && self.dirty[d] == 1) {
+            if (self.ring.cols.loaded[d] == 1 && self.queue.owed(d)) {
+                const claimed : i32 = self.queue.claim(d);
                 self.bakeChunk(d, self.ring.cols.cxs[d], self.ring.cols.czs[d], ceil);
-                self.dirty[d] = 0;
+                self.queue.finish(d, claimed);
             }
             d += stride;
         }

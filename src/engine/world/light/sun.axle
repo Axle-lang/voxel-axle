@@ -12,8 +12,8 @@ use smalt::Mem;
 use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::engine::world::ring::{ RingView };
-use crate::engine::world::light::volumes::{ LightVolumes, nibGet, newSlotFlags };
-use crate::engine::world::light::bake::{ BAKE_WORKERS, nearSolid, terrainCeil, dirtyCount };
+use crate::engine::world::light::volumes::{ LightVolumes, nibGet };
+use crate::engine::world::light::bake::{ BAKE_WORKERS, BakeQueue, nearSolid, terrainCeil };
 use crate::engine::block::blocks::{ lightTransmit };
 use crate::engine::shade::daymodel::{ SkyBodyLight, activeBody };
 use crate::engine::sky::cloud::{ CloudField };
@@ -26,10 +26,10 @@ class SunShadows {
     ring : RingView,         // this component's view of the world
     vols : LightVolumes,     // the volumes; it writes `sunlit`
     cursor : i32,            // round-robin slot index for the throttled refresh
-    dirty : i8[],            // per-slot "sun shadows never baked here" flag — a slot
-                             // carrying it jumps the round-robin queue, so a chunk
-                             // arrives WITH its shadows instead of gaining them a
-                             // second later as the cursor wanders past
+    queue : BakeQueue,       // slots owed a fresh bake — a slot owed one jumps the
+                             // round-robin queue, so a chunk arrives WITH its
+                             // shadows instead of gaining them a second later as
+                             // the cursor wanders past
     baked : i64,             // per-slot direction of the light at that slot's last
                              // bake, three f32 a slot. A slot the light has barely
                              // moved over since would measure what it already
@@ -48,7 +48,7 @@ class SunShadows {
         self.ring = ring;
         self.vols = vols;
         self.cursor = 0;
-        self.dirty = newSlotFlags(slots);
+        self.queue = new BakeQueue(slots);
         self.baked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
         self.clouds = new CloudMap();
         self.crew = malloc<Task<i32>>(BAKE_WORKERS - 1);
@@ -59,7 +59,7 @@ class SunShadows {
      * @param slot  the slot index
      */
     pub(crate) fn markDirty(mut self, slot : i32) : void {
-        self.dirty[slot] = 1;
+        self.queue.request(slot);
     }
 
     /**
@@ -310,9 +310,9 @@ class SunShadows {
     }
 
     /**
-     * One worker's share of the priority bake: every dirty loaded slot whose
-     * index is `first` modulo `stride`, written outright and un-flagged. The
-     * shares never overlap, so each clears its own flags as it goes.
+     * One worker's share of the priority bake: every owed loaded slot whose
+     * index is `first` modulo `stride`, written outright. The shares never
+     * overlap, so each settles its own slots as it goes.
      * @param first   the first slot of this share
      * @param stride  the number of shares
      * @param sun     sun direction (unit)
@@ -322,7 +322,8 @@ class SunShadows {
         const slots : i32 = World::SPAN * World::SPAN;
         let d : i32 = first;
         while (d < slots) {
-            if (self.ring.cols.loaded[d] == 1 && self.dirty[d] == 1) {
+            if (self.ring.cols.loaded[d] == 1 && self.queue.owed(d)) {
+                const claimed : i32 = self.queue.claim(d);
                 self.bakeChunk(
                     d,
                     self.ring.cols.cxs[d],
@@ -331,7 +332,7 @@ class SunShadows {
                     ceil,
                     true
                 );
-                self.dirty[d] = 0;
+                self.queue.finish(d, claimed);
             }
             d += stride;
         }
@@ -372,7 +373,7 @@ class SunShadows {
         const sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
         const slots : i32 = World::SPAN * World::SPAN;
         const ceil : i32 = terrainCeil(self.ring);
-        const fresh : i32 = dirtyCount(self.ring, self.dirty);
+        const fresh : i32 = self.queue.owedCount(self.ring);
         if (fresh > BAKE_WORKERS) {
             // A whole ring at once — the start of a run, or a teleport — is about
             // a second of rays. Done on this one thread, that second is exactly

@@ -53,6 +53,7 @@ class LightEngine : LightSample, LightBaker {
     sky : SkyAccess,              // the sky-access / bounce bake
     moment : LightMoment,         // the hour, the clock and the camera column, published
                                   // by the main loop — everything the bake needs about now
+    momentSeq : AtomicI32,        // odd while `moment` is being written (a seqlock)
     lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
 
     /**
@@ -73,6 +74,7 @@ class LightEngine : LightSample, LightBaker {
             camX: 0,
             camZ: 0,
         };
+        self.momentSeq = new AtomicI32(0);
         self.lightRunning = new AtomicBoolean(true);
     }
 
@@ -260,23 +262,47 @@ class LightEngine : LightSample, LightBaker {
         // them, so the deck is re-marched before the ring is: a shadow bake
         // reading last pass's cloud would put the dark patch where the cloud has
         // already left.
-        const body : SkyBodyLight = activeBody(self.moment.dayTime);
+        const now : LightMoment = self.readMoment();
+        const body : SkyBodyLight = activeBody(now.dayTime);
         self.sun.rebakeClouds(
-            cloudFieldAt(self.moment.seconds),
+            cloudFieldAt(now.seconds),
             vec3(body.dirX, body.dirY, body.dirZ),
-            self.moment.camX,
-            self.moment.camZ
+            now.camX,
+            now.camZ
         );
-        self.sun.step(self.moment.dayTime, Daylight::SUN_CHUNKS_PER_TICK);
+        self.sun.step(now.dayTime, Daylight::SUN_CHUNKS_PER_TICK);
         self.sky.step(Light::SKY_AO_CHUNKS_PER_TICK);
     }
 
     /**
-     * Publish the moment the background light thread bakes against.
+     * Publish the moment the background light thread bakes against (main
+     * thread). The sequence is odd while the four fields are being written, so
+     * a reader can tell a half-written moment from a whole one.
      * @param m  the hour, clock and camera column to bake for
      */
     pub(crate) fn setMoment(mut self, m : LightMoment) : void {
+        const begin : i32 = self.momentSeq.incrementAndGet();
         self.moment = m;
+        const end : i32 = self.momentSeq.incrementAndGet();
+    }
+
+    /**
+     * The last moment published, whole (light thread). Read once a pass and
+     * used for everything in it: a bake that mixed this frame's hour with last
+     * frame's wind would put a cloud's shadow where the cloud is not.
+     * @return a consistent copy of the moment
+     */
+    fn readMoment(self) : LightMoment {
+        while (true) {
+            const before : i32 = self.momentSeq.get();
+            if ((before & 1) == 0) {
+                const copy : LightMoment = self.moment;
+                if (self.momentSeq.get() == before) {
+                    return copy;
+                }
+            }
+        }
+        return self.moment;
     }
 
     /** Tell the background light thread to stop (call before joining it). */
