@@ -1,8 +1,8 @@
 """Bake the whole texture atlas (block tiles + mob tiles) into atlas.raw.
 
 This is the SINGLE SOURCE OF TRUTH for tile ordering. The Axle side mirrors
-this order in `src/world/tiles.axle` (keep them in sync!) and `config.atlasTiles`
-must equal the total tile count printed at the end.
+this order in `Tile` (src/configs/atlas.axle — keep them in sync!) and
+`Atlas::TILE_COUNT` must equal the total tile count printed at the end.
 
 Block textures are pulled from the HD resource pack and COPIED into the repo
 (`assets/textures/block/`) on first use, so the project stays self-contained. MC's
@@ -11,13 +11,13 @@ tint, so the tint is baked here (luminance-recolour toward a target colour).
 Mob tiles reuse the crops from the old bake_mobs.py, read from the repo's
 `assets/textures/entity/` (the repaired creeper charge.png lives there).
 
-Run:  python bake_atlas.py
+Run:  python tools/bake_atlas.py   (from anywhere; paths are relative to the repo)
 """
 from PIL import Image
 from pathlib import Path
 import shutil
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 PACK = Path(r"C:\Users\users\AppData\Roaming\.minecraft\resourcepacks"
             r"\Default HD 128x Demo 1.8.2.4\assets\minecraft\textures\block")
 BLOCK_OUT = ROOT / "assets" / "textures" / "block"
@@ -242,6 +242,6 @@ if tgt.is_dir():
 
 print(f"baked {total} tiles ({BLOCK_TILES} block + {total - BLOCK_TILES} mob), "
       f"{len(raw)} bytes")
-print("--- tile index map (mirror in src/world/tiles.axle) ---")
+print("--- tile index map (mirror in Tile, src/configs/atlas.axle) ---")
 for i, label in _index:
     print(f"{i:3d}  {label}")

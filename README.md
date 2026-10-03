@@ -14,7 +14,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
   <img alt="Rendering: 100% CPU" src="https://img.shields.io/badge/rendering-100%25%20CPU-FF7A45?style=flat-square&labelColor=1b1b2b">
   <img alt="smalt" src="https://img.shields.io/badge/smalt-window%20%2B%20software%20mixer-1D6FB8?style=flat-square&labelColor=1b1b2b">
   <img alt="Threaded" src="https://img.shields.io/badge/threaded-audio%20%C2%B7%20light%20%C2%B7%20raster-9C27B0?style=flat-square&labelColor=1b1b2b">
-  <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2E7D32?style=flat-square&labelColor=1b1b2b">
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2E7D32?style=flat-square&labelColor=1b1b2b">
 </p>
 
 <sub><a href="#-highlights">Highlights</a> · <a href="#%EF%B8%8F-controls">Controls</a> · <a href="#-quick-start">Quick start</a> · <a href="#%EF%B8%8F-architecture">Architecture</a> · <a href="#%EF%B8%8F-how-it-works">How it works</a> · <a href="https://axle-lang.dev">Axle ↗</a></sub>
@@ -23,15 +23,15 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 
 ---
 
-![Lighting engine — a cherry grove under the sun disc, soft shadows and a graded atmospheric sky](doc/lightengine.png)
+![Lighting engine — a cherry grove under the sun disc, soft shadows and a graded atmospheric sky](docs/lightengine.png)
 
 <div align="center"><em>The lighting engine: warm sunlit ground, soft shadows under the canopy, a sun glow with god-rays and a graded atmospheric sky — all on the CPU.</em></div>
 
 <table>
 <tr>
-<td width="33%"><img alt="Wooded hills rolling back into haze under a cloud deck" src="doc/gameplay.png"></td>
-<td width="33%"><img alt="A sand dune with cacti, a striped badlands mesa to one side and bare peaks to the other" src="doc/gameplay2.png"></td>
-<td width="33%"><img alt="A birch grove on the shore of a lake, with a chicken in the grass" src="doc/gameplay3.png"></td>
+<td width="33%"><img alt="Wooded hills rolling back into haze under a cloud deck" src="docs/gameplay.png"></td>
+<td width="33%"><img alt="A sand dune with cacti, a striped badlands mesa to one side and bare peaks to the other" src="docs/gameplay2.png"></td>
+<td width="33%"><img alt="A birch grove on the shore of a lake, with a chicken in the grass" src="docs/gameplay3.png"></td>
 </tr>
 <tr>
 <td align="center"><em>Forest</em></td>
@@ -39,9 +39,9 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 <td align="center"><em>Coast</em></td>
 </tr>
 <tr>
-<td width="33%"><img alt="A grey stone mountain rising over pale open ground, under a broken cloud deck" src="doc/gameplay4.png"></td>
-<td width="33%"><img alt="Terraced hills where savanna grass gives way to plains" src="doc/gameplay5.png"></td>
-<td width="33%"><img alt="Snow-covered spruce stepping down a hillside into fog" src="doc/gameplay6.png"></td>
+<td width="33%"><img alt="A grey stone mountain rising over pale open ground, under a broken cloud deck" src="docs/gameplay4.png"></td>
+<td width="33%"><img alt="Terraced hills where savanna grass gives way to plains" src="docs/gameplay5.png"></td>
+<td width="33%"><img alt="Snow-covered spruce stepping down a hillside into fog" src="docs/gameplay6.png"></td>
 </tr>
 <tr>
 <td align="center"><em>Mountains</em></td>
@@ -56,15 +56,15 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 |---|---|
 | **Language** | 100% [Axle](https://axle-lang.dev) — game *and* platform layer; nothing is C, nothing is vendored |
 | **Rendering** | Software rasteriser on the CPU — perspective-correct 128 px HD textures, mip-chain + anisotropic filtering, shared z-buffer |
-| **World** | Infinite, streamed voxel terrain · ~18 biomes · continentalness / erosion / peaks-and-valleys noise |
+| **World** | Infinite, streamed voxel terrain · 17 biomes · continentalness / erosion / peaks-and-valleys noise |
 | **Lighting** | Flood-filled sky + block light with AO · day/night sun · soft shadows · god-rays · bloom · atmospheric sky |
 | **Simulation** | Voxel-accurate AABB physics · fall/drown damage + regen · falling sand & water flow · texture-skinned mobs |
 | **Threads** | Audio mixer · light engine · tiled triangle rasteriser — each on its own thread |
-| **Architecture** | A reusable 6-kernel engine (`src/kernel`) + injectable game content (`src/game`), meeting only through capability seams |
+| **Architecture** | A reusable engine (`src/engine`) with a backend-neutral render front and a CPU backend, plus injectable game content (`src/game`), meeting only through capability seams |
 
 ## ✨ Highlights
 
-- 🌍 **Infinite, streamed terrain** — ~18 Minecraft-like biomes (ocean, beach, plains, forest, birch & cherry groves, jungle, bamboo, savanna, badlands, swamp, taiga, snowy, mountains, mushroom fields, frozen ocean) shaped by continentalness / erosion / peaks-and-valleys noise, dressed with trees, oceans and thin variable-depth snow.
+- 🌍 **Infinite, streamed terrain** — 17 Minecraft-like biomes (ocean, beach, plains, forest, birch & cherry groves, jungle, bamboo, savanna, badlands, swamp, taiga, snowy, mountains, mushroom fields, frozen ocean) shaped by continentalness / erosion / peaks-and-valleys noise, dressed with trees, oceans and thin variable-depth snow.
 - 🧍 **You are a real entity** — a voxel-accurate AABB body: gravity, jumping, swimming, auto-stepping ledges, fall & drowning damage, and health that regenerates. Toggle creative free-flight anytime.
 - 💡 **A real lighting engine** — a propagating sky + block light field with ambient occlusion, a day/night cycle with a moving sun, soft directional shadows, one-bounce colour bleed, screen-space god-rays, bloom and an atmospheric sky.
 - 🐔 **Texture-skinned mobs** — chickens, sheep, cows, pigs and creepers wander, graze, flee and die, lit by the same scene light.
@@ -82,9 +82,10 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 | `LShift`         | fly down (creative)                      |
 | Left-click       | dig the block / attack the mob in front  |
 | Right-click      | place the held block                     |
-| `1`–`9`          | select hotbar slot                       |
+| `1`–`9` / wheel  | select hotbar slot                       |
 | `F3` + `F4`      | toggle survival ↔ creative (free flight) |
-| `Esc` / close    | quit                                     |
+| `Esc`            | pause menu (resume / quit)               |
+| close the window | quit                                     |
 
 ## 🚀 Quick start
 
@@ -148,7 +149,8 @@ Later, to move to a newer platform layer:
   git clone <axle-repo> && cd axle
   cargo build --release -p axle_cli   # -> target/release/axle (add to PATH)
   ```
-- **macOS** — build from source (see [axle-lang.dev](https://axle-lang.dev)).
+- **macOS** — the compiler builds from source, but smalt has no macOS port
+  yet (its ports are Win32 and X11/ALSA), so the game does not run there.
 
 </details>
 
@@ -171,7 +173,7 @@ From this directory, with the submodule initialised and
 
 ```bash
 axle run -O 3                         # compile and play, in one step
-axle build -O 3 && ./target/voxel     # or in two — on Linux / macOS
+axle build -O 3 && ./target/voxel     # or in two — on Linux
 axle build -O 3; .\target\voxel.exe   # …and on Windows
 ```
 
@@ -186,8 +188,10 @@ you are building for: the same `axle build` writes `target/voxel.exe` on
 Windows and `target/voxel` everywhere else. `axle run` picks the right
 one for you, which is why it is the line above.
 
-`atlas.raw` must sit next to the produced binary or one directory up —
-it is read at run time, so textures can be re-baked without rebuilding.
+`atlas.raw` is read at run time, so textures can be re-baked without
+rebuilding. It is looked up relative to the **working directory** — `./`
+then `../` — so run the game from the repository root (as `axle run` does)
+or from `target/`.
 
 Cross-compiling is the same command with a target:
 
@@ -203,138 +207,59 @@ it when you ship it, or let the release workflow build it on Linux.
 
 ## 🏛️ Architecture
 
-The code is split into two layers that meet only through **capability contracts** — a reusable voxel **engine** and the **game** that dresses it:
+The full picture — every folder, the dependency rule and the plan for a GPU
+backend — is in **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**. In short:
 
 ```
-   ┌──────────────────────────── src/main.axle ────────────────────────────┐
-   │  composition root: opens the window, wires the kernels, injects the    │
-   │  game content, then runs the input → simulate → render loop            │
-   └────────────────────────────────┬───────────────────────────────────────┘
-                                     │  builds & injects
-        ┌────────────────────────────┴─────────────────────────────┐
-        ▼                                                            ▼
-┌───────────────── src/kernel/ ─────────────────┐        ┌──────── src/game/ ────────┐
-│  the reusable ENGINE — six trait-based kernels │        │  the APP — all content    │
-│                                                │        │                           │
-│   kmath    vectors + math helpers              │        │  world/  biomes, terrain  │
-│   kblock   block table (id → tile/colour)      │        │          & tree generation│
-│   kworld   streamed chunks, meshing, lighting  │        │  entities/ mob roster +   │
-│   kentity  Entity/Player/Mob physics + AI      │        │          per-species skins│
-│   kio      clock, input, threaded audio        │        │  start / ray / tick       │
-│   krender  software rasteriser, sky, HUD       │        │                           │
-│                                                │        └───────────┬───────────────┘
-│   seams.axle — the kernel↔kernel contracts     │◄───────────────────┘
-└────────────────────────────────────────────────┘   game implements the app→kernel
-                                                       injection seams (below)
+src/
+  main.axle     dispatch: a headless check, or the game
+  engine/       the reusable voxel engine — never names a biome, a block rule or a species
+    math/ block/ world/ entity/      the simulation: voxels, light, bodies
+    shade/ sky/                      backend-neutral shading + sky MODEL
+    render/view/                     backend-neutral: View, Camera, frustum
+    render/cpu/                      the software rasteriser and sky painter
+    ui/ audio/ io/                   overlay, sound cues, input + assets
+  game/         content, injected: biomes, terrain, trees, the species, the rules
+  app/          the running program: window, loop, controls, CLI
+  checks/       headless regression checks (`--physics-check`, `--light-check`, …)
+  configs/      one class of `static` tunables per area, plus the content enums
 ```
+
+Dependencies point one way — `math` → models (`block`, `shade`, `sky`) →
+`world` → `entity` → `render/view` → `render/cpu` / `ui` → `game` → `app` — and
+nothing in `engine/` imports `game/` or `app/`.
 
 ### Seams — the capability contracts
 
-`src/kernel/seams.axle` is the single source of truth for how the kernels talk to each other. Every seam is a **small, single-responsibility capability trait** (one job each), with convenience **bundles** composing them, so a provider conforms once and a consumer depends on only the narrowest capability it actually uses:
+Each domain declares the contracts it provides in its own `seams.axle`. Every
+seam is a **small, single-responsibility capability trait**, with convenience
+**bundles** composing them, so a provider conforms once and a consumer depends
+on only the narrowest capability it actually uses:
 
 | Provider | Bundle | Fine-grained capabilities |
 |----------|--------|---------------------------|
-| `kworld` · ChunkManager | `VoxelQuery` | `VoxelReader` + `CollisionField` + `Heightfield` |
-| `kworld` · ChunkManager | `VoxelEdit` | `VoxelWriter` + `LightMutator` + `ChunkStreamer` + `DayCycle` + `LightThread` |
-| `kworld` · ChunkManager | `LightSample` | `BlockLightField` + `SkyLightField` + `SunLightField` + `BounceLightField` |
-| `kentity` · Mob | `ActorVisual` | `Kinded` + `Animated` (+ pose / flash / fuse) |
+| `world::chunks` · ChunkManager | `VoxelQuery` | `VoxelReader` + `CollisionField` + `Heightfield` |
+| `world::chunks` · ChunkManager | `VoxelEdit` | `VoxelWriter` + `LightMutator` + `ChunkStreamer` + `DayCycle` + `LightPrime` + `LightThread` |
+| `world::chunks` · ChunkManager | `LightSample` | `BlockLightField` + `SkyLightField` + `SunLightField` + `BounceLightField` |
+| `entity::mob` · Mob | `ActorVisual` | `Kinded` + `Animated` + pose / hurt flash / `buildModel` |
 
 The picker, for instance, takes a `dyn VoxelQuery`, not the concrete `ChunkManager` — so nothing in the interaction layer names an engine type.
 
 ### Content flows into the engine, never the other way
 
-The engine never names a concrete biome, ore rule or animal. Instead the **game injects** its content at startup through two *app→kernel* seams, each declared beside the kernel that consumes it (so each kernel stays self-contained):
+The game injects its content through seams declared beside the engine code that consumes them:
 
-- **`Generator`** (`kworld::manager`) — `TerrainGen` (biome tables, ore & tree rules) is injected via `ChunkManager.attachGenerator`, and the streamer drives it through the seam.
-- **`MobSpawner`** (`kentity::mob`) — `Fauna` (which species exist and their spawn weights) is injected via `MobManager.attachSpawner`, and the population manager builds mobs through it.
+- **`Generator`** (`world::chunks`) — `TerrainGen` (biome tables, ore & tree rules) is attached with `ChunkManager.attachGenerator`, and the streamer drives it through the seam.
+- **`MobSpawner`** (`entity::mob`) — `Fauna` (which species exist and their spawn weights) is attached with `MobManager.attachSpawner`.
+- **`ActorVisual.buildModel`** (`entity::seams`) — each species describes its body as a list of `BoxPart`s; the renderer draws boxes and never names a species.
 
 ### Physics through inheritance
 
-`Player` and `Mob` are genuinely the same *kind* of thing physically: both fall, both stand on terrain, both step up one-block ledges, both can be hurt. That shared behaviour lives once in `Entity` (kentity) and is reused by both subclasses — `Player.update` and `Mob.aiStep` only decide *what horizontal move to feed the shared `tick`*.
-
-```
-                 ┌────────────┐
-                 │   Entity   │  pos, velY, hp, radius, gravity + VOXEL
-                 │  (kentity) │  AABB collision, auto-step up / step-down,
-                 └─────┬──────┘  damage / heal
-            extends    │    extends
-        ┌──────────────┴───────────────┐
-   ┌────▼─────┐                    ┌────▼────┐
-   │  Player  │ FPS camera, input, │   Mob   │ AI + skins (chicken / sheep /
-   │          │ jump / swim, fall  │         │ cow / pig / creeper), wander /
-   │          │ & drown & regen,   │         │ graze / flee / die
-   │          │ creative flight    │         │
-   └──────────┘                    └─────────┘
-```
-
-Adding a new animal is a new `Entity` subclass in `game/entities/` plus a spawn weight in `Fauna` — the engine is untouched.
+`Player` and `Mob` are genuinely the same *kind* of thing physically: both fall, both stand on terrain, both step up one-block ledges, both can be hurt. That shared behaviour lives once in `Entity` (`engine/entity`) and is reused by both subclasses — `Player.update` and the mob AI only decide *what horizontal move to feed the shared `tick`*.
 
 ### Value structs over scalar sprawl
 
-Hot geometry and call-sites are bundled in value `struct`s instead of long argument lists: **`IVec3`** for integer cells and **`Vec3`** for float positions/directions (both in `kmath/vec3.axle`), plus `FrameBuf`, `RasterTri`, `MipAtlas`, the sky's `DayState` / `SunScreen`, the mob pass's `MobScene`, and the light flood's `LightRemoval`.
-
-The 2-D one used to be ours too — a `Canvas` bundling `(base, w, h)` so the HUD primitives did not thread three scalars. It is smalt's [`Frame`](vendor/smalt/src/render/frame.axle) now, which is the same bundle plus a clip rectangle: a widget that overruns its box is cut at the edge instead of painting over its neighbour, and the address it carries has no owner, so it cannot be the buffer's second one.
-
-### Source layout
-
-A `use` that crosses folders is written from the source root with a `crate::` prefix (like Rust); same-folder siblings import by bare name.
-
-```
-vendor/smalt               the platform layer — a git submodule whose src/
-                           compiles with ours (window, renderer, audio mixer, raw
-                           memory, file IO); `use smalt::…`
-src/
-  main.axle                composition root: window + buffers + worker threads,
-                           wire the kernels, inject the game content, run the loop
-  configs/                 one class of `static` tunables per area — Screen,
-                           Render, Atlas/Tile, Light, Daylight, Water, Noise,
-                           World, Motion, Mobs, Trees, Gameplay, Health, Hotbar,
-                           Audio — plus the Block / BiomeId / TreeKind / MobKind
-                           / FaceDir / AudioMaterial enums. Change the feel here
-
-  kernel/                  the reusable ENGINE (never names game content)
-    seams.axle             the kernel↔kernel capability contracts (single source
-                           of truth); app→kernel injection seams live with kworld/kentity
-    kmath/    mathx · vec3                 math helpers, Vec3 / IVec3
-    kblock/   blocks                       block table: id → tile/colour/predicates,
-                                           blockBoxHeight category helpers
-    kworld/   voxstore · lightstore        raw voxel field · per-voxel light volumes
-              noise                        value noise + fbm terrain fields
-              chunkmesher · meshbuf        voxel → face/torch/collision-top mesher
-              blocksim                     falling sand/gravel, water flow
-              manager                      ChunkManager: streamed chunks, meshing,
-                                           the block+sky LIGHT engine (own thread),
-                                           break/place — provides the VoxelQuery /
-                                           VoxelEdit / LightSample seams
-    kentity/  entity · player              Entity base (physics) · Player
-              mob · mobs                   Mob AI base + MobManager; declares MobSpawner
-    kio/      input · sfx                  keyboard axes · game audio cues
-                                           (pacing is smalt's `FramePacer`, the pump
-                                           thread and the mixer lock are smalt's too)
-    krender/  color                        the one tint that is a game decision, and
-                                           the `Widget` seam (packing, blending and
-                                           the clipped surface are smalt's)
-              raster                       triangle rasteriser + z-buffer, mip-chain,
-                                           anisotropic sampling (RasterTri / MipAtlas)
-              sky                          day/night + atmospheric sky (DayState by value)
-              mobview · selection · bloom  mob box-models · block wireframe · glow pass
-              render                       core world pass: project + clip + shade every
-                                           face, rasterise in parallel column bands
-              health · hotbar · hud · menu heart row · inventory bar · HUD · pause menu
-                                           (all drawn through smalt's `Frame` and
-                                           `BitmapFont` — no font or clip of our own)
-
-  game/                    the APP — all content, injected into the engine
-    world/    biomes                       climate → biome tables (all ~18 in one module)
-              terraingen                   TerrainGen: implements the `Generator` seam
-              treegen                      tree / mushroom canopy stamping
-    entities/ fauna                        Fauna: implements the `MobSpawner` seam
-              chicken · cow · pig ·        per-species skins & behaviour
-              sheep · creeper
-    start.axle               start-position search + facing yaw
-    ray.axle                Picker: look-ray voxel pick with real per-block boxes
-    tick.axle               fixed-timestep scheduler (Scheduler seam)
-```
+Hot geometry and call-sites are bundled in value `struct`s instead of long argument lists: `IVec3` / `Vec3`, `View` / `Camera` / `Lens`, `FrameBuf`, `RasterTri`, `MipAtlas`, `DayState`, `LightVolumes`, `BoxPart`. The 2-D one is smalt's [`Frame`](vendor/smalt/src/render/frame.axle): the overlay draws through its clip rectangle, so a widget that overruns its box is cut at the edge instead of painting over its neighbour.
 
 ## ⚙️ How it works
 
@@ -344,20 +269,20 @@ src/
 4. **Lighting.** A flood-filled **sky + block light** field gives every voxel corner a smooth (Gouraud) light value with ambient occlusion; torches inject warm block light. A **day/night cycle** moves a sun (and a procedural sun/moon disc) across an **atmospheric sky gradient**; **directional sun shadows** are cast with a soft, smoothed penumbra, warm sunlight reads against cool shade, and a one-bounce colour tint bleeds nearby surfaces. Bright pixels get **bloom**, and the sun throws screen-space **god-rays**. Mobs are lit by the same scene light. The whole field is recomputed on a **dedicated thread**.
 5. **Rendering.** World faces are near-plane clipped (so hugging a block never tears a hole), projected (`1/z`) and filled with their **128 px HD Minecraft texture** (perspective-correct sampling, a mip-chain and **anisotropic filtering**), shaded by the baked corner light + shadows. Water draws as a sloped, scrolling surface with specular + Fresnel. Mobs are stacks of textured boxes with a walk-cycle bob, sharing the world z-buffer; a struck mob flashes red. The heart HUD, hotbar and crosshair are painted on top.
 6. **Threading.** **Audio** mixes on its own thread (no crackle under load), the **light** engine recomputes on its own thread, the world triangle queue is rasterised in **vertical tiles** across worker threads, and the sky / god-ray / bloom post-passes are split into row bands (`spawn` → `join`).
-7. **Mobs.** `MobManager` keeps a live `dyn ActorVisual[]`, spawns animals on dry land in a ring around the player (species chosen by the injected `Fauna`), steps each one's AI, despawns the distant, and resolves a left-click into damage on the nearest mob in the view cone. Each eases toward a target heading, alternates wandering with grazing, hops now and then, and bolts when hit. Killing one plays a `dying` collapse before removal.
+7. **Mobs.** `MobManager` keeps every live creature in one `Mob[]` (seen by the renderer as `dyn ActorVisual`), spawns animals on dry land in a ring around the player (species chosen by the injected `Fauna`), steps each one's AI, despawns the distant, and resolves a left-click into damage on the nearest mob in the view cone. Each eases toward a target heading, alternates wandering with grazing, hops now and then, and bolts when hit. Killing one plays a `dying` collapse before removal.
 
 ## 🖼️ Textures
 
-Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of **128 px (HD)** tiles (grass, dirt, stone, sand, snow, gravel, oak/birch logs, leaves, water, …). The engine **loads `atlas.raw` at runtime** (`Assets::loadAtlas`, tried from the project dir or `target/`) — it is not embedded in the source, so textures can be re-baked without rebuilding. `kblock` maps a block face to its tile, the mesher stores the tile per face, and the rasteriser samples it through the mip-chain with anisotropic taps. Re-bake with `python bake_atlas.py`.
+Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of **128 px (HD)** tiles (grass, dirt, stone, sand, snow, gravel, oak/birch logs, leaves, water, …). The engine **loads `atlas.raw` at runtime** (`Assets::loadAtlas`, from the working directory or its parent) — it is not embedded in the source, so textures can be re-baked without rebuilding. `engine/block/surface` maps a block face to its tile, the mesher stores the tile per face, and the rasteriser samples it through the mip-chain with anisotropic taps. Re-bake with `python tools/bake_atlas.py`.
 
-**Mobs** are skinned from the Minecraft entity textures under `assets/textures/entity/`. `bake_mobs.py` crops a tile per body part and appends them to the atlas; `Atlas::USE_MOB_TEXTURES` toggles textured vs flat-colour mobs.
+**Mobs** are skinned from the Minecraft entity textures under `assets/textures/entity/`. The same `tools/bake_atlas.py` crops a tile per body part and appends them to the atlas; `Atlas::USE_MOB_TEXTURES` toggles textured vs flat-colour mobs.
 
 ## 🧷 Seams for new features
 
-- **New block** — id in `configs/blocks`, tile/colour & predicates in `kblock`, place it in `game/world`.
-- **New partial block** (slab, carpet) — one `match` arm in `blockBoxHeight` plus listing it in `kblock.isPartialShape`; collision, meshing, picking and the selection outline pick it up for free.
+- **New block** — id in `configs/blocks`, its look in `engine/block/surface`, any behaviour that differs from a plain cube in `engine/block/props`, place it in `game/world`.
+- **New partial block** (slab, carpet) — one arm in `shapeOf` (`engine/block/props`); `boxOf` gives it its real box and collision, meshing, picking and the selection outline pick it up for free.
 - **New biome** — a climate band + surface/filler + tree density in `game/world/biomes` (no engine change).
-- **New animal** — a new `Entity` subclass in `game/entities/`, a spawn weight in `Fauna`, and a `draw*` case in `krender/mobview`.
+- **New animal** — a `Mob` subclass in `game/entities/` whose `buildModel` lists its boxes, a spawn weight in `Fauna`, its tiles in the atlas, and (for now) its voice in `engine/audio/sfx`.
 - **Editing the world** (dig / place) — the `VoxelEdit` seam (`breakAt` / `placeAt`) rewrites the chunk's voxel field and re-meshes the affected slots; the look-ray `Picker` picks the targeted voxel against its real per-block box.
 
 ## 📝 Notes / limitations
@@ -370,7 +295,8 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 - `--look <yaw°> <pitch°>` pins the view for the whole run: the spawn's own yaw is overridden and the mouse is ignored. Two captures can only be compared as images if they are framed identically, and the grab hands the first frames whatever motion the mouse happened to have.
 - `--daytime <0..1>` starts the day clock at that hour (0.42 mid-morning, 0.75 sunset, 0.9 night), so a capture can be taken at the hour that shows what it is about instead of waiting four real minutes for the sky to come round.
 - smalt's own limits, and what each would take to lift, are in [`vendor/smalt/LIMITATIONS.md`](vendor/smalt/LIMITATIONS.md).
-- `axle.toml`'s lib path is machine-specific; DLL + `atlas.raw` deployment next to the binary is manual.
+- Other run flags: `--size <w> <h>` opens the window at that size, `--walk <blocks>` sprints straight ahead that far (a repeatable streaming load), `--torch` plants a torch in front of the start.
+- Headless checks: `--physics-check`, `--light-check`, `--biome-scan`, `--cull-check`, `--model-check` — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#verifying-a-refactor).
 
 ---
 
