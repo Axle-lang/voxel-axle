@@ -1,6 +1,10 @@
 // Sheep — calm grazer. Uses the base wander AI.
 
+use smalt::Color;
 use crate::engine::entity::mob::Mob;
+use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::engine::math::vec3::{ vec3 };
+use crate::configs::atlas::{ Tile };
 use crate::configs::mobs::{ MobKind, Mobs };
 
 class Sheep : Mob {
@@ -14,5 +18,56 @@ class Sheep : Mob {
         super(x, y, z, MobKind::Sheep, Mobs::SHEEP_HP);
         self.speed = Mobs::SHEEP_SPEED;
         self.height = 1.2;
+    }
+
+    /**
+     * Four legs, the woolly body and the head; diagonal legs swing together.
+     * @param out  the model to append the boxes to
+     */
+    fn buildModel(self, out : BoxModel) : void {
+        const sw : f64 = self.walkPhase.sin() * 0.11;
+        const leg : i32 = Color::packBytes(54, 46, 40);
+        out.add(BoxPart {
+            ctr: vec3(0.0 - 0.20, 0.16, 0.18 + sw),
+            half: vec3(0.07, 0.16, 0.07),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.20, 0.16, 0.18 - sw),
+            half: vec3(0.07, 0.16, 0.07),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0 - 0.20, 0.16, 0.0 - 0.18 - sw),
+            half: vec3(0.07, 0.16, 0.07),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.20, 0.16, 0.0 - 0.18 + sw),
+            half: vec3(0.07, 0.16, 0.07),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.50, 0.0),
+            half: vec3(0.28, 0.30, 0.40),
+            color: Color::packBytes(232, 230, 222),
+            skinTile: Tile::SHEEP_WOOL,
+            faceTile: Tile::SHEEP_WOOL,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.54, 0.46),
+            half: vec3(0.15, 0.15, 0.14),
+            color: Color::packBytes(226, 222, 214),
+            skinTile: Tile::SHEEP_WOOL,
+            faceTile: Tile::SHEEP_HEAD,
+        });
     }
 }

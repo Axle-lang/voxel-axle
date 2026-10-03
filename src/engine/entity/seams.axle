@@ -7,6 +7,7 @@
 // it (entity::mob).
 
 use crate::engine::math::vec3::{ Vec3 };
+use crate::engine::entity::model::{ BoxModel };
 use crate::configs::mobs::{ MobKind };
 
 // ─── Actor render-view capabilities (provided by kentity, read by krender) ───
@@ -36,9 +37,9 @@ trait Animated {
 }
 
 /**
- * The render-facing view of a living actor. krender's billboard pass iterates
- * `dyn ActorVisual` (via MobManager.actorCount() / actorAt(i)) instead of the
- * old five per-species arrays.
+ * The render-facing view of a living actor. The mob pass iterates
+ * `dyn ActorVisual` (via MobManager.actorCount() / actorAt(i)) and draws the
+ * boxes each one describes, never naming a species.
  */
 trait ActorVisual : Kinded, Animated {
     /**
@@ -60,8 +61,9 @@ trait ActorVisual : Kinded, Animated {
     fn hurtFlash(self) : i32;
 
     /**
-     * Fuse charge level, for the swell / strobe of a charging creeper.
-     * @return the fuse level, or a value below zero when idle
+     * Describe this frame's body as boxes in the actor's own frame — the
+     * species' shape, posed by its walk cycle and whatever else it animates.
+     * @param out  the model to append the boxes to (cleared by the caller)
      */
-    fn fuseLevel(self) : i32;
+    fn buildModel(self, out : BoxModel) : void;
 }

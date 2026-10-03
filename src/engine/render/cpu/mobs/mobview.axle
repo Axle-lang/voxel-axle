@@ -1,17 +1,15 @@
-// mobview — the mob box-model renderer, split out of Renderer.
+// mobview — the mob box-model renderer.
 //
 // Mobs (and torches) are drawn as little stacks of shaded, atlas-textured
-// cuboids sharing the world z-buffer. That machinery — the oriented-box corner
-// math, the per-face project + backface-cull + raster, the per-mob ambient
-// light — is cohesive and lives here in an owned `MobView` (the Renderer holds
-// one, like it holds a `Bloom`). MobView keeps its OWN projection scratch and
-// oriented-box corner buffers, so it never reaches back into the Renderer — a
-// one-way dependency (render → mobview), no import cycle.
+// cuboids sharing the world z-buffer. Each mob describes its own boxes through
+// `ActorVisual.buildModel` (entity::model); this file only knows how to draw an
+// oriented box — the corner math, the per-face project + backface-cull +
+// raster, the per-mob ambient light — so a new species never touches it.
 //
 // Per frame the Renderer hands in a `MobScene` value (atlas + fog colour + the
-// day/night state + the projection half-width); MobView never stores frame
-// state beyond the per-mob `mobLight`. The block torches reuse `drawQuad`
-// directly, so it is the one public quad primitive.
+// day/night state); MobView never stores frame state beyond the per-mob
+// `mobLight`. The block torches reuse `drawQuad` directly, so it is the one
+// public quad primitive.
 
 use smalt::Mem;
 use smalt::Color;
@@ -31,9 +29,9 @@ use crate::engine::entity::mobs::MobManager;
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::world::seams::{ ChannelLevels };
 use crate::engine::entity::seams::{ ActorVisual };
-use crate::configs::atlas::{ Atlas, Tile };
+use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::configs::atlas::{ Atlas };
 use crate::configs::light::{ Light };
-use crate::configs::mobs::{ MobKind };
 use crate::configs::screen::{ Screen };
 
 /**
@@ -56,16 +54,6 @@ struct Material {
     hurt : bool,
 }
 
-/**
- * One body part placed in the mob's own frame: `ctr` is the box centre as
- * (right, up-above-feet, forward) and `half` its half-extents along the same
- * axes. Replaces the six loose mr/my/mf/hr/hy/hf scalars drawObox used to take.
- */
-struct BoxPlacement {
-    ctr : Vec3,
-    half : Vec3,
-}
-
 class MobView {
     csx : i64,      // projected screen x / y / inverse depth (4 quad corners)
     csy : i64,
@@ -75,6 +63,7 @@ class MobView {
     oby : i64,
     obz : i64,
     mobLight : LinRgb, // ambient light on the mob currently being drawn, per channel
+    model : BoxModel,  // the boxes the mob being drawn described
 
     /** Allocate the quad projection scratch and the oriented-box corner buffers. */
     constructor() {
@@ -86,6 +75,7 @@ class MobView {
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
         self.mobLight = LinRgb { r: 1.0, g: 1.0, b: 1.0 };
+        self.model = new BoxModel();
     }
 
     /**
@@ -382,31 +372,27 @@ class MobView {
 
     /**
      * Draw one body part as an **oriented** box: the part is positioned in the
-     * mob's own frame (`place.ctr` = right / up-above-feet / forward, half-extents
-     * `place.half`), then the whole box is rotated by the mob's heading, so the
-     * head/body/legs turn together as a rigid model. The +forward face carries
-     * `faceTile` (the animal's face), the rest `skinTile`. Death collapses the
-     * box (sink + squash + topple along the heading).
-     * @param cam       the frame's camera
-     * @param a         the actor whose frame the box is placed in (seam-typed)
-     * @param fb        the render target (framebuffer + z-buffer + size)
-     * @param place     the box centre + half-extents in the mob frame
-     * @param color     flat fill color (used when untextured)
-     * @param skinTile  atlas tile for the non-forward faces
-     * @param faceTile  atlas tile for the +forward face
-     * @param scene     the per-frame mob context
+     * mob's own frame (`part.ctr` = right / up-above-feet / forward,
+     * half-extents `part.half`), then the whole box is rotated by the
+     * mob's heading, so the head/body/legs turn together as a rigid model. The
+     * +forward face carries `part.faceTile` (the animal's face), the rest
+     * `part.skinTile`. Death collapses the box (sink + squash + topple along
+     * the heading).
+     * @param cam    the frame's camera
+     * @param a      the actor whose frame the box is placed in (seam-typed)
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param part   the box: placement in the mob frame, colour and tiles
+     * @param scene  the per-frame mob context
      */
     fn drawObox(
         mut self,
         cam : Camera,
         a : dyn ActorVisual,
         fb : FrameBuf,
-        place : BoxPlacement,
-        color : i32,
-        skinTile : i32,
-        faceTile : i32,
+        part : BoxPart,
         scene : MobScene
     ) : void {
+        const color : i32 = part.color;
         // Read the seam once (dynamic dispatch) into locals for the corner loop.
         const heading : f64 = a.heading();
         const pos : Vec3 = a.pos();
@@ -425,19 +411,13 @@ class MobView {
         const st : f64 = theta.sin();
         const lift : f64 = 0.15 * st;
 
-        const mr : f64 = place.ctr.x;
-        const my : f64 = place.ctr.y;
-        const mf : f64 = place.ctr.z;
-        const hr : f64 = place.half.x;
-        const hy : f64 = place.half.y;
-        const hf : f64 = place.half.z;
         for (ci of 0..8) {
             const sr : f64 = (ci & 1) != 0 ? 1.0 : 0.0 - 1.0;
             const su : f64 = (ci & 2) != 0 ? 1.0 : 0.0 - 1.0;
             const sf : f64 = (ci & 4) != 0 ? 1.0 : 0.0 - 1.0;
-            const lr0 : f64 = mr + sr * hr;
-            const hun : f64 = my + su * hy;
-            const lf : f64 = mf + sf * hf;
+            const lr0 : f64 = part.ctr.x + sr * part.half.x;
+            const hun : f64 = part.ctr.y + su * part.half.y;
+            const lf : f64 = part.ctr.z + sf * part.half.z;
             const lr : f64 = lr0 * ct + hun * st;
             const lu : f64 = hun * ct - lr0 * st + lift;
             Mem::putRealOf(self.obx, ci, pos.x + lr * rgtx + lf * fwdx);
@@ -459,12 +439,12 @@ class MobView {
 
         const skin : Material = Material {
             color,
-            tile: skinTile,
+            tile: part.skinTile,
             hurt,
         };
         const faceM : Material = Material {
             color,
-            tile: faceTile,
+            tile: part.faceTile,
             hurt,
         };
         self.oquad(
@@ -540,445 +520,6 @@ class MobView {
     }
 
     /**
-     * Draw a chicken as a stack of oriented boxes (legs, body, head, beak, wattle).
-     * @param cam    the frame's camera
-     * @param a      chicken actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawChicken(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        const sw : f64 = (a.walkPhase()).sin() * 0.08;   // forward leg stride
-        const leg : i32 = Color::packBytes(232, 150, 40);
-        const body : i32 = Color::packBytes(236, 236, 232);
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.07, 0.10, sw), half: vec3(0.035, 0.10, 0.04) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0 - 0.07, 0.10, 0.0 - sw), half: vec3(0.035, 0.10, 0.04) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.27, 0.0), half: vec3(0.15, 0.14, 0.18) },
-            body,
-            Tile::CHICKEN_BODY,
-            Tile::CHICKEN_BODY,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.47, 0.18), half: vec3(0.11, 0.12, 0.10) },
-            body,
-            Tile::CHICKEN_BODY,
-            Tile::CHICKEN_HEAD,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.45, 0.30), half: vec3(0.05, 0.04, 0.06) },
-            Color::packBytes(232, 170, 40),
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.58, 0.08), half: vec3(0.05, 0.06, 0.04) },
-            Color::packBytes(200, 40, 40),
-            -1,
-            -1,
-            scene
-        );
-    }
-
-    /**
-     * Draw a sheep as a stack of oriented boxes (four legs, woolly body, head).
-     * @param cam    the frame's camera
-     * @param a      sheep actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawSheep(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        const sw : f64 = (a.walkPhase()).sin() * 0.11;
-        const leg : i32 = Color::packBytes(54, 46, 40);
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.18 + sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.20, 0.16, 0.18 - sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.0 - 0.20, 0.16, 0.0 - 0.18 - sw),
-                half: vec3(0.07, 0.16, 0.07),
-            },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.18 + sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.50, 0.0), half: vec3(0.28, 0.30, 0.40) },
-            Color::packBytes(232, 230, 222),
-            Tile::SHEEP_WOOL,
-            Tile::SHEEP_WOOL,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.54, 0.46), half: vec3(0.15, 0.15, 0.14) },
-            Color::packBytes(226, 222, 214),
-            Tile::SHEEP_WOOL,
-            Tile::SHEEP_HEAD,
-            scene
-        );
-    }
-
-    /**
-     * Draw a cow as a stack of oriented boxes (four legs, body, head).
-     * @param cam    the frame's camera
-     * @param a      cow actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawCow(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        const sw : f64 = (a.walkPhase()).sin() * 0.12;
-        const leg : i32 = Color::packBytes(70, 54, 44);
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0 - 0.26, 0.20, 0.24 + sw), half: vec3(0.09, 0.20, 0.09) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.26, 0.20, 0.24 - sw), half: vec3(0.09, 0.20, 0.09) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.0 - 0.26, 0.20, 0.0 - 0.24 - sw),
-                half: vec3(0.09, 0.20, 0.09),
-            },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.26, 0.20, 0.0 - 0.24 + sw), half: vec3(0.09, 0.20, 0.09) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.60, 0.0), half: vec3(0.38, 0.34, 0.50) },
-            Color::packBytes(110, 86, 66),
-            Tile::COW_BODY,
-            Tile::COW_BODY,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.64, 0.58), half: vec3(0.18, 0.18, 0.18) },
-            Color::packBytes(110, 86, 66),
-            Tile::COW_BODY,
-            Tile::COW_HEAD,
-            scene
-        );
-    }
-
-    /**
-     * Draw a pig as a stack of oriented boxes (four legs, body, head, snout).
-     * @param cam    the frame's camera
-     * @param a      pig actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawPig(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        const sw : f64 = (a.walkPhase()).sin() * 0.10;
-        const leg : i32 = Color::packBytes(196, 128, 128);
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.20 + sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.20, 0.16, 0.20 - sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.0 - 0.20, 0.16, 0.0 - 0.20 - sw),
-                half: vec3(0.07, 0.16, 0.07),
-            },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.20 + sw), half: vec3(0.07, 0.16, 0.07) },
-            leg,
-            -1,
-            -1,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.46, 0.0), half: vec3(0.30, 0.26, 0.42) },
-            Color::packBytes(222, 150, 150),
-            Tile::PIG_BODY,
-            Tile::PIG_BODY,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.50, 0.48), half: vec3(0.18, 0.17, 0.16) },
-            Color::packBytes(226, 156, 156),
-            Tile::PIG_BODY,
-            Tile::PIG_HEAD,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement { ctr: vec3(0.0, 0.47, 0.64), half: vec3(0.08, 0.07, 0.05) },
-            Color::packBytes(232, 170, 170),
-            -1,
-            -1,
-            scene
-        );
-    }
-
-    /**
-     * Creeper: textured from the atlas. Normally the green creeper skin with its
-     * iconic face on the head's forward face; once the fuse is lit it swaps to
-     * the "gilet jaune" charge skin/face, swells to 1.25x and strobes white
-     * (faster as the blast nears). The `color` args are the lighting base.
-     * @param cam    the frame's camera
-     * @param a      creeper actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawCreeper(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        const sw : f64 = (a.walkPhase()).sin() * 0.10;
-        const fuse : i32 = a.fuseLevel();
-
-        // Calm green vs. charging gilet jaune skin/face tiles + base tints.
-        let skin : i32 = Tile::CREEPER_SKIN;
-        let face : i32 = Tile::CREEPER_FACE;
-        let body : i32 = Color::packBytes(58, 140, 58);
-        let leg : i32 = Color::packBytes(42, 96, 42);
-        // Legs always wear the plain green skin — the vest only belongs on the
-        // torso, so they never carry the charge tile.
-        let legTile : i32 = Tile::CREEPER_SKIN;
-
-        // Charging menace: swell the whole model and strobe white. The strobe
-        // accelerates as the fuse runs down; a flash frame paints every part
-        // flat white (tile = -1) so it reads as a bright pulse over the model.
-        let s : f64 = 1.0;
-        let flash : bool = false;
-        if (fuse >= 0) {
-            skin = Tile::CHARGE_SKIN;
-            face = Tile::CHARGE_FACE;
-            body = Color::packBytes(228, 196, 40);
-            leg = Color::packBytes(170, 140, 28);
-            s = 1.25;
-            const period : i32 = 2 + fuse / 40;
-            if ((fuse / period) % 4 == 0) {
-                flash = true;
-            }
-        }
-        if (flash) {
-            const wht : i32 = Color::packBytes(242, 248, 242);
-            skin = -1;
-            face = -1;
-            legTile = -1;
-            body = wht;
-            leg = wht;
-        }
-
-        // Four legs (plain skin), the upright body (vest), then the head whose
-        // forward face carries the creeper / meme mug. Every extent and offset
-        // is scaled by `s` so the swell grows from the feet.
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.12 + sw) * s),
-                half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
-            },
-            leg,
-            legTile,
-            legTile,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.12 * s, 0.13 * s, (0.12 - sw) * s),
-                half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
-            },
-            leg,
-            legTile,
-            legTile,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.0 - 0.12 - sw) * s),
-                half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
-            },
-            leg,
-            legTile,
-            legTile,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.12 * s, 0.13 * s, (0.0 - 0.12 + sw) * s),
-                half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
-            },
-            leg,
-            legTile,
-            legTile,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.0, 0.58 * s, 0.0),
-                half: vec3(0.16 * s, 0.32 * s, 0.11 * s),
-            },
-            body,
-            skin,
-            skin,
-            scene
-        );
-        self.drawObox(
-            cam,
-            a,
-            fb,
-            BoxPlacement {
-                ctr: vec3(0.0, 1.06 * s, 0.0),
-                half: vec3(0.18 * s, 0.18 * s, 0.18 * s),
-            },
-            body,
-            skin,
-            face,
-            scene
-        );
-    }
-
-    /**
      * Ambient light factor (0..1) for a mob at world position (mx,my,mz): the
      * brighter of sky×daylight and block light at its cell, through the same
      * exponential curve as terrain, so mobs darken at night / underground and
@@ -1042,21 +583,18 @@ class MobView {
     }
 
     /**
-     * Dispatch one actor to its per-species box model, switched on the seam's
-     * `kind()`. The geometry stays per-species; only the collection iteration and
-     * the field reads flow through the ActorVisual seam.
+     * Draw one actor: ask it for this frame's boxes, then draw each as an
+     * oriented box in its frame. Which species it is never comes up.
      * @param cam    the frame's camera
      * @param a      the actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
     fn drawActor(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        match a.kind() {
-            MobKind::Chicken => { self.drawChicken(cam, a, fb, scene); }
-            MobKind::Sheep => { self.drawSheep(cam, a, fb, scene); }
-            MobKind::Cow => { self.drawCow(cam, a, fb, scene); }
-            MobKind::Pig => { self.drawPig(cam, a, fb, scene); }
-            _ => { self.drawCreeper(cam, a, fb, scene); }
+        self.model.clear();
+        a.buildModel(self.model);
+        for (i of 0..self.model.count()) {
+            self.drawObox(cam, a, fb, self.model.at(i), scene);
         }
     }
 }

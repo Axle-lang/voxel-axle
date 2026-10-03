@@ -27,6 +27,7 @@ use crate::checks::physcheck::runPhysicsCheck;
 use crate::checks::lightcheck::runLightCheck;
 use crate::checks::biomecheck::runBiomeScan;
 use crate::checks::cullcheck::runCullCheck;
+use crate::checks::modelcheck::runModelCheck;
 
 /**
  * Runs a headless check when one is asked for, the game otherwise.
@@ -40,7 +41,9 @@ use crate::checks::cullcheck::runCullCheck;
  * - `--biome-scan` tallies the biome of every column on a wide grid — the only
  *   honest way to tune a biome rate;
  * - `--cull-check` sweeps the camera and reports any chunk the frustum dropped
- *   while part of it was on screen — a hole in one frame at one angle.
+ *   while part of it was on screen — a hole in one frame at one angle;
+ * - `--model-check` asks every species for its body through the render seam —
+ *   a lost override renders as nothing, not as an error.
  * @return the process exit code: 0 on success, the failure count for a check
  */
 fn main() : i32 {
@@ -55,6 +58,9 @@ fn main() : i32 {
     }
     if (hasFlag("--cull-check")) {
         return runCullCheck();
+    }
+    if (hasFlag("--model-check")) {
+        return runModelCheck();
     }
 
     try {

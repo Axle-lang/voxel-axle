@@ -1,0 +1,74 @@
+// model — what a creature looks like, as data: a handful of boxes placed in its
+// own frame.
+//
+// A creature describes its body into a `BoxModel` every frame — legs swung by
+// its walk cycle, a creeper swollen by its fuse — and whoever draws it reads the
+// boxes back. The software renderer rotates them by the heading and rasterises
+// them; a GPU backend would upload them as instances. Neither has to know which
+// species it is drawing, so a new animal is a new class in `game/entities` and
+// nothing in the engine.
+
+use crate::engine::math::vec3::{ Vec3 };
+
+/** Boxes one creature may be built from; more are dropped. */
+const MODEL_MAX_PARTS : i32 = 16;
+
+/**
+ * One box of a creature, in the creature's own frame: `ctr` is the box centre
+ * as (right, up-above-feet, forward) and `half` its half-extents along the same
+ * axes; `color` is the flat colour it is lit from, and the tiles are the atlas
+ * tiles on its forward face and on the other five (-1 for a flat face).
+ */
+struct BoxPart {
+    pub(crate) ctr : Vec3,
+    pub(crate) half : Vec3,
+    pub(crate) color : i32,
+    pub(crate) skinTile : i32,
+    pub(crate) faceTile : i32,
+}
+
+/** A creature's boxes for one frame, in draw order. */
+class BoxModel {
+    parts : BoxPart[],
+    n : i32,
+
+    /** An empty model with room for `MODEL_MAX_PARTS` boxes. */
+    constructor() {
+        self.parts = malloc<BoxPart>(MODEL_MAX_PARTS);
+        self.n = 0;
+    }
+
+    /** Forget the last creature's boxes. */
+    pub(crate) fn clear(mut self) : void {
+        self.n = 0;
+    }
+
+    /**
+     * Append one box; dropped once the model is full.
+     * @param part  the box
+     */
+    pub(crate) fn add(mut self, own part : BoxPart) : void {
+        if (self.n >= MODEL_MAX_PARTS) {
+            return;
+        }
+        self.parts[self.n] = part;
+        self.n++;
+    }
+
+    /**
+     * Boxes in the model.
+     * @return the count
+     */
+    pub(crate) fn count(self) : i32 {
+        return self.n;
+    }
+
+    /**
+     * One box, in the order it was added.
+     * @param i  its index, 0..count()
+     * @return the box
+     */
+    pub(crate) fn at(self, i : i32) : BoxPart {
+        return self.parts[i];
+    }
+}

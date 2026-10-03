@@ -17,6 +17,7 @@ use crate::engine::entity::entity::{ Entity, Damageable };
 use crate::engine::entity::player::Player;
 use crate::engine::world::seams::{ VoxelQuery };
 use crate::engine::entity::seams::{ ActorVisual };
+use crate::engine::entity::model::{ BoxModel };
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::engine::audio::sfx::AudioManager;
 use crate::configs::audio::{ Audio };
@@ -271,12 +272,11 @@ class Mob : Entity, Actor, Wanders {
     }
 
     /**
-     * Fuse charge level, or < 0 when not charging. The base (calm) creature is
-     * never charging; the creeper overrides this to expose its live fuse.
-     * @return the fuse level, or a value below zero when idle
+     * The base creature has no body of its own; every species describes its
+     * boxes by overriding this.
+     * @param out  the model to append the boxes to
      */
-    fn fuseLevel(self) : i32 {
-        return -1;
+    fn buildModel(self, out : BoxModel) : void {
     }
 
     // ── Combat / life-cycle ──

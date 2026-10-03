@@ -1,6 +1,10 @@
 // Chicken — small, light, flutters down slowly. Uses the base wander AI.
 
+use smalt::Color;
 use crate::engine::entity::mob::Mob;
+use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::engine::math::vec3::{ vec3 };
+use crate::configs::atlas::{ Tile };
 use crate::configs::mobs::{ MobKind, Mobs };
 
 class Chicken : Mob {
@@ -14,5 +18,57 @@ class Chicken : Mob {
         super(x, y, z, MobKind::Chicken, Mobs::CHICKEN_HP);
         self.gravityScale = Mobs::CHICKEN_GRAVITY_SCALE;
         self.height = 0.6;
+    }
+
+    /**
+     * Legs, body, head, beak and wattle; the legs stride with the walk.
+     * @param out  the model to append the boxes to
+     */
+    fn buildModel(self, out : BoxModel) : void {
+        const sw : f64 = self.walkPhase.sin() * 0.08;
+        const leg : i32 = Color::packBytes(232, 150, 40);
+        const body : i32 = Color::packBytes(236, 236, 232);
+        out.add(BoxPart {
+            ctr: vec3(0.07, 0.10, sw),
+            half: vec3(0.035, 0.10, 0.04),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0 - 0.07, 0.10, 0.0 - sw),
+            half: vec3(0.035, 0.10, 0.04),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.27, 0.0),
+            half: vec3(0.15, 0.14, 0.18),
+            color: body,
+            skinTile: Tile::CHICKEN_BODY,
+            faceTile: Tile::CHICKEN_BODY,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.47, 0.18),
+            half: vec3(0.11, 0.12, 0.10),
+            color: body,
+            skinTile: Tile::CHICKEN_BODY,
+            faceTile: Tile::CHICKEN_HEAD,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.45, 0.30),
+            half: vec3(0.05, 0.04, 0.06),
+            color: Color::packBytes(232, 170, 40),
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.58, 0.08),
+            half: vec3(0.05, 0.06, 0.04),
+            color: Color::packBytes(200, 40, 40),
+            skinTile: -1,
+            faceTile: -1,
+        });
     }
 }

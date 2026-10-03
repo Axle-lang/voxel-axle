@@ -1,0 +1,61 @@
+// modelcheck — every species describes a body.
+//
+// The mob pass draws whatever boxes an actor hands it through
+// `ActorVisual.buildModel`, and the base `Mob` hands none. So a species whose
+// override is lost — a renamed method, a signature that no longer matches —
+// does not fail to build: it renders as nothing, which no other check sees.
+//
+// `voxel --model-check` builds one of each species, asks it for its model
+// through the same `dyn ActorVisual` view the renderer uses, and reports any
+// that came back empty.
+
+use crate::engine::entity::seams::{ ActorVisual };
+use crate::engine::entity::model::{ BoxModel };
+use crate::game::entities::chicken::Chicken;
+use crate::game::entities::cow::Cow;
+use crate::game::entities::creeper::Creeper;
+use crate::game::entities::pig::Pig;
+use crate::game::entities::sheep::Sheep;
+
+/**
+ * How many boxes an actor describes, asked the way the renderer asks.
+ * @param a      the actor, seen through the render seam
+ * @param model  scratch to build into
+ * @return the box count
+ */
+fn partsOf(a : dyn ActorVisual, model : BoxModel) : i32 {
+    model.clear();
+    a.buildModel(model);
+    return model.count();
+}
+
+/**
+ * Report one species, and count it as a failure if it has no body.
+ * @param name   the species, for the report
+ * @param parts  how many boxes it described
+ * @return 1 when it described none, 0 otherwise
+ */
+fn verdict(name : string, parts : i32) : i32 {
+    Console::println("  ${name}: ${parts} boxes");
+    if (parts > 0) {
+        return 0;
+    }
+    Console::println("FAIL ${name} describes no body");
+    return 1;
+}
+
+/**
+ * Build one of each species and check each describes at least one box.
+ * @return the failure count, 0 when green
+ */
+fn runModelCheck() : i32 {
+    const model : BoxModel = new BoxModel();
+    let fails : i32 = 0;
+    fails += verdict("chicken", partsOf(new Chicken(0.0, 64.0, 0.0), model));
+    fails += verdict("cow", partsOf(new Cow(0.0, 64.0, 0.0), model));
+    fails += verdict("pig", partsOf(new Pig(0.0, 64.0, 0.0), model));
+    fails += verdict("sheep", partsOf(new Sheep(0.0, 64.0, 0.0), model));
+    fails += verdict("creeper", partsOf(new Creeper(0.0, 64.0, 0.0), model));
+    Console::println("model failures: ${fails}");
+    return fails;
+}

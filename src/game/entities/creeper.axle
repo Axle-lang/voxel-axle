@@ -5,12 +5,15 @@
 // here (not on the calm base Mob) — only the creeper charges.
 
 use std::numeric::math;
+use smalt::Color;
+use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::configs::atlas::{ Tile };
 use crate::engine::entity::mob::{ Mob, MobState, Hostile };
 use crate::engine::entity::player::{ GameMode, Player };
 use crate::engine::world::seams::{ VoxelQuery, VoxelEdit };
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::engine::audio::sfx::AudioManager;
-use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::mobs::{ MobKind, Mobs };
 
@@ -31,12 +34,95 @@ class Creeper : Mob, Hostile {
     }
 
     /**
-     * Live fuse level, or < 0 when not charging — overrides the calm base so
-     * the renderer can swell / strobe the model while the fuse burns.
-     * @return the fuse countdown, or a value below zero when idle
+     * The creeper's body: textured green skin with its face on the head's
+     * forward face. Once the fuse is lit it swaps to the "gilet jaune" charge
+     * skin and face, swells to 1.25x from the feet and strobes white, faster as
+     * the blast nears.
+     * @param out  the model to append the boxes to
      */
-    fn fuseLevel(self) : i32 {
-        return self.fuse;
+    fn buildModel(self, out : BoxModel) : void {
+        const sw : f64 = self.walkPhase.sin() * 0.10;
+        const fuse : i32 = self.fuse;
+
+        // Calm green vs. charging gilet jaune skin/face tiles + base tints.
+        let skin : i32 = Tile::CREEPER_SKIN;
+        let face : i32 = Tile::CREEPER_FACE;
+        let body : i32 = Color::packBytes(58, 140, 58);
+        let leg : i32 = Color::packBytes(42, 96, 42);
+        // Legs always wear the plain green skin — the vest only belongs on the
+        // torso, so they never carry the charge tile.
+        let legTile : i32 = Tile::CREEPER_SKIN;
+
+        // Charging menace: swell the whole model and strobe white. The strobe
+        // accelerates as the fuse runs down; a flash frame paints every part
+        // flat white (tile = -1) so it reads as a bright pulse over the model.
+        let s : f64 = 1.0;
+        let flash : bool = false;
+        if (fuse >= 0) {
+            skin = Tile::CHARGE_SKIN;
+            face = Tile::CHARGE_FACE;
+            body = Color::packBytes(228, 196, 40);
+            leg = Color::packBytes(170, 140, 28);
+            s = 1.25;
+            const period : i32 = 2 + fuse / 40;
+            if ((fuse / period) % 4 == 0) {
+                flash = true;
+            }
+        }
+        if (flash) {
+            const wht : i32 = Color::packBytes(242, 248, 242);
+            skin = -1;
+            face = -1;
+            legTile = -1;
+            body = wht;
+            leg = wht;
+        }
+
+        // Four legs (plain skin), the upright body (vest), then the head whose
+        // forward face carries the creeper / meme mug. Every extent and offset
+        // is scaled by `s` so the swell grows from the feet.
+        out.add(BoxPart {
+            ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.12 + sw) * s),
+            half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
+            color: leg,
+            skinTile: legTile,
+            faceTile: legTile,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.12 * s, 0.13 * s, (0.12 - sw) * s),
+            half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
+            color: leg,
+            skinTile: legTile,
+            faceTile: legTile,
+        });
+        out.add(BoxPart {
+            ctr: vec3((0.0 - 0.12) * s, 0.13 * s, (0.0 - 0.12 - sw) * s),
+            half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
+            color: leg,
+            skinTile: legTile,
+            faceTile: legTile,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.12 * s, 0.13 * s, (0.0 - 0.12 + sw) * s),
+            half: vec3(0.07 * s, 0.13 * s, 0.07 * s),
+            color: leg,
+            skinTile: legTile,
+            faceTile: legTile,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.58 * s, 0.0),
+            half: vec3(0.16 * s, 0.32 * s, 0.11 * s),
+            color: body,
+            skinTile: skin,
+            faceTile: skin,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 1.06 * s, 0.0),
+            half: vec3(0.18 * s, 0.18 * s, 0.18 * s),
+            color: body,
+            skinTile: skin,
+            faceTile: face,
+        });
     }
 
     /**

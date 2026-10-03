@@ -1,6 +1,10 @@
 // Cow — big, slow grazer. Uses the base wander AI.
 
+use smalt::Color;
 use crate::engine::entity::mob::Mob;
+use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::engine::math::vec3::{ vec3 };
+use crate::configs::atlas::{ Tile };
 use crate::configs::mobs::{ MobKind, Mobs };
 
 class Cow : Mob {
@@ -14,5 +18,56 @@ class Cow : Mob {
         super(x, y, z, MobKind::Cow, Mobs::COW_HP);
         self.speed = Mobs::COW_SPEED;
         self.height = 1.4;
+    }
+
+    /**
+     * Four legs, the body and the head; diagonal legs swing together.
+     * @param out  the model to append the boxes to
+     */
+    fn buildModel(self, out : BoxModel) : void {
+        const sw : f64 = self.walkPhase.sin() * 0.12;
+        const leg : i32 = Color::packBytes(70, 54, 44);
+        out.add(BoxPart {
+            ctr: vec3(0.0 - 0.26, 0.20, 0.24 + sw),
+            half: vec3(0.09, 0.20, 0.09),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.26, 0.20, 0.24 - sw),
+            half: vec3(0.09, 0.20, 0.09),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0 - 0.26, 0.20, 0.0 - 0.24 - sw),
+            half: vec3(0.09, 0.20, 0.09),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.26, 0.20, 0.0 - 0.24 + sw),
+            half: vec3(0.09, 0.20, 0.09),
+            color: leg,
+            skinTile: -1,
+            faceTile: -1,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.60, 0.0),
+            half: vec3(0.38, 0.34, 0.50),
+            color: Color::packBytes(110, 86, 66),
+            skinTile: Tile::COW_BODY,
+            faceTile: Tile::COW_BODY,
+        });
+        out.add(BoxPart {
+            ctr: vec3(0.0, 0.64, 0.58),
+            half: vec3(0.18, 0.18, 0.18),
+            color: Color::packBytes(110, 86, 66),
+            skinTile: Tile::COW_BODY,
+            faceTile: Tile::COW_HEAD,
+        });
     }
 }
