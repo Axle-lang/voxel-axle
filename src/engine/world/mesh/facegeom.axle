@@ -1,0 +1,80 @@
+// facegeom — where the four corners of a block face sit, how its texture runs
+// across them, and what a baked face's corners stand on.
+//
+// One definition for everyone who turns a baked face back into a quad: the
+// mesher (which bakes each corner's light at these corners), the software
+// raster and the GPU mesh build.
+//
+// Directions are `FaceDir` discriminants: 0 +X, 1 -X, 2 top, 3 bottom, 4 +Z,
+// 5 -Z. Corners run counter-clockwise seen from outside the face; a corner's
+// offset is 0 or 1 per axis from the face's block, and its texture u / v is 0
+// or 1 (v = 0 at the top of the tile).
+
+/** The steps a stored corner height counts in: see `topSteps`. */
+const TOP_STEPS : f64 = 480.0;
+
+/** The corner and texture tables, `(dir * 4 + k)` indexed. Build with `FaceTable {}`. */
+struct FaceTable {
+    // (dir*4+k)*3 → the corner's block offset x, y, z
+    pub(crate) coff : i32[] = [
+        1, 0, 0,   1, 0, 1,   1, 1, 1,   1, 1, 0,   // +X
+        0, 0, 0,   0, 1, 0,   0, 1, 1,   0, 0, 1,   // -X
+        0, 1, 0,   1, 1, 0,   1, 1, 1,   0, 1, 1,   // top
+        0, 0, 0,   0, 0, 1,   1, 0, 1,   1, 0, 0,   // bottom
+        0, 0, 1,   1, 0, 1,   1, 1, 1,   0, 1, 1,   // +Z
+        0, 0, 0,   0, 1, 0,   1, 1, 0,   1, 0, 0,   // -Z
+    ],
+
+    // dir*4+k → the corner's texture u
+    pub(crate) uvu : i32[] = [
+        0, 1, 1, 0,
+        0, 0, 1, 1,
+        0, 1, 1, 0,
+        0, 0, 1, 1,
+        0, 1, 1, 0,
+        0, 0, 1, 1,
+    ],
+
+    // dir*4+k → the corner's texture v
+    pub(crate) uvv : i32[] = [
+        1, 1, 0, 0,
+        1, 0, 0, 1,
+        0, 0, 1, 1,
+        0, 1, 1, 0,
+        1, 1, 0, 0,
+        1, 0, 0, 1,
+    ],
+}
+
+/**
+ * What a face's corners stand on, as the mesher stores it in `FaceMesh.fkind`:
+ * a plain unit quad, a water face (sloped top corners, flow-scrolled) or the
+ * face of a partial block (top corners at its box height, drawn from both
+ * sides).
+ */
+enum FaceKind : i32 {
+    Solid,
+    Water,
+    Partial,
+}
+
+/**
+ * A corner's height above its face's cell, as `FaceMesh.ftop` stores it.
+ * Every height a corner can take — a level in eighths, the 0.3 lip of a water
+ * edge, either averaged over one to four columns — is a whole number of
+ * 480ths, so the stored height is exact.
+ * @param h  the height in cells (0..1)
+ * @return the stored steps
+ */
+fn topSteps(h : f64) : i32 {
+    return (h * TOP_STEPS).round() as i32;
+}
+
+/**
+ * A stored corner height back in cells.
+ * @param steps  the stored steps
+ * @return the height in cells
+ */
+fn topHeight(steps : i32) : f64 {
+    return (steps as f64) / TOP_STEPS;
+}

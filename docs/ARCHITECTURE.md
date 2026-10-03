@@ -126,13 +126,14 @@ Steps that remain before a GPU backend can be written, in order:
 1. **A `RenderBackend` seam** (`beginFrame(FrameView)`, `submit(scene)`,
    `post()`, `overlay()`, `present()`), implemented by the CPU renderer, held as
    a one-slot `dyn RenderBackend[]` (a trait-typed field cannot hold a class).
-2. **Make the chunk mesh self-contained.** Today `render/cpu/world/chunkview`
-   re-reads the world every frame for sun visibility, sky access, bounce, water
-   corner heights and partial-block heights, and splits quads along shadow
-   edges. A retained GPU mesh cannot: bake the static terms (water heights,
-   block heights, flood light, AO) into the face record, sample the sun / sky /
-   bounce volumes per fragment, and add a per-slot mesh generation counter so a
-   backend knows when to re-upload.
+2. **Make the chunk mesh self-contained.** Partly done: the face corner table
+   is one copy (`world/mesh/facegeom`), and the mesher records each face's
+   kind, its four corner heights (sloped water, partial-block tops) and its
+   water flow, and bumps `meshGen[slot]` on every rebuild so a backend knows
+   when to re-upload. What `render/cpu/world/chunkview` still reads every
+   frame is the light that moves with the sun — sun visibility, sky access,
+   bounce — and it splits quads along shadow edges; a retained GPU mesh
+   samples those per fragment or bakes them per corner (GPU phase 2).
 3. **Overlay on a transparent layer.** smalt's GPU overlay treats 0 as
    transparent, so the pause dim and black drop shadows must change, the
    crosshair must become a `Frame` op, and the selection outline belongs in the

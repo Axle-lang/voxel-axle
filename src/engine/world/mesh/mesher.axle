@@ -13,7 +13,8 @@
 
 use smalt::Mem;
 use crate::engine::block::blocks::{
-    tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable,
+    tileFor, isWater, isSource, fluidLevel, isTransparent, isPartialShape, isOpaque,
+    isCollidable,
 };
 use crate::engine::block::box::{ boxOf };
 
@@ -31,9 +32,11 @@ use crate::engine::world::seams::{ ChannelLevels };
 use crate::engine::world::voxstore::VoxStore;
 use crate::engine::world::light::engine::{ LightEngine };
 use crate::engine::world::mesh::meshbuf::{ FaceMesh, TorchField };
+use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topSteps };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };
+use crate::configs::water::{ Water };
 use crate::configs::world::{ World };
 
 /**
@@ -89,6 +92,8 @@ class ChunkMesher : Mesher {
     pub(crate) faces : FaceMesh,     // baked render faces, per slot
     pub(crate) torches : TorchField, // torch posts, per slot
     pub(crate) ctop : i16[],         // per-column highest collidable voxel + 1 (entity physics)
+    pub(crate) meshGen : i32[],      // per slot, bumped by every rebuild: a retained copy
+                                     // of the faces is stale once this moves
 
     // The open greedy runs. `runU` carries the runs that grow along X — top,
     // bottom and the two Z-facing walls — keyed by (dir, ly) and valid only
@@ -102,8 +107,8 @@ class ChunkMesher : Mesher {
     runUAt : i32[],  // the last coordinate that run covered
     runW : i32[],
     runWAt : i32[],
-    lcoff : i32[],   // face corner block offsets, (dir*4+k)*3 → (ox,oy,oz);
-                     // MUST mirror Renderer.fillTable so baked corner k aligns.
+    geom : FaceTable, // where each face corner sits (world::mesh::facegeom), the same
+                      // table every renderer reads, so baked corner k is drawn at k
 
     /**
      * Allocate the per-slot face / torch / collision buffers and the greedy-run
@@ -123,7 +128,14 @@ class ChunkMesher : Mesher {
             frun: malloc<i8>(faceCap),
             flight: Mem::take((faceCap as i64) * 8),
             fao: Mem::take(faceCap as i64),
+            fkind: malloc<i8>(faceCap),
+            ftop: malloc<i16>(faceCap * 4),
+            fflow: malloc<i8>(faceCap * 2),
         };
+        self.meshGen = malloc<i32>(slots);
+        for (s of 0..slots) {
+            self.meshGen[s] = 0;
+        }
         self.torches = TorchField {
             tx: malloc<i8>(torchCap),
             ty: malloc<i8>(torchCap),
@@ -136,53 +148,7 @@ class ChunkMesher : Mesher {
         self.runUAt = malloc<i32>(6 * World::HEIGHT);
         self.runW = malloc<i32>(2 * World::CHUNK_SIZE * World::HEIGHT);
         self.runWAt = malloc<i32>(2 * World::CHUNK_SIZE * World::HEIGHT);
-        self.lcoff = malloc<i32>(72);
-        self.fillLightTable();
-    }
-
-    /**
-     * Mirror of Renderer.fillTable's corner block offsets. Stored as
-     * (dir*4+k)*3 → (ox, oy, oz), kept identical to the renderer so baked corner
-     * k lines up with the corner k it shades.
-     * @param dir  the face direction (0..5)
-     * @param k    the corner index (0..3)
-     * @param ox   the corner block's x offset (0 or 1)
-     * @param oy   the corner block's y offset (0 or 1)
-     * @param oz   the corner block's z offset (0 or 1)
-     */
-    fn setLCorner(mut self, dir : i32, k : i32, ox : i32, oy : i32, oz : i32) : void {
-        const b : i32 = (dir * 4 + k) * 3;
-        self.lcoff[b] = ox;
-        self.lcoff[b + 1] = oy;
-        self.lcoff[b + 2] = oz;
-    }
-
-    /** Fill the face corner offset table (must match Renderer.fillTable). */
-    fn fillLightTable(mut self) : void {
-        self.setLCorner(0, 0, 1, 0, 0);
-        self.setLCorner(0, 1, 1, 0, 1);
-        self.setLCorner(0, 2, 1, 1, 1);
-        self.setLCorner(0, 3, 1, 1, 0);
-        self.setLCorner(1, 0, 0, 0, 0);
-        self.setLCorner(1, 1, 0, 1, 0);
-        self.setLCorner(1, 2, 0, 1, 1);
-        self.setLCorner(1, 3, 0, 0, 1);
-        self.setLCorner(2, 0, 0, 1, 0);
-        self.setLCorner(2, 1, 1, 1, 0);
-        self.setLCorner(2, 2, 1, 1, 1);
-        self.setLCorner(2, 3, 0, 1, 1);
-        self.setLCorner(3, 0, 0, 0, 0);
-        self.setLCorner(3, 1, 0, 0, 1);
-        self.setLCorner(3, 2, 1, 0, 1);
-        self.setLCorner(3, 3, 1, 0, 0);
-        self.setLCorner(4, 0, 0, 0, 1);
-        self.setLCorner(4, 1, 1, 0, 1);
-        self.setLCorner(4, 2, 1, 1, 1);
-        self.setLCorner(4, 3, 0, 1, 1);
-        self.setLCorner(5, 0, 0, 0, 0);
-        self.setLCorner(5, 1, 0, 1, 0);
-        self.setLCorner(5, 2, 1, 1, 0);
-        self.setLCorner(5, 3, 1, 0, 0);
+        self.geom = FaceTable {};
     }
 
     /**
@@ -192,9 +158,16 @@ class ChunkMesher : Mesher {
      * @param c     the face's voxel
      * @param dir   the face direction
      * @param tile  the atlas tile index
+     * @return the face's index in the face arrays, or -1 when the chunk is full
      */
-    fn addFace(mut self, src : MeshSource, c : MeshCell, own dir : FaceDir, tile : i32) : void {
+    fn addFace(mut self, src : MeshSource, c : MeshCell, own dir : FaceDir, tile : i32) : i32 {
+        const fc : i32 = self.faces.fcount[c.slot];
+        if (fc >= World::MAX_FACES_PER_CHUNK) {
+            return -1;
+        }
+
         self.addFaceRun(src, c, dir, tile, false);
+        return c.slot * World::MAX_FACES_PER_CHUNK + fc;
     }
 
     /**
@@ -244,6 +217,10 @@ class ChunkMesher : Mesher {
         const di : i32 = dir as i32;
         self.faces.ftile[i] = (di * 256 + tile) as i16;
         self.faces.frun[i] = 1 as i8;
+        self.faces.fkind[i] = FaceKind::Solid as i8;
+        self.setTops(i, di, 1.0);
+        self.faces.fflow[i * 2] = 0 as i8;
+        self.faces.fflow[i * 2 + 1] = 0 as i8;
         self.bakeFaceCorners(src, i, c.world, di);
         if (!mergeable) {
             self.faces.fcount[c.slot] = (fc + 1) as i16;
@@ -364,9 +341,9 @@ class ChunkMesher : Mesher {
         for (k of 0..4) {
             const b : i32 = (di * 4 + k) * 3;
             // Tangent signs from the corner block offset (0 → -1, 1 → +1).
-            const sx : i32 = self.lcoff[b] * 2 - 1;
-            const sy : i32 = self.lcoff[b + 1] * 2 - 1;
-            const sz : i32 = self.lcoff[b + 2] * 2 - 1;
+            const sx : i32 = self.geom.coff[b] * 2 - 1;
+            const sy : i32 = self.geom.coff[b + 1] * 2 - 1;
+            const sz : i32 = self.geom.coff[b + 2] * 2 - 1;
 
             // The two in-plane neighbour offsets t1, t2 (skip the normal axis).
             let t1x : i32 = 0;
@@ -479,6 +456,142 @@ class ChunkMesher : Mesher {
     }
 
     /**
+     * Stand face `i`'s top corners at one height, its bottom corners on the
+     * cell's floor.
+     * @param i   the face index
+     * @param di  the face direction (0..5)
+     * @param h   the top corners' height in cells (1.0 = the top of the cell)
+     */
+    fn setTops(mut self, i : i32, di : i32, h : f64) : void {
+        const top : i32 = topSteps(h);
+        for (k of 0..4) {
+            const oy : i32 = self.geom.coff[(di * 4 + k) * 3 + 1];
+            self.faces.ftop[i * 4 + k] = (oy * top) as i16;
+        }
+    }
+
+    /**
+     * Emit one face of a water block, with its top corners on the sloped
+     * surface and the flow its texture scrolls along.
+     * @param src  the voxels read
+     * @param c    the water voxel
+     * @param id   its block
+     * @param dir  the face direction
+     */
+    fn addWaterFace(mut self, src : MeshSource, c : MeshCell, id : Block, own dir : FaceDir) : void {
+        const di : i32 = dir as i32;
+        const i : i32 = self.addFace(src, c, dir, tileFor(id, dir));
+        if (i < 0) {
+            return;
+        }
+
+        self.faces.fkind[i] = FaceKind::Water as i8;
+        for (k of 0..4) {
+            const b : i32 = (di * 4 + k) * 3;
+            if (self.geom.coff[b + 1] > 0) {
+                const h : f64 = self.waterCornerY(src, c, self.geom.coff[b], self.geom.coff[b + 2]);
+                self.faces.ftop[i * 4 + k] = topSteps(h) as i16;
+            }
+        }
+
+        // Flowing water scrolls toward the lower level; a still lake has no
+        // gradient, so it does not move.
+        const lpx : i32 = fluidLevel(self.beside(src, stepped(c, 1, 0, 0)));
+        const lnx : i32 = fluidLevel(self.beside(src, stepped(c, -1, 0, 0)));
+        const lpz : i32 = fluidLevel(self.beside(src, stepped(c, 0, 0, 1)));
+        const lnz : i32 = fluidLevel(self.beside(src, stepped(c, 0, 0, -1)));
+        self.faces.fflow[i * 2] = (lpx - lnx) as i8;
+        self.faces.fflow[i * 2 + 1] = (lpz - lnz) as i8;
+    }
+
+    /**
+     * Emit one face of a partial block, its top corners lowered to the box. A
+     * box that fills its cell is a plain quad.
+     * @param src   the voxels read
+     * @param c     the block's voxel
+     * @param id    its block
+     * @param dir   the face direction
+     * @param boxH  the block's box height (1.0 = a full cube)
+     */
+    fn addPartialFace(
+        mut self,
+        src : MeshSource,
+        c : MeshCell,
+        id : Block,
+        own dir : FaceDir,
+        boxH : f64
+    ) : void {
+        const di : i32 = dir as i32;
+        const i : i32 = self.addFace(src, c, dir, tileFor(id, dir));
+        if (i < 0 || boxH >= 1.0) {
+            return;
+        }
+
+        self.faces.fkind[i] = FaceKind::Partial as i8;
+        self.setTops(i, di, boxH);
+    }
+
+    /**
+     * What one column adds to the water corner it meets:
+     *   above 1 → a source, or water under water (a column): the corner stays
+     *             full, so lakes are flat and waterfalls solid;
+     *   0..1    → a flowing surface at level/8, or the lip Water::EDGE_HEIGHT
+     *             for air, so a free edge eases down instead of stepping;
+     *   below 0 → solid: the column has no say.
+     * @param src  the voxels read
+     * @param c    the water voxel the face belongs to
+     * @param dx   the column's x step from it
+     * @param dz   the column's z step from it
+     * @return the column's share, as above
+     */
+    fn cornerColumn(self, src : MeshSource, c : MeshCell, dx : i32, dz : i32) : f64 {
+        const n : MeshCell = stepped(c, dx, 0, dz);
+        const id : Block = self.beside(src, n);
+        if (id == Block::Air) {
+            return Water::EDGE_HEIGHT;
+        }
+        if (!isWater(id)) {
+            return -1.0;
+        }
+        if (isSource(id) || isWater(self.beside(src, stepped(n, 0, 1, 0)))) {
+            return 2.0;
+        }
+        return (fluidLevel(id) as f64) / 8.0;
+    }
+
+    /**
+     * Sloped-surface height at a top corner shared by up to four water columns,
+     * Minecraft-style: full when any of them is a source or a falling column,
+     * otherwise the average of their shares (see `cornerColumn`).
+     * @param src  the voxels read
+     * @param c    the water voxel the face belongs to
+     * @param ox   the corner's x offset in the cell (0 or 1)
+     * @param oz   the corner's z offset in the cell (0 or 1)
+     * @return the corner height fraction (0..1)
+     */
+    fn waterCornerY(self, src : MeshSource, c : MeshCell, ox : i32, oz : i32) : f64 {
+        let sum : f64 = 0.0;
+        let cnt : i32 = 0;
+        for (dz of oz - 1..=oz) {
+            for (dx of ox - 1..=ox) {
+                const share : f64 = self.cornerColumn(src, c, dx, dz);
+                if (share > 1.0) {
+                    return 1.0;
+                }
+                if (share >= 0.0) {
+                    sum += share;
+                    cnt++;
+                }
+            }
+        }
+
+        if (cnt == 0) {
+            return 1.0;
+        }
+        return sum / (cnt as f64);
+    }
+
+    /**
      * Should a partial block of height `myH` emit a side wall toward the neighbour
      * cell? Yes against air or a strictly LOWER partial block; no against a full
      * block or an equal/higher partial (avoids an internal z-fighting grid).
@@ -560,6 +673,7 @@ class ChunkMesher : Mesher {
     fn buildSlot(mut self, src : MeshSource, slot : i32, cx : i32, cz : i32) : void {
         self.faces.fcount[slot] = 0;
         self.torches.tcount[slot] = 0;
+        self.meshGen[slot] += 1;
         const s : i32 = World::CHUNK_SIZE;
         const top : i32 = src.store.faceTop(slot);
         const air : Block = Block::Air;
@@ -614,19 +728,19 @@ class ChunkMesher : Mesher {
         if (isWater(id)) {
             // Water: top surface, plus side walls only where it borders air.
             if (above == air) {
-                self.addFace(src, c, FaceDir::Top, tileFor(id, FaceDir::Top));
+                self.addWaterFace(src, c, id, FaceDir::Top);
             }
             if (self.beside(src, stepped(c, 1, 0, 0)) == air) {
-                self.addFace(src, c, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+                self.addWaterFace(src, c, id, FaceDir::PosX);
             }
             if (self.beside(src, stepped(c, -1, 0, 0)) == air) {
-                self.addFace(src, c, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+                self.addWaterFace(src, c, id, FaceDir::NegX);
             }
             if (self.beside(src, stepped(c, 0, 0, 1)) == air) {
-                self.addFace(src, c, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+                self.addWaterFace(src, c, id, FaceDir::PosZ);
             }
             if (self.beside(src, stepped(c, 0, 0, -1)) == air) {
-                self.addFace(src, c, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+                self.addWaterFace(src, c, id, FaceDir::NegZ);
             }
             return false;
         }
@@ -634,19 +748,21 @@ class ChunkMesher : Mesher {
         if (isPartialShape(id)) {
             // A partial, floor-resting block at its real height. Emit the top, and
             // a side wall toward a neighbour that is air OR a LOWER partial block.
-            self.addFace(src, c, FaceDir::Top, tileFor(id, FaceDir::Top));
-            const myH : f64 = boxOf(id, src.store.getLevel(c.slot, c.local)).yMax;
+            const box = boxOf(id, src.store.getLevel(c.slot, c.local));
+            const myH : f64 = box.yMax;
+            const boxH : f64 = box.height();
+            self.addPartialFace(src, c, id, FaceDir::Top, boxH);
             if (self.partialSideOpen(src, stepped(c, 1, 0, 0), myH)) {
-                self.addFace(src, c, FaceDir::PosX, tileFor(id, FaceDir::PosX));
+                self.addPartialFace(src, c, id, FaceDir::PosX, boxH);
             }
             if (self.partialSideOpen(src, stepped(c, -1, 0, 0), myH)) {
-                self.addFace(src, c, FaceDir::NegX, tileFor(id, FaceDir::NegX));
+                self.addPartialFace(src, c, id, FaceDir::NegX, boxH);
             }
             if (self.partialSideOpen(src, stepped(c, 0, 0, 1), myH)) {
-                self.addFace(src, c, FaceDir::PosZ, tileFor(id, FaceDir::PosZ));
+                self.addPartialFace(src, c, id, FaceDir::PosZ, boxH);
             }
             if (self.partialSideOpen(src, stepped(c, 0, 0, -1), myH)) {
-                self.addFace(src, c, FaceDir::NegZ, tileFor(id, FaceDir::NegZ));
+                self.addPartialFace(src, c, id, FaceDir::NegZ, boxH);
             }
             return false;
         }

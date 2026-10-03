@@ -26,6 +26,12 @@ struct FaceMesh {
                                // does not (Minecraft-style smooth light, per channel)
     pub(crate) fao : i64,      // per-face ambient occlusion: ONE byte/face, two bits
                                // per corner (0..3), corner k at bits 2k..2k+1
+    pub(crate) fkind : i8[],   // FaceKind: solid, water or partial (facegeom)
+    pub(crate) ftop : i16[],   // 4/face: corner k's height above the face's cell,
+                               // in FaceTop::STEPS — 0 or full for a unit quad, the
+                               // sloped water surface, a partial block's box top
+    pub(crate) fflow : i8[],   // 2/face: a water face's flow, the level difference
+                               // across it along x then z (0 for the rest)
 }
 
 /** Per-slot torch posts (drawn as thin columns, not cubes): world x/y/z + count. */
