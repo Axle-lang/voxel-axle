@@ -16,7 +16,7 @@ use smalt::Color;
 use crate::engine::ui::widget::{tintIf};
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::raster::triangle::{
-    rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri,
+    rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri, FlatTri, ScreenVert,
 };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
@@ -282,31 +282,43 @@ class MobView {
             );
         } else {
             const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
+            const v0 : ScreenVert = ScreenVert {
+                sx: sx0,
+                sy: sy0,
+                iz: iz0,
+            };
+            const v2 : ScreenVert = ScreenVert {
+                sx: sx2,
+                sy: sy2,
+                iz: iz2,
+            };
             rasterTri(
                 fb,
-                sx0,
-                sy0,
-                iz0,
-                sx1,
-                sy1,
-                iz1,
-                sx2,
-                sy2,
-                iz2,
-                col
+                FlatTri {
+                    a: v0,
+                    b: ScreenVert {
+                        sx: sx1,
+                        sy: sy1,
+                        iz: iz1,
+                    },
+                    c: v2,
+                    color: col,
+                },
+                scene.fogT
             );
             rasterTri(
                 fb,
-                sx0,
-                sy0,
-                iz0,
-                sx2,
-                sy2,
-                iz2,
-                sx3,
-                sy3,
-                iz3,
-                col
+                FlatTri {
+                    a: v0,
+                    b: v2,
+                    c: ScreenVert {
+                        sx: sx3,
+                        sy: sy3,
+                        iz: iz3,
+                    },
+                    color: col,
+                },
+                scene.fogT
             );
         }
     }

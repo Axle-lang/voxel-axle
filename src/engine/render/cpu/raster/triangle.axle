@@ -10,6 +10,7 @@
 // `shade::facelight`'s, and this file reads the answer rather than forming it.
 
 use smalt::Mem;
+use smalt::Color;
 use crate::engine::math::mathx::clampI32;
 use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
@@ -498,39 +499,43 @@ fn rasterTriTex(
     }
 }
 
+/** One corner of a flat triangle on screen: its position and inverse depth. */
+struct ScreenVert {
+    pub(crate) sx : f64,
+    pub(crate) sy : f64,
+    pub(crate) iz : f64,
+}
+
+/** A flat-colour triangle: three screen corners and the colour it is filled with. */
+struct FlatTri {
+    pub(crate) a : ScreenVert,
+    pub(crate) b : ScreenVert,
+    pub(crate) c : ScreenVert,
+    pub(crate) color : i32,
+}
+
 /**
- * Flat-colour triangle: half-plane inside test with z-buffered fill.
- * @param fb      the render target (framebuffer + z-buffer + size).
- * @param x0      first vertex x.
- * @param y0      first vertex y.
- * @param iz0     first vertex inverse depth.
- * @param x1      second vertex x.
- * @param y1      second vertex y.
- * @param iz1     second vertex inverse depth.
- * @param x2      third vertex x.
- * @param y2      third vertex y.
- * @param iz2     third vertex inverse depth.
- * @param color   fill colour.
+ * Flat-colour triangle: half-plane inside test with z-buffered fill, fogged
+ * toward the sky behind each pixel exactly as the textured fill is — a flat
+ * part of a model (a leg, a beak) left unfogged stays saturated while the
+ * textured body beside it dissolves into the distance.
+ * @param fb    the render target (framebuffer + z-buffer + size)
+ * @param tri   the three corners and the fill colour
+ * @param fogT  the fog: the sky's colour behind each pixel, and its depth curve
  */
-fn rasterTri(fb : FrameBuf,
-    x0 : f64, y0 : f64, iz0 : f64,
-    x1 : f64, y1 : f64, iz1 : f64,
-    x2 : f64, y2 : f64, iz2 : f64,
-    color : i32) : void {
-    const pixels : i64 = fb.pixels;
-    const zbuf : i64 = fb.zbuf;
+fn rasterTri(fb : FrameBuf, tri : FlatTri, fogT : FogTable) : void {
     const w : i32 = fb.w;
     const h : i32 = fb.h;
-    const area : f64 = edge(x0, y0, x1, y1, x2, y2);
+    const area : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
     const inv : f64 = 1.0 / area;
 
-    let minx : i32 = (minf(x0, minf(x1, x2))).floorToInt() as i32;
-    let maxx : i32 = (maxf(x0, maxf(x1, x2))).floorToInt() as i32;
-    let miny : i32 = (minf(y0, minf(y1, y2))).floorToInt() as i32;
-    let maxy : i32 = (maxf(y0, maxf(y1, y2))).floorToInt() as i32;
+    let minx : i32 = (minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let maxx : i32 = (maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let miny : i32 = (minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
+    let maxy : i32 = (maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -546,19 +551,45 @@ fn rasterTri(fb : FrameBuf,
 
     for (py of miny..=maxy) {
         const cy : f64 = (py as f64) + 0.5;
+        const fogRow : FogRow = fogT.rowAt(py);
         for (px of minx..=maxx) {
             const cx : f64 = (px as f64) + 0.5;
-            const b0 : f64 = edge(x1, y1, x2, y2, cx, cy) * inv;
-            const b1 : f64 = edge(x2, y2, x0, y0, cx, cy) * inv;
-            const b2 : f64 = edge(x0, y0, x1, y1, cx, cy) * inv;
+            const b0 : f64 = edge(tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy, cx, cy) * inv;
+            const b1 : f64 = edge(tri.c.sx, tri.c.sy, tri.a.sx, tri.a.sy, cx, cy) * inv;
+            const b2 : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, cx, cy) * inv;
             if (b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0) {
-                const iz : f64 = b0 * iz0 + b1 * iz1 + b2 * iz2;
+                const iz : f64 = b0 * tri.a.iz + b1 * tri.b.iz + b2 * tri.c.iz;
                 const idx : i32 = py * w + px;
-                if (iz > floatOf(zbuf, idx)) {
-                    putFloatOf(zbuf, idx, iz);
-                    Mem::putWordOf(pixels, idx, color);
+                if (iz > floatOf(fb.zbuf, idx)) {
+                    putFloatOf(fb.zbuf, idx, iz);
+                    Mem::putWordOf(fb.pixels, idx, fogged(tri.color, fogT, fogRow, px, iz));
                 }
             }
         }
     }
 }
+
+/**
+ * A display colour dissolved toward the sky behind its pixel by the fog its
+ * depth has accumulated — the same blend the textured fill applies.
+ * @param color   the packed colour
+ * @param fogT    the fog tables
+ * @param fogRow  the pixel's row in the fog grid
+ * @param px      the pixel's column
+ * @param iz      the pixel's inverse depth
+ * @return the fogged colour
+ */
+fn fogged(color : i32, fogT : FogTable, fogRow : FogRow, px : i32, iz : f64) : i32 {
+    const fog : f64 = fogT.amount(1.0 / iz);
+    if (fog <= 0.002) {
+        return color;
+    }
+    const sky : SkyColour = fogT.skyIn(fogRow, px);
+    const keep : f64 = 1.0 - fog;
+    return Color::packBytes(
+        ((Color::red(color) as f64) * keep + sky.r * fog).floorToInt() as i32,
+        ((Color::green(color) as f64) * keep + sky.g * fog).floorToInt() as i32,
+        ((Color::blue(color) as f64) * keep + sky.b * fog).floorToInt() as i32
+    );
+}
+
