@@ -259,7 +259,6 @@ class Creeper : Mob, Hostile {
                         const cell : IVec3 = ivec3(cx + ox, cy + oy, cz + oz);
                         if (query.worldGet(cell) != Block::Air) {
                             edit.breakAt(cell);
-                            edit.lightUpdate(cell);
                             sim.enqueue6(cell);
                         }
                     }

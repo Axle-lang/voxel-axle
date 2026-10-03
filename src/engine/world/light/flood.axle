@@ -169,17 +169,32 @@ class LightFlood {
         if (nibGet(p, off) != v) {
             nibPut(p, off, v);
             self.ldirty[slot] = 1;
-            if (lx == 0) {
-                self.markDirtyAt(cx - 1, cz);
-            }
-            if (lx == s - 1) {
-                self.markDirtyAt(cx + 1, cz);
-            }
-            if (lz == 0) {
-                self.markDirtyAt(cx, cz - 1);
-            }
-            if (lz == s - 1) {
-                self.markDirtyAt(cx, cz + 1);
+            self.markReaders(cx, cz, lx, lz);
+        }
+    }
+
+    /**
+     * Flag the neighbouring chunks whose faces read a cell of chunk (cx, cz):
+     * the one across each edge the cell sits on, and — for a cell in a corner
+     * — the one diagonally across it. A top face's corner averages the cell
+     * one step along BOTH horizontal axes, so the diagonal neighbour reads it
+     * too; flagging only the edges left that corner's light stale.
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     * @param lx  the cell's local x
+     * @param lz  the cell's local z
+     */
+    fn markReaders(mut self, cx : i32, cz : i32, lx : i32, lz : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const xLo : i32 = lx == 0 ? -1 : 0;
+        const xHi : i32 = lx == s - 1 ? 1 : 0;
+        const zLo : i32 = lz == 0 ? -1 : 0;
+        const zHi : i32 = lz == s - 1 ? 1 : 0;
+        for (dz of zLo..=zHi) {
+            for (dx of xLo..=xHi) {
+                if (dx != 0 || dz != 0) {
+                    self.markDirtyAt(cx + dx, cz + dz);
+                }
             }
         }
     }
@@ -472,25 +487,12 @@ class LightFlood {
         self.floodAdd(self.vols.sky());
 
         // A border face is baked from the NEIGHBOUR chunk's light, which didn't
-        // change — re-flag the edited chunk plus any border neighbour so their
-        // shared faces re-bake with the final light.
+        // change — re-flag the edited chunk plus every neighbour that reads
+        // the cell so their shared faces re-bake with the final light.
         const ecs : i32 = World::CHUNK_SIZE;
         const ecx : i32 = self.ring.floorDiv(wx, ecs);
         const ecz : i32 = self.ring.floorDiv(wz, ecs);
-        const elx : i32 = wx - ecx * ecs;
-        const elz : i32 = wz - ecz * ecs;
         self.markDirtyAt(ecx, ecz);
-        if (elx == 0) {
-            self.markDirtyAt(ecx - 1, ecz);
-        }
-        if (elx == ecs - 1) {
-            self.markDirtyAt(ecx + 1, ecz);
-        }
-        if (elz == 0) {
-            self.markDirtyAt(ecx, ecz - 1);
-        }
-        if (elz == ecs - 1) {
-            self.markDirtyAt(ecx, ecz + 1);
-        }
+        self.markReaders(ecx, ecz, wx - ecx * ecs, wz - ecz * ecs);
     }
 }

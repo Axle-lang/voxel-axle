@@ -9,8 +9,8 @@
 //
 //   PROVIDER                 BUNDLE (fine-grained capabilities)
 //   world (ChunkManager) ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
-//                            VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
-//                                          + DayCycle + LightPrime + LightThread
+//                            VoxelEdit   : VoxelWriter + ChunkStreamer + DayCycle
+//                                          + LightPrime + LightThread
 //                            LightSample : BlockLightField + SkyLightField
 //                                          + SunLightField + BounceLightField
 //
@@ -118,10 +118,15 @@ trait VoxelQuery : VoxelReader, CollisionField, Heightfield {
 
 // ─── Voxel write + world lifecycle capabilities ─────────────────────────────
 
-/** Mutate the voxel field (edit / dig / place), re-meshing the touched slots. */
+/**
+ * Mutate the voxel field (edit / dig / place). An edit is complete when the
+ * call returns: the light around the cell is re-flooded and every slot that
+ * sees the cell or the changed light is re-meshed.
+ */
 trait VoxelWriter {
     /**
-     * Write a block id at a world voxel and re-mesh every slot that sees it.
+     * Write a block id at a world voxel, relight around it and re-mesh every
+     * slot that sees the change.
      * @param cell  the world voxel
      * @param id    the block id to write
      */
@@ -139,15 +144,6 @@ trait VoxelWriter {
      * @param block  the block id to place
      */
     fn placeAt(mut self, cell : IVec3, block : Block) : void;
-}
-
-/** Kick a light re-bake around an edited cell. */
-trait LightMutator {
-    /**
-     * Re-bake the light around a cell that has just been edited.
-     * @param cell  the edited world voxel
-     */
-    fn lightUpdate(mut self, cell : IVec3) : void;
 }
 
 /** Drive chunk streaming toward a camera column (budgeted per call). */
@@ -202,7 +198,6 @@ trait LightThread {
 /** Bundle: the full write + world-lifecycle surface the interaction layer drives. */
 trait VoxelEdit :
     VoxelWriter,
-    LightMutator,
     ChunkStreamer,
     DayCycle,
     LightPrime,

@@ -489,12 +489,12 @@ class Game {
     }
 
     /**
-     * After an edit: wakes the block sim around the cell, and relights it.
+     * After an edit: wakes the block sim around the cell. (The edit itself
+     * relit and re-meshed what it touched.)
      * @param cell  the cell that changed
      */
     fn settle(mut self, cell : IVec3) : void {
         self.blocksim.enqueue6(cell);
-        self.man.lightUpdate(cell);
     }
 
     /**

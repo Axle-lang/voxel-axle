@@ -156,7 +156,6 @@ fn findOpenSite(man : ChunkManager) : IVec3 {
  */
 fn checkFalloff(man : ChunkManager, site : IVec3) : i32 {
     man.placeAt(site, Block::Torch);
-    man.lightUpdate(site);
 
     const emit : Emission = emissionOf(Block::Torch);
     Console::println("  torch emits r=${emit.r} g=${emit.g} b=${emit.b}");
@@ -186,7 +185,6 @@ fn checkFalloff(man : ChunkManager, site : IVec3) : i32 {
  */
 fn checkRemoval(man : ChunkManager, site : IVec3) : i32 {
     man.placeAt(site, Block::Air);
-    man.lightUpdate(site);
 
     let bad : i32 = 0;
     for (d of 0..=LIGHT_RUN) {
@@ -242,7 +240,6 @@ fn checkSealedPocket(man : ChunkManager, site : IVec3) : i32 {
     }
 
     man.breakAt(cell);
-    man.lightUpdate(cell);
 
     const sky : i32 = man.skGetW(cell);
     const blk : ChannelLevels = man.blGetW(cell);
@@ -289,12 +286,10 @@ fn checkPluggedTunnel(man : ChunkManager, site : IVec3) : i32 {
     for (d of 0..TUNNEL_DEPTH) {
         const cell : IVec3 = ivec3(site.x, top - d, site.z);
         man.breakAt(cell);
-        man.lightUpdate(cell);
     }
     for (b of 1..=TUNNEL_RUN) {
         const cell : IVec3 = ivec3(site.x + b, floor, site.z);
         man.breakAt(cell);
-        man.lightUpdate(cell);
     }
 
     // The branch has to be lit first, or "it went dark" says nothing.
@@ -307,7 +302,6 @@ fn checkPluggedTunnel(man : ChunkManager, site : IVec3) : i32 {
     Console::println("  tunnel end lit to sky=${before}, plugging the mouth");
 
     man.placeAt(mouth, Block::Stone);
-    man.lightUpdate(mouth);
 
     let bad : i32 = 0;
     for (k of 0..=TUNNEL_RUN) {

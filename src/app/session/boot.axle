@@ -105,7 +105,6 @@ fn plantTorch(man : ChunkManager, p : Player) : void {
     const cell = ivec3(x, man.collisionHeight(x, z), z);
 
     man.placeAt(cell, Block::Torch);
-    man.lightUpdate(cell);
     Console::println("torch at (${cell.x}, ${cell.y}, ${cell.z})");
 }
 

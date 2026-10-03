@@ -361,12 +361,15 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         self.leng.clearLight(slot);
         self.leng.seedSky(slot, cx, cz);
         // Don't mesh here — ensureLoaded meshes in a second pass once every
-        // neighbour is generated. Flag this chunk + its 4 horizontal neighbours.
-        self.leng.markDirty(slot);
-        self.markDirtyAt(cx + 1, cz);
-        self.markDirtyAt(cx - 1, cz);
-        self.markDirtyAt(cx, cz + 1);
-        self.markDirtyAt(cx, cz - 1);
+        // neighbour is generated. Flag this chunk and all eight around it: a
+        // face on a neighbour's border reads this chunk's cells, and a face
+        // on its CORNER reads the cell diagonally across, so the corner
+        // neighbours are owed a re-mesh as much as the edge ones.
+        for (dz of -1..2) {
+            for (dx of -1..2) {
+                self.markDirtyAt(cx + dx, cz + dz);
+            }
+        }
     }
 
     /**
@@ -400,11 +403,17 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     // ── Editing (dig / place) ───────────────────────────────────
 
     /**
-     * Write `id` at a world voxel into the chunk that owns it, then re-mesh
-     * that chunk and every neighbour whose faces look at the cell — the
-     * edge and corner neighbours when the cell sits on a border. The
-     * neighbours read the cell across the border rather than from a copy, so
-     * the write happens once; the re-mesh is what makes them see it.
+     * Write `id` at a world voxel, and bring everything that depends on it up
+     * to date in one pass: the light re-floods around the cell, and every slot
+     * whose faces look at the cell or at the light that changed is re-meshed
+     * once, after both.
+     *
+     * One entry point for every edit — the player's, a falling block's,
+     * flowing water's, an explosion's. It used to re-mesh the neighbours on
+     * the spot (some of them before the write landed) and leave the light to
+     * a separate call the block sim never made, so sand that fell left its
+     * old cell dark and its new one lit, and a player edit meshed its chunks
+     * twice.
      * @param cell  the world voxel
      * @param id    the block id to write
      */
@@ -419,27 +428,30 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
         const s : i32 = World::CHUNK_SIZE;
         const cx : i32 = self.ring.floorDiv(wx, s);
         const cz : i32 = self.ring.floorDiv(wz, s);
+        const owner : i32 = self.ring.slotFor(cx, cz);
+        if (!self.ring.owns(owner, cx, cz)) {
+            return;
+        }
+        let v : Block = id;
+        self.setVoxLocal(owner, ivec3(wx - cx * s, wy, wz - cz * s), v);
+        if (id != Block::Air) {
+            self.bumpFY(owner, wy);
+        }
+
+        // The owner, and every neighbour that reads the cell across a border
+        // — edge and corner neighbours alike.
         for (dcz of -1..2) {
             for (dcx of -1..2) {
-                const ccx : i32 = cx + dcx;
-                const ccz : i32 = cz + dcz;
-                const lx : i32 = wx - ccx * s;
-                const lz : i32 = wz - ccz * s;
+                const lx : i32 = wx - (cx + dcx) * s;
+                const lz : i32 = wz - (cz + dcz) * s;
                 if (lx >= -1 && lx <= s && lz >= -1 && lz <= s) {
-                    const slot : i32 = self.ring.slotFor(ccx, ccz);
-                    if (self.ring.owns(slot, ccx, ccz)) {
-                        if (dcx == 0 && dcz == 0) {
-                            let v : Block = id;
-                            self.setVoxLocal(slot, ivec3(lx, wy, lz), v);
-                            if (id != Block::Air) {
-                                self.bumpFY(slot, wy);
-                            }
-                        }
-                        self.buildMesh(slot, ccx, ccz);
-                    }
+                    self.leng.markDirtyAt(cx + dcx, cz + dcz);
                 }
             }
         }
+
+        self.leng.lightUpdate(cell);
+        self.flushLightMesh();
     }
 
     /**
@@ -460,16 +472,6 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
     }
 
     // ── Light seam + lifecycle (delegated to the LightEngine) ────
-
-    /**
-     * Recompute block + sky light after an edit at a world voxel, then flush the
-     * re-mesh of every slot the light engine flagged.
-     * @param cell the edited world voxel
-     */
-    fn lightUpdate(mut self, cell : IVec3) : void {
-        self.leng.lightUpdate(cell);
-        self.flushLightMesh();
-    }
 
     /**
      * Block light per channel (0..15 each) at a world voxel.
