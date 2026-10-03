@@ -328,6 +328,7 @@ class Game {
             }
         );
         self.backend[0].draw(frame, self.man, self.display.win);
+        self.man.frameDone();
     }
 
     /** `--snap`: once its deadline passes, writes the capture, reports, and quits. */
@@ -350,6 +351,7 @@ class Game {
         Console::println("wrote ${SNAP_PATH}  (${w}x${h} render, ${fps} fps)");
         self.backend[0].report();
         self.frames.report();
+        Console::println("  surface light: ${self.man.surfaceBytes() / 1024} KiB");
     }
 
 

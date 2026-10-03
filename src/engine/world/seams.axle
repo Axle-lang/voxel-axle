@@ -344,6 +344,15 @@ trait ChunkMeshes {
      * @return the slot's mesh generation
      */
     fn meshGen(self, slot : i32) : i32;
+
+    /**
+     * How many times the light a slot's corners sample — sun visibility, sky access,
+     * bounce — has changed, by a new chunk or a bake: a copy of it taken at another
+     * count is stale.
+     * @param slot  the ring slot
+     * @return the slot's light generation
+     */
+    fn lightGen(self, slot : i32) : i32;
 }
 
 /** Bundle: everything a world renderer reads — the mesh, and the light at its corners. */

@@ -20,6 +20,7 @@
 //   --biome-scan           count the biome of a wide grid of columns and exit
 //   --cull-check           run the headless chunk-visibility assertions and exit
 //   --model-check          check every species describes a body, and exit
+//   --surface-check        print digests of the baked sun, sky access and bounce, and exit
 //
 // A reader per flag, each answering with a value rather than setting state.
 // A flag given without the values it needs says so and is ignored — never

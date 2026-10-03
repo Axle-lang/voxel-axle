@@ -76,7 +76,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, TerrainView {
     pub(crate) cols : Shared<ColumnRing>, // per-slot chunk ownership
     pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
     ring : RingView,                 // world cell → slot addressing over the same field
-    pub(crate) leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
+    pub(crate) leng : LightEngine,   // the lighting engine: the light levels and the baked surface light
     gen : dyn Generator[],           // terrain generation seam (concrete impl injected by
                                      // the app), held in a one-slot array: a trait-typed
                                      // field cannot store a class implementer (E0709)
@@ -559,6 +559,15 @@ class ChunkManager : VoxelQuery, VoxelEdit, TerrainView {
         return self.mesher.meshGen[slot];
     }
 
+    /**
+     * How many times the light a slot's corners read has changed.
+     * @param slot  the ring slot
+     * @return the slot's light generation
+     */
+    fn lightGen(self, slot : i32) : i32 {
+        return self.leng.lightGen(slot);
+    }
+
     /** One pass of the whole lighting system (sun shadows + sky-AO / bounce). */
     pub(file) fn stepLight(mut self) : void {
         self.leng.stepBake();
@@ -589,6 +598,24 @@ class ChunkManager : VoxelQuery, VoxelEdit, TerrainView {
     pub(file) fn lightAlive(self) : bool {
         return self.leng.lightAlive();
     }
+
+    /** The light thread is starting, beside the frames that read its bakes. */
+    pub(file) fn lightStarted(mut self) : void {
+        self.leng.lightStarted();
+    }
+
+    /** A frame has been drawn (main thread, after the draw). */
+    pub(crate) fn frameDone(mut self) : void {
+        self.leng.frameDone();
+    }
+
+    /**
+     * The memory the baked surface light holds, for the run's report.
+     * @return its bytes
+     */
+    pub(crate) fn surfaceBytes(self) : i64 {
+        return self.leng.surfaceBytes();
+    }
 }
 
 /**
@@ -600,6 +627,7 @@ class ChunkManager : VoxelQuery, VoxelEdit, TerrainView {
  * @return 0 (Task result unused)
  */
 fn lightLoop(man : ChunkManager) : i32 {
+    man.lightStarted();
     while (man.lightAlive()) {
         man.stepLight();
         sleep(8);

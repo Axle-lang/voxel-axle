@@ -12,8 +12,13 @@
 use smalt::Mem;
 use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::engine::world::ring::{ RingView };
-use crate::engine::world::light::volumes::{ LightVolumes, nibGet };
-use crate::engine::world::light::bake::{ BAKE_WORKERS, BakeQueue, nearSolid, terrainCeil };
+use crate::engine::world::light::volumes::{ LightVolumes };
+use crate::engine::world::light::surface::{
+    SurfaceLight, SurfaceDraft, ShellScan, OPEN_BOUNCE, draftCell, putDraftSky,
+};
+use crate::engine::world::light::bake::{
+    BAKE_WORKERS, BakeQueue, scanShell, inShell, freeScan, terrainCeil,
+};
 use crate::engine::block::blocks::{ lightTransmit, albedoFor };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };
@@ -24,6 +29,12 @@ struct HemiRays {
     hemiX : i64,
     hemiY : i64,
     hemiZ : i64,
+}
+
+/** What a cell's hemisphere came back with: its sky access, and its packed bounce tint. */
+struct SkyCell {
+    access : i32,
+    bounce : i32,
 }
 
 /**
@@ -38,7 +49,8 @@ struct HemiHit {
 
 class SkyAccess {
     ring : RingView,      // this component's view of the world
-    vols : LightVolumes,  // the volumes; it writes `skyaccess` and the bounce tint
+    vols : LightVolumes,  // the sky-light plane, which decides the cells baked
+    surface : Shared<SurfaceLight>, // where the sky access and tint it bakes are kept
     rays : HemiRays,      // M precomputed upper-hemisphere ray directions
     cursor : i32,         // round-robin slot index for the throttled bake
     queue : BakeQueue,    // slots whose sky access is owed a (re)bake
@@ -46,13 +58,15 @@ class SkyAccess {
 
     /**
      * The ray table and the per-slot bookkeeping over a ring of `slots`.
-     * @param ring   a view of the world
-     * @param vols   the ring's light volumes
-     * @param slots  the number of ring slots (span * span)
+     * @param ring     a view of the world
+     * @param vols     the ring's light volumes
+     * @param surface  the ring's surface light, co-owned with the engine
+     * @param slots    the number of ring slots (span * span)
      */
-    constructor(own ring : RingView, vols : LightVolumes, slots : i32) {
+    constructor(own ring : RingView, vols : LightVolumes, own surface : Shared<SurfaceLight>, slots : i32) {
         self.ring = ring;
         self.vols = vols;
+        self.surface = surface;
         self.cursor = 0;
 
         // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish).
@@ -138,71 +152,85 @@ class SkyAccess {
      */
     fn bakeChunk(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
         const s : i32 = World::CHUNK_SIZE;
-        const m : i32 = Light::SKY_AO_SAMPLES;
         let top : i32 = self.ring.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
 
+        const scan : ShellScan = scanShell(self.ring, self.vols.sky(), slot, cx, cz, top);
+        const draft : SurfaceDraft = self.surface.open(slot, scan);
+        let changed : bool = false;
         for (lz of 0..s) {
             for (lx of 0..s) {
                 for (y of 0..=top) {
-                    const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
-                    if (self.ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
-                        && nibGet(self.vols.sky(), off) > 0
-                        && nearSolid(self.ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
-                        const wx : i32 = cx * s + lx;
-                        const wz : i32 = cz * s + lz;
-                        // A ray now comes back with a FRACTION of the sky rather
-                        // than a yes or no, so the escaped share and the bounce
-                        // weight are both sums of what each ray lost, not counts
-                        // of the rays that were stopped.
-                        let esc : f64 = 0.0;
-                        let shut : f64 = 0.0;
-                        let ar : f64 = 0.0;
-                        let ag : f64 = 0.0;
-                        let ab : f64 = 0.0;
-                        for (r of 0..m) {
-                            const dir : Vec3 = vec3(
-                                Mem::realOf(self.rays.hemiX, r),
-                                Mem::realOf(self.rays.hemiY, r),
-                                Mem::realOf(self.rays.hemiZ, r)
-                            );
-                            const hit : HemiHit = self.hemiHit(ivec3(wx, y, wz), dir, ceil);
-                            esc += hit.open;
-                            if (hit.albedo >= 0) {
-                                const w : f64 = 1.0 - hit.open;
-                                ar += w * (((hit.albedo >> 16) & 0xFF) as f64);
-                                ag += w * (((hit.albedo >> 8) & 0xFF) as f64);
-                                ab += w * ((hit.albedo & 0xFF) as f64);
-                                shut += w;
-                            }
-                        }
-
-                        const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
-                        Mem::putByte(self.vols.skyaccess, off, access);
-
-                        if (Light::BOUNCE_ON && shut > 0.001) {
-                            const avr : f64 = ar / shut;
-                            const avg : f64 = ag / shut;
-                            const avb : f64 = ab / shut;
-                            let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
-                            if (lum < 1.0) {
-                                lum = 1.0;
-                            }
-                            const occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
-                            Mem::putByte(self.vols.bnR, off, bounceByte(avr / lum, occ));
-                            Mem::putByte(self.vols.bnG, off, bounceByte(avg / lum, occ));
-                            Mem::putByte(self.vols.bnB, off, bounceByte(avb / lum, occ));
-                        } else {
-                            Mem::putByte(self.vols.bnR, off, 128);
-                            Mem::putByte(self.vols.bnG, off, 128);
-                            Mem::putByte(self.vols.bnB, off, 128);
+                    if (inShell(scan, lx, y, lz)) {
+                        const lit : SkyCell = self.castHemisphere(ivec3(cx * s + lx, y, cz * s + lz), ceil);
+                        if (putDraftSky(draft, draftCell(draft, lx, y, lz), lit.access, lit.bounce)) {
+                            changed = true;
                         }
                     }
                 }
             }
         }
+        self.surface.close(draft, changed);
+        freeScan(scan);
+    }
+
+    /**
+     * Cast the hemisphere from one air cell: the share of the sky that escapes, and
+     * the hue of what dimmed the rest.
+     * @param cell  the world cell
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return its sky access and packed bounce tint
+     */
+    fn castHemisphere(self, cell : IVec3, ceil : i32) : SkyCell {
+        const m : i32 = Light::SKY_AO_SAMPLES;
+        // A ray comes back with a FRACTION of the sky rather than a yes or no, so
+        // the escaped share and the bounce weight are both sums of what each ray
+        // lost, not counts of the rays that were stopped.
+        let esc : f64 = 0.0;
+        let shut : f64 = 0.0;
+        let ar : f64 = 0.0;
+        let ag : f64 = 0.0;
+        let ab : f64 = 0.0;
+        for (r of 0..m) {
+            const dir : Vec3 = vec3(
+                Mem::realOf(self.rays.hemiX, r),
+                Mem::realOf(self.rays.hemiY, r),
+                Mem::realOf(self.rays.hemiZ, r)
+            );
+            const hit : HemiHit = self.hemiHit(cell, dir, ceil);
+            esc += hit.open;
+            if (hit.albedo >= 0) {
+                const w : f64 = 1.0 - hit.open;
+                ar += w * (((hit.albedo >> 16) & 0xFF) as f64);
+                ag += w * (((hit.albedo >> 8) & 0xFF) as f64);
+                ab += w * ((hit.albedo & 0xFF) as f64);
+                shut += w;
+            }
+        }
+
+        const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
+        if (!Light::BOUNCE_ON || shut <= 0.001) {
+            return SkyCell {
+                access,
+                bounce: OPEN_BOUNCE,
+            };
+        }
+        const avr : f64 = ar / shut;
+        const avg : f64 = ag / shut;
+        const avb : f64 = ab / shut;
+        let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
+        if (lum < 1.0) {
+            lum = 1.0;
+        }
+        const occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
+        return SkyCell {
+            access,
+            bounce: (bounceByte(avr / lum, occ) << 16)
+                | (bounceByte(avg / lum, occ) << 8)
+                | bounceByte(avb / lum, occ),
+        };
     }
 
     /**

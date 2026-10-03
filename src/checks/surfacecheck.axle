@@ -1,0 +1,178 @@
+// surfacecheck — what the ray bakes leave for a face to read, printed as digests.
+//
+// Soft sun visibility, sky access and the one-bounce tint are baked on the light
+// thread and read at every face corner, by both renderers. Neither the picture nor
+// the other checks can say whether they are the same after a change to how they are
+// stored, so this does: it lights the reference ring and prints a digest of every
+// cell's three values, then edits the ground, re-bakes, and prints one of the cells
+// the bakes own around the edit — the air that touches a block and sees the sky.
+//
+// `voxel --surface-check` runs it; the output is diffed like the other checks.
+
+use crate::engine::world::chunks::{ ChunkManager };
+use crate::engine::world::seams::{ SlotChunk };
+use crate::engine::entity::player::{ Player };
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::app::session::boot::{ newWorld, placePlayer, momentAt, chunkOf };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/** The pinned captures' column, as the other checks use. */
+const SURFACE_COLUMN_X : i32 = 294456;
+const SURFACE_COLUMN_Z : i32 = 109296;
+
+/** Passes of the bakes after the edit: enough for both queues to drain. */
+const SURFACE_REBAKES : i32 = 6;
+
+/** What a cell nobody baked reads as: full sun, open sky, a neutral tint. */
+const UNBAKED_SUN : i32 = 255;
+const UNBAKED_SKY : i32 = 255;
+const UNBAKED_BOUNCE : i32 = 0x808080;
+
+/** A running digest of the values read, and how many were not open air's. */
+struct Digest {
+    hash : i32 = 0x2C9277B5,
+    cells : i32 = 0,
+    baked : i32 = 0,
+}
+
+/**
+ * Lights the reference ring, digests it, edits it, digests the edit's surroundings.
+ * @return 0: the check prints, and a change shows up in the diff
+ */
+fn runSurfaceCheck() : i32 {
+    let man : ChunkManager = newWorld();
+    let player : Player = placePlayer(man, SURFACE_COLUMN_X, SURFACE_COLUMN_Z);
+    man.setMoment(momentAt(player, 0.42, 0.0));
+    man.primeLight();
+
+    let whole : Digest = Digest { };
+    for (slot of 0..World::SPAN * World::SPAN) {
+        const sc : SlotChunk = man.slotChunk(slot);
+        if (sc.loaded) {
+            whole = digestChunk(man, whole, sc, false);
+        }
+    }
+    printDigest("ring", whole);
+
+    const at : IVec3 = ivec3(
+        player.pos.x.floorToInt() as i32,
+        player.pos.y.floorToInt() as i32,
+        player.pos.z.floorToInt() as i32
+    );
+    editAround(man, at);
+    for (i of 0..SURFACE_REBAKES) {
+        man.primeLight();
+    }
+
+    let edited : Digest = Digest { };
+    const cx : i32 = chunkOf(at.x as f64);
+    const cz : i32 = chunkOf(at.z as f64);
+    for (slot of 0..World::SPAN * World::SPAN) {
+        const sc : SlotChunk = man.slotChunk(slot);
+        if (sc.loaded && (sc.cx - cx).abs() <= 1 && (sc.cz - cz).abs() <= 1) {
+            edited = digestChunk(man, edited, sc, true);
+        }
+    }
+    printDigest("edit", edited);
+    man.stopLight();
+    return 0;
+}
+
+/**
+ * Change the ground near a cell the way a player would: a pillar raised, a pit dug,
+ * a roof laid over open ground.
+ * @param man  the world
+ * @param at   the cell the edits are made around
+ */
+fn editAround(man : ChunkManager, at : IVec3) : void {
+    for (dy of 0..4) {
+        man.placeAt(ivec3(at.x + 3, at.y + dy, at.z), Block::Stone);
+    }
+    for (dx of 0..3) {
+        man.breakAt(ivec3(at.x - 3 + dx, at.y - 1, at.z - 2));
+        man.breakAt(ivec3(at.x - 3 + dx, at.y - 2, at.z - 2));
+    }
+    for (dx of 0..4) {
+        for (dz of 0..4) {
+            man.placeAt(ivec3(at.x + dx, at.y + 4, at.z + 3 + dz), Block::Planks);
+        }
+    }
+}
+
+/**
+ * Fold one chunk's cells into a digest.
+ * @param man        the world
+ * @param d          the digest so far
+ * @param sc         the chunk
+ * @param shellOnly  only the cells the bakes own: air, sky-lit, touching a block
+ * @return the digest with the chunk folded in
+ */
+fn digestChunk(man : ChunkManager, d : Digest, sc : SlotChunk, shellOnly : bool) : Digest {
+    let out : Digest = d;
+    const s : i32 = World::CHUNK_SIZE;
+    for (lz of 0..s) {
+        for (lx of 0..s) {
+            for (y of 0..World::HEIGHT) {
+                const cell : IVec3 = ivec3(sc.cx * s + lx, y, sc.cz * s + lz);
+                if (!shellOnly || isShell(man, cell)) {
+                    out = fold(out, man.sunlitGet(cell), man.skyaccessGet(cell), man.bounceGet(cell));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * Whether a cell is one the bakes write: air, reached by the sky, with a block among
+ * its 26 neighbours.
+ * @param man   the world
+ * @param cell  the world cell
+ * @return true for a baked cell
+ */
+fn isShell(man : ChunkManager, cell : IVec3) : bool {
+    if (man.worldGet(cell) != Block::Air || man.skGetW(cell) == 0) {
+        return false;
+    }
+    for (dz of -1..=1) {
+        for (dy of -1..=1) {
+            for (dx of -1..=1) {
+                if (man.worldGet(ivec3(cell.x + dx, cell.y + dy, cell.z + dz)) != Block::Air) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * One cell's three values into a digest.
+ * @param d       the digest so far
+ * @param sun     its sun visibility
+ * @param sky     its sky access
+ * @param bounce  its packed bounce tint
+ * @return the digest with the cell folded in
+ */
+fn fold(d : Digest, sun : i32, sky : i32, bounce : i32) : Digest {
+    let h : i32 = d.hash;
+    h = (h ^ sun) * 16777619;
+    h = (h ^ sky) * 16777619;
+    h = (h ^ bounce) * 16777619;
+    const open : bool = sun == UNBAKED_SUN && sky == UNBAKED_SKY && bounce == UNBAKED_BOUNCE;
+    return Digest {
+        hash: h,
+        cells: d.cells + 1,
+        baked: d.baked + (open ? 0 : 1),
+    };
+}
+
+/**
+ * One line for a digest.
+ * @param name  what was digested
+ * @param d     the digest
+ */
+fn printDigest(name : string, d : Digest) : void {
+    Console::println("  ${name}: cells=${d.cells} baked=${d.baked} hash=${d.hash}");
+}

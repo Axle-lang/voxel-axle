@@ -1,8 +1,12 @@
 // bake — what the two ray bakes (sun shadows, sky access) share: the crew size,
-// the gate that skips cells no face reads, and the two ring-wide counts.
+// the shell of cells they write (and the gate that finds it), and the two
+// ring-wide counts.
 
+use smalt::Mem;
 use crate::engine::math::vec3::{ ivec3 };
 use crate::engine::world::ring::{ RingView };
+use crate::engine::world::light::volumes::{ Nibble, nibGet };
+use crate::engine::world::light::surface::{ ShellScan, packRun };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -70,6 +74,76 @@ fn nearSolid(
         }
     }
     return false;
+}
+
+/**
+ * The cells of a slot the two bakes write: air, reached by the sky, with a block among
+ * its neighbours (`nearSolid`) — the shell over the terrain every face reads its light
+ * from — up to `top`, as one bit a cell and the run of cells each column keeps.
+ * Released with `freeScan`.
+ * @param ring  the chunk ring
+ * @param sky   the sky-light plane
+ * @param slot  the slot index
+ * @param cx    the chunk x coordinate
+ * @param cz    the chunk z coordinate
+ * @param top   the highest y to look at
+ * @return the scan
+ */
+fn scanShell(ring : RingView, sky : Nibble, slot : i32, cx : i32, cz : i32, top : i32) : ShellScan {
+    const s : i32 = World::CHUNK_SIZE;
+    const bits : i64 = Mem::takeZeroed(((s * s * World::HEIGHT) / 8) as i64);
+    const columns : i64 = Mem::take(((s * s) as i64) * 4);
+    let cells : i32 = 0;
+    for (lz of 0..s) {
+        for (lx of 0..s) {
+            const column : i32 = lz * s + lx;
+            let first : i32 = 0 - 1;
+            let last : i32 = 0 - 1;
+            for (y of 0..=top) {
+                const off : i64 = ring.store.voxIdx(slot, lx, y, lz) as i64;
+                if (ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
+                    && nibGet(sky, off) > 0
+                    && nearSolid(ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                    const bit : i32 = column * World::HEIGHT + y;
+                    Mem::putByte(bits, (bit >> 3) as i64, Mem::byteAt(bits, (bit >> 3) as i64) | (1 << (bit & 7)));
+                    if (first < 0) {
+                        first = y;
+                    }
+                    last = y;
+                }
+            }
+            const length : i32 = first < 0 ? 0 : last - first + 1;
+            Mem::putWordOf(columns, column as i64, packRun(first.max(0), length, cells));
+            cells += length;
+        }
+    }
+    return ShellScan {
+        bits,
+        columns,
+        cells,
+    };
+}
+
+/**
+ * Whether a scan holds a cell.
+ * @param scan  the scan
+ * @param lx    local x
+ * @param y     the world y
+ * @param lz    local z
+ * @return true for a shell cell
+ */
+fn inShell(scan : ShellScan, lx : i32, y : i32, lz : i32) : bool {
+    const bit : i32 = (lz * World::CHUNK_SIZE + lx) * World::HEIGHT + y;
+    return ((Mem::byteAt(scan.bits, (bit >> 3) as i64) >> (bit & 7)) & 1) != 0;
+}
+
+/**
+ * Give a scan's memory back.
+ * @param scan  the scan
+ */
+fn freeScan(scan : ShellScan) : void {
+    Mem::release(scan.bits);
+    Mem::release(scan.columns);
 }
 
 /**

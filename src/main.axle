@@ -29,6 +29,7 @@ use crate::checks::biomecheck::runBiomeScan;
 use crate::checks::cullcheck::runCullCheck;
 use crate::checks::modelcheck::runModelCheck;
 use crate::checks::framecheck::runFrameCheck;
+use crate::checks::surfacecheck::runSurfaceCheck;
 
 /**
  * Runs a headless check when one is asked for, the game otherwise.
@@ -46,7 +47,9 @@ use crate::checks::framecheck::runFrameCheck;
  * - `--model-check` asks every species for its body through the render seam —
  *   a lost override renders as nothing, not as an error;
  * - `--frame-check` prints what a swept set of frames contains, as every
- *   backend receives it — what is drawn changes here first, once.
+ *   backend receives it — what is drawn changes here first, once;
+ * - `--surface-check` digests the sun, sky access and bounce every face reads —
+ *   how they are stored cannot be seen, only whether they changed.
  * @return the process exit code: 0 on success, the failure count for a check
  */
 fn main() : i32 {
@@ -67,6 +70,9 @@ fn main() : i32 {
     }
     if (hasFlag("--frame-check")) {
         return runFrameCheck();
+    }
+    if (hasFlag("--surface-check")) {
+        return runSurfaceCheck();
     }
 
     try {

@@ -1,29 +1,29 @@
-// engine — the voxel lighting engine: the volumes, the flood, the two ray
-// bakes, and the read seam the mesher and the renderer sample.
+// engine — the voxel lighting engine: the levels, the flood, the two ray bakes,
+// the surface they bake into, and the read seam the mesher and the renderer sample.
 //
-//   volumes     the seven per-voxel byte volumes (value struct of addresses)
-//   flood       block light per channel + sky light, re-flooded on every edit
+//   volumes     block light per channel + sky light, per voxel (value struct of addresses)
+//   flood       those levels, re-flooded on every edit
+//   surface     sun visibility, sky access and the bounce tint, kept at the surface
 //   sun         soft directional shadows, baked by rays on the light thread
 //   skyaccess   hemispherical sky access + one-bounce tint, same thread
-//   sample      reading it all back, per cell or per face corner
+//   sample      reading the surface back, per cell or per face corner
 //
 // Each component holds its own `RingView` over the voxel field and the ring,
 // both co-owned with the manager, so the light thread reaches the live world
-// with no copy; and each holds the same `LightVolumes` value, so none of them
-// owns the memory more than another. `ChunkManager` composes one of these and
-// delegates its light seams to it.
+// with no copy; each holds the same `LightVolumes` value, and the bakes co-own
+// the one `SurfaceLight`. `ChunkManager` composes one of these and delegates its
+// light seams to it.
 
 use crate::engine::math::vec3::{ IVec3, vec3 };
 use crate::engine::world::voxstore::{ VoxStore, VoxData };
 use crate::engine::world::mesh::meshbuf::{ ColumnRing };
 use crate::engine::world::ring::{ RingView };
 use crate::engine::world::light::volumes::{ LightVolumes, newVolumes, clearVolumes };
+use crate::engine::world::light::surface::{ SurfaceLight };
 use crate::engine::world::light::flood::{ LightFlood, levelAt, channelsAt };
 use crate::engine::world::light::sun::{ SunShadows };
 use crate::engine::world::light::skyaccess::{ SkyAccess };
-use crate::engine::world::light::sample::{
-    sunlitAt, skyAccessAt, bounceAt, cornerAverage,
-};
+use crate::engine::world::light::sample::{ cellSample, cornerAverage };
 use crate::engine::world::seams::{
     LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels,
 };
@@ -47,7 +47,8 @@ trait LightBaker {
 
 class LightEngine : LightSample, LightBaker {
     ring : RingView,              // this engine's view of the world, for the reads
-    vols : LightVolumes,          // the per-voxel light volumes
+    vols : LightVolumes,          // the per-voxel light levels
+    surface : Shared<SurfaceLight>, // what the ray bakes leave at the surface
     flood : LightFlood,           // block + sky light, and the re-mesh flags
     sun : SunShadows,             // the directional shadow bake
     sky : SkyAccess,              // the sky-access / bounce bake
@@ -64,10 +65,12 @@ class LightEngine : LightSample, LightBaker {
      */
     constructor(own field : Shared<VoxData>, own cols : Shared<ColumnRing>, slots : i32) {
         self.vols = newVolumes(slots);
+        const surface : Shared<SurfaceLight> = new shared SurfaceLight(slots);
+        self.surface = surface;
         self.ring = new RingView(new VoxStore(field), cols);
         self.flood = new LightFlood(new RingView(new VoxStore(field), cols), self.vols, slots);
-        self.sun = new SunShadows(new RingView(new VoxStore(field), cols), self.vols, slots);
-        self.sky = new SkyAccess(new RingView(new VoxStore(field), cols), self.vols, slots);
+        self.sun = new SunShadows(new RingView(new VoxStore(field), cols), self.vols, surface, slots);
+        self.sky = new SkyAccess(new RingView(new VoxStore(field), cols), self.vols, surface, slots);
         self.moment = LightMoment {
             dayTime: Daylight::START,
             seconds: 0.0,
@@ -154,6 +157,7 @@ class LightEngine : LightSample, LightBaker {
      */
     pub(crate) fn clearLight(mut self, slot : i32) : void {
         clearVolumes(self.vols, slot);
+        self.surface.clear(slot);
         self.sky.markDirty(slot);
         self.sun.markDirty(slot);
     }
@@ -202,7 +206,7 @@ class LightEngine : LightSample, LightBaker {
      * @return soft sun visibility 0..255
      */
     fn sunlitGet(self, cell : IVec3) : i32 {
-        return sunlitAt(self.ring, self.vols, cell);
+        return cellSample(self.ring, self.surface, cell).sun;
     }
 
     /**
@@ -211,7 +215,7 @@ class LightEngine : LightSample, LightBaker {
      * @return the sky access 0..255
      */
     fn skyaccessGet(self, cell : IVec3) : i32 {
-        return skyAccessAt(self.ring, self.vols, cell);
+        return cellSample(self.ring, self.surface, cell).sky;
     }
 
     /**
@@ -220,7 +224,7 @@ class LightEngine : LightSample, LightBaker {
      * @return the packed bounce tint (0xRRGGBB)
      */
     fn bounceGet(self, cell : IVec3) : i32 {
-        return bounceAt(self.ring, self.vols, cell);
+        return cellSample(self.ring, self.surface, cell).bounce;
     }
 
     /**
@@ -229,7 +233,7 @@ class LightEngine : LightSample, LightBaker {
      * @return the averaged sample at that corner
      */
     fn cornerSample(self, probe : CornerProbe) : CornerSample {
-        return cornerAverage(self.ring, self.vols, probe);
+        return cornerAverage(self.ring, self.surface, probe);
     }
 
     // ── The light thread ────────────────────────────────────────
@@ -305,6 +309,29 @@ class LightEngine : LightSample, LightBaker {
         return self.moment;
     }
 
+    /**
+     * How many times a slot's sun visibility, sky access and bounce have been rebaked:
+     * a renderer that keeps its own copy of them re-reads the slot when this moves.
+     * @param slot  the ring slot
+     * @return the slot's light generation
+     */
+    pub(crate) fn lightGen(self, slot : i32) : i32 {
+        return self.surface.generation(slot);
+    }
+
+    /** A frame has been drawn: the surface tables it could have read are safe to free. */
+    pub(crate) fn frameDone(mut self) : void {
+        self.surface.frameDone();
+    }
+
+    /**
+     * The memory the surface light holds.
+     * @return its bytes
+     */
+    pub(crate) fn surfaceBytes(self) : i64 {
+        return self.surface.bytesInUse();
+    }
+
     /** Tell the background light thread to stop (call before joining it). */
     pub(crate) fn stopLight(mut self) : void {
         self.lightRunning.set(false);
@@ -316,5 +343,13 @@ class LightEngine : LightSample, LightBaker {
      */
     pub(crate) fn lightAlive(self) : bool {
         return self.lightRunning.get();
+    }
+
+    /**
+     * The light thread is starting: from now on the bakes run while frames read
+     * (light thread, before its first bake).
+     */
+    pub(crate) fn lightStarted(mut self) : void {
+        self.surface.shareWithReaders();
     }
 }

@@ -1,4 +1,4 @@
-// sun — soft directional shadows: per-voxel sun visibility, baked by rays.
+// sun — soft directional shadows: sun visibility at the surface, baked by rays.
 //
 // Every sky-lit air cell that a face can read casts a small fan of rays over the
 // sun's disc and stores the share of the sun that gets through — walls stop a
@@ -12,8 +12,13 @@ use smalt::Mem;
 use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::engine::world::ring::{ RingView };
-use crate::engine::world::light::volumes::{ LightVolumes, nibGet };
-use crate::engine::world::light::bake::{ BAKE_WORKERS, BakeQueue, nearSolid, terrainCeil };
+use crate::engine::world::light::volumes::{ LightVolumes };
+use crate::engine::world::light::surface::{
+    SurfaceLight, SurfaceDraft, ShellScan, draftCell, draftSun, putDraftSun,
+};
+use crate::engine::world::light::bake::{
+    BAKE_WORKERS, BakeQueue, scanShell, inShell, freeScan, terrainCeil,
+};
 use crate::engine::block::blocks::{ lightTransmit };
 use crate::engine::shade::daymodel::{ SkyBodyLight, activeBody };
 use crate::engine::sky::cloud::{ CloudField };
@@ -24,7 +29,8 @@ use crate::configs::world::{ World };
 
 class SunShadows {
     ring : RingView,         // this component's view of the world
-    vols : LightVolumes,     // the volumes; it writes `sunlit`
+    vols : LightVolumes,     // the sky-light plane, which decides the cells baked
+    surface : Shared<SurfaceLight>, // where the sun visibility it bakes is kept
     cursor : i32,            // round-robin slot index for the throttled refresh
     queue : BakeQueue,       // slots owed a fresh bake — a slot owed one jumps the
                              // round-robin queue, so a chunk arrives WITH its
@@ -40,13 +46,15 @@ class SunShadows {
 
     /**
      * The bake's bookkeeping over a ring of `slots`.
-     * @param ring   a view of the world
-     * @param vols   the ring's light volumes
-     * @param slots  the number of ring slots (span * span)
+     * @param ring     a view of the world
+     * @param vols     the ring's light volumes
+     * @param surface  the ring's surface light, co-owned with the engine
+     * @param slots    the number of ring slots (span * span)
      */
-    constructor(own ring : RingView, vols : LightVolumes, slots : i32) {
+    constructor(own ring : RingView, vols : LightVolumes, own surface : Shared<SurfaceLight>, slots : i32) {
         self.ring = ring;
         self.vols = vols;
+        self.surface = surface;
         self.cursor = 0;
         self.queue = new BakeQueue(slots);
         self.baked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
@@ -251,6 +259,9 @@ class SunShadows {
             top = World::HEIGHT - 1;
         }
 
+        const scan : ShellScan = scanShell(self.ring, self.vols.sky(), slot, cx, cz, top);
+        const draft : SurfaceDraft = self.surface.open(slot, scan);
+        let changed : bool = false;
         for (lz of 0..s) {
             for (lx of 0..s) {
                 // What the cloud deck leaves of the sun over this column. Once
@@ -261,21 +272,22 @@ class SunShadows {
                     (cz * s + lz) as f64
                 );
                 for (y of 0..=top) {
-                    const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
-                    if (self.ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
-                        && nibGet(self.vols.sky(), off) > 0
-                        && nearSolid(self.ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
-                        const cell : IVec3 = ivec3(cx * s + lx, y, cz * s + lz);
-                        const soft : i32 = self.raySoft(cell, sun, ceil);
+                    if (inShell(scan, lx, y, lz)) {
+                        const at : i64 = draftCell(draft, lx, y, lz);
+                        const soft : i32 = self.raySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil);
                         let v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
                         if (!snap) {
-                            v = glideTo(Mem::byteAt(self.vols.sunlit, off), v);
+                            v = glideTo(draftSun(draft, at), v);
                         }
-                        Mem::putByte(self.vols.sunlit, off, v);
+                        if (putDraftSun(draft, at, v)) {
+                            changed = true;
+                        }
                     }
                 }
             }
         }
+        self.surface.close(draft, changed);
+        freeScan(scan);
     }
 
     /**
