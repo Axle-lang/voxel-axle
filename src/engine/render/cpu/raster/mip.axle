@@ -1,0 +1,211 @@
+// mip — the texture atlas as a mip chain, built in linear light, and the
+// bilinear tap the triangle sampler reads it through.
+
+use smalt::Mem;
+use smalt::Color;
+use crate::engine::math::mathx::clampI32;
+use crate::engine::shade::gamma::{ Gamma, LinRgb, linearToSrgb };
+use crate::configs::atlas::{ Atlas };
+
+/**
+ * Average one channel across four texels (a 2×2 box, for mip downscaling),
+ * IN LINEAR LIGHT: the four bytes are decoded, averaged as light, and encoded
+ * back. Averaging the bytes themselves darkens every level of the chain,
+ * because the midpoint of two sRGB codes is far below the midpoint of the
+ * light they stand for.
+ * @param gam    the colour space to decode / encode through.
+ * @param a      first texel.
+ * @param b      second texel.
+ * @param c      third texel.
+ * @param d      fourth texel.
+ * @param shift  the channel's bit shift.
+ * @return the averaged channel value in 0..255.
+ */
+fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
+    const sum : f64 = gam.decode(a, shift)
+        + gam.decode(b, shift)
+        + gam.decode(c, shift)
+        + gam.decode(d, shift);
+    return (linearToSrgb(sum * 0.25) * 255.0 + 0.5).floorToInt() as i32;
+}
+
+/**
+ * Texel offset where mip `level` starts in the mip chain (level 0 is the
+ * full-resolution atlas; each level halves the tile size).
+ * @param level  the mip level.
+ * @return the starting texel offset.
+ */
+fn mipLevelOffset(level : i32) : i32 {
+    let off : i32 = 0;
+    let sz : i32 = Atlas::TILE_PX;
+    for (l of 0..level) {
+        off += Atlas::TILE_COUNT * sz * sz;
+        sz /= 2;
+    }
+    return off;
+}
+
+/**
+ * Tile side length (texels) at mip `level`.
+ * @param level  the mip level.
+ * @return the tile side length in texels.
+ */
+fn mipLevelSize(level : i32) : i32 {
+    let sz : i32 = Atlas::TILE_PX;
+    for (l of 0..level) {
+        sz /= 2;
+    }
+    return sz;
+}
+
+/**
+ * Total texel count of the whole mip chain (for allocation).
+ * @return the total texel count.
+ */
+fn mipChainTexels() : i32 {
+    return mipLevelOffset(Atlas::MIP_LEVELS);
+}
+
+/**
+ * Build the mip chain into `mips` from the level-0 `atlas`: level 0 is a
+ * copy, each finer level a 2×2 box-filtered downsample of the previous.
+ * Pre-averaging the texels is what stops distant textures from shimmering
+ * as the camera moves (Minecraft-style mipmapping). The downsample averages
+ * LINEAR light, so a shrinking texture keeps its brightness instead of sinking
+ * a little darker at every level.
+ * @param atlas  the level-0 texture atlas.
+ * @param mips   the destination mip chain buffer.
+ * @param gam    the colour space the box filter averages through.
+ */
+fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
+    const n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
+    for (i of 0..n0) {
+        Mem::putWordOf(mips, i, Mem::dwordAt(atlas, (i as i64) * 4));
+    }
+
+    let sz : i32 = Atlas::TILE_PX / 2;
+    let psz : i32 = Atlas::TILE_PX;
+    for (level of 1..Atlas::MIP_LEVELS) {
+        const base : i32 = mipLevelOffset(level);
+        const pbase : i32 = mipLevelOffset(level - 1);
+        for (t of 0..Atlas::TILE_COUNT) {
+            for (ty of 0..sz) {
+                for (tx of 0..sz) {
+                    const i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
+                    const i01 : i32 = i00 + 1;
+                    const i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
+                    const i11 : i32 = i10 + 1;
+                    const c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
+                    const c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
+                    const c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
+                    const c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
+                    const rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
+                    const gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
+                    const bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
+                    Mem::putWordOf(
+                        mips,
+                        base + (t * sz + ty) * sz + tx,
+                        Color::packBytes(rr, gg, bb)
+                    );
+                }
+            }
+        }
+        psz = sz;
+        sz /= 2;
+    }
+}
+
+/** The texture atlas mip chain: base buffer + per-level offset / size tables. */
+struct MipAtlas {
+    pub(crate) mips : i64,
+    pub(crate) mipOff : i64,
+    pub(crate) mipSz : i64,
+}
+
+/**
+ * Texture-atlas capability: hand out the mip-chain view (buffer + per-level
+ * offset / size tables) the rasteriser samples. The owner (TextureAtlas) builds
+ * and holds the chain; consumers (the world raster, the mob pass) take a
+ * `MipAtlas` snapshot through this seam instead of reaching at the raw pointers.
+ */
+trait MipSource {
+    /**
+     * The mip chain, as the rasteriser samples it.
+     * @return the chain's buffer and its per-level offset and size tables
+     */
+    fn mip(self) : MipAtlas;
+}
+
+/**
+ * One mip level of one tile, as the sampler addresses it: the chain, where the
+ * level starts in it, how wide the level's tiles are, and the texel row this
+ * tile begins at. The magnified and the minified paths differ in WHICH level
+ * they read and in how they arrive at their texel coordinates — not in how a
+ * tap is fetched — so they share one shape and one fetch.
+ */
+struct TileLevel {
+    mips : i64,
+    base : i32,
+    size : i32,
+    row : i32,
+}
+
+/**
+ * One bilinear tap, in linear light: the 2×2 texels around (fu, fv) weighted by
+ * the fractional part. Coordinates are in the LEVEL's texel space, already
+ * shifted by the half-texel the box centre needs.
+ * @param lvl   the mip level of the tile to read
+ * @param fu    texel-space u within the tile
+ * @param fv    texel-space v within the tile
+ * @param wrap  wrap within the tile (scrolled water) vs clamp
+ * @param gam   the colour space to decode through
+ * @return the weighted sample, as linear light
+ */
+fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : LinRgb {
+    const tmax : i32 = lvl.size - 1;
+    let tx0 : i32 = fu.floorToInt() as i32;
+    let ty0 : i32 = fv.floorToInt() as i32;
+    const fx : f64 = fu - (tx0 as f64);
+    const fy : f64 = fv - (ty0 as f64);
+    let tx1 : i32 = tx0 + 1;
+    let ty1 : i32 = ty0 + 1;
+    if (wrap) {
+        tx0 &= tmax;
+        tx1 &= tmax;
+        ty0 &= tmax;
+        ty1 &= tmax;
+    } else {
+        tx0 = clampI32(tx0, 0, tmax);
+        tx1 = clampI32(tx1, 0, tmax);
+        ty0 = clampI32(ty0, 0, tmax);
+        ty1 = clampI32(ty1, 0, tmax);
+    }
+
+    const rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
+    const rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
+    const c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
+    const c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
+    const c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
+    const c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
+
+    const mfx : f64 = 1.0 - fx;
+    const mfy : f64 = 1.0 - fy;
+    const w00 : f64 = mfx * mfy;
+    const w10 : f64 = fx * mfy;
+    const w01 : f64 = mfx * fy;
+    const w11 : f64 = fx * fy;
+    return LinRgb {
+        r: gam.decode(c00, 16) * w00
+            + gam.decode(c10, 16) * w10
+            + gam.decode(c01, 16) * w01
+            + gam.decode(c11, 16) * w11,
+        g: gam.decode(c00, 8) * w00
+            + gam.decode(c10, 8) * w10
+            + gam.decode(c01, 8) * w01
+            + gam.decode(c11, 8) * w11,
+        b: gam.decode(c00, 0) * w00
+            + gam.decode(c10, 0) * w10
+            + gam.decode(c01, 0) * w01
+            + gam.decode(c11, 0) * w11,
+    };
+}

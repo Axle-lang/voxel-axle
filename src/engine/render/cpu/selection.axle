@@ -10,7 +10,8 @@
 use smalt::Mem;
 use smalt::Color;
 use crate::engine::math::narrow::{ floatOf };
-use crate::engine::render::cpu::raster::{ FrameBuf, Camera, Lens, Projected };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
+use crate::engine::render::view::camera::{ Camera, Lens, Projected };
 use crate::engine::math::vec3::{ Vec3, vec3 };
 use crate::engine::entity::player::Player;
 use crate::configs::screen::{ Screen };

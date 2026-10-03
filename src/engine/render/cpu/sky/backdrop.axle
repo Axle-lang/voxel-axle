@@ -21,7 +21,8 @@ use crate::engine::sky::atmosphere::{
     SkyColour, SkyDome, ViewRays, ViewRow, packSky
 };
 use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSample };
-use crate::engine::render::cpu::raster::{ FrameBuf, Camera, Lens, Projected };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
+use crate::engine::render::view::camera::{ Camera, Lens, Projected };
 use crate::engine::entity::player::Player;
 use crate::engine::math::vec3::{ Vec3, vec3 };
 

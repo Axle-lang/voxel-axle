@@ -6,7 +6,7 @@
 // rather than reaching at the raw pointers.
 
 use smalt::Mem;
-use crate::engine::render::cpu::raster::{
+use crate::engine::render::cpu::raster::mip::{
     buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, MipAtlas, MipSource,
 };
 use crate::engine::shade::gamma::{ Gamma };

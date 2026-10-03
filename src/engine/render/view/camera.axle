@@ -1,0 +1,211 @@
+// camera — where a frame is seen from, and how a point reaches the screen.
+//
+// Backend-neutral: the eye and its look trig, the lens a framebuffer of a given
+// size is drawn through, and the one projection every pass shares. Nothing here
+// fills a pixel, so a GPU backend builds its view and projection from the same
+// `Camera` the software rasteriser projects through.
+
+use crate::engine::math::vec3::{ Vec3 };
+use crate::configs::screen::{ Screen };
+
+/**
+ * A projected point: screen position (sx, sy), inverse depth (iz, = 1/depth)
+ * and the raw camera-space depth (cz) callers near-plane test against. The one
+ * result shape every projection returns, so the yaw/pitch/focal transform lives
+ * in a single place (Camera) instead of being re-derived per pass.
+ */
+struct Projected {
+    pub(crate) sx : f64,
+    pub(crate) sy : f64,
+    pub(crate) iz : f64,
+    pub(crate) cz : f64,
+}
+
+/**
+ * The camera transform capability: world → camera space, camera space → screen,
+ * and the two composed forms (a finite world point, and an infinitely-far
+ * direction for sky bodies). Unifies the yaw/pitch/focal projection that the
+ * world faces, mobs, the selection box and the sky discs each used to open-code.
+ */
+trait Projector {
+    /**
+     * Moves a world point into camera space (eye at the origin, looking down +z).
+     * @param world  the point, in world space
+     * @return the point, in camera space
+     */
+    fn toCamera(self, world : Vec3) : Vec3;
+
+    /**
+     * Projects a camera-space point onto the screen.
+     * @param cam  the point, in camera space
+     * @return its screen position and depth
+     */
+    fn screenOf(self, cam : Vec3) : Projected;
+
+    /**
+     * Projects a world point onto the screen: `toCamera`, then `screenOf`.
+     * @param world  the point, in world space
+     * @return its screen position and depth
+     */
+    fn project(self, world : Vec3) : Projected;
+
+    /**
+     * Projects a direction as a point infinitely far away — where a sky body
+     * along it appears, whatever the eye's position.
+     * @param dir  the direction, in world space
+     * @return its screen position
+     */
+    fn projectDir(self, dir : Vec3) : Projected;
+}
+
+/**
+ * The lens the frame is drawn through: where the projection centre sits on the
+ * framebuffer, and how many pixels away the film is.
+ *
+ * All three follow the framebuffer, which is why they travel together and are
+ * not constants. `focal` is derived once per resize from a fixed VERTICAL field
+ * of view (`Screen::FOV_V_DEG`), so the world keeps its scale at any resolution
+ * and the horizontal angle widens with the window instead of the image being
+ * magnified — which is what a fixed focal length in pixels does.
+ */
+struct Lens {
+    pub(crate) hw : f64,     // horizontal projection centre = renderW / 2
+    pub(crate) hh : f64,     // vertical projection centre   = renderH / 2
+    pub(crate) focal : f64,  // pixels per world unit at unit depth
+}
+
+/**
+ * The lens for a framebuffer of this size, at the configured vertical FOV.
+ * @param renderW  framebuffer width in pixels
+ * @param renderH  framebuffer height in pixels
+ * @return the projection centre and focal length to draw it with
+ */
+fn lensFor(renderW : i32, renderH : i32) : Lens {
+    const hh : f64 = (renderH as f64) * 0.5;
+    const half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
+    let t : f64 = half.tan();
+    if (t < 0.0001) {
+        t = 0.0001;
+    }
+    return Lens {
+        hw: (renderW as f64) * 0.5,
+        hh,
+        focal: hh / t,
+    };
+}
+
+/** The framebuffer size one frame is rasterised at. */
+struct Viewport {
+    pub(crate) w : i32,
+    pub(crate) h : i32,
+}
+
+/**
+ * The framebuffer to draw a window of this size into: the window's own shape,
+ * scaled down only as far as `Screen::MAX_RENDER_PIXELS` demands.
+ *
+ * It never scales UP, so the blit only ever shrinks an image and a small window
+ * costs what it looks like. What it does not do any more is pin the height:
+ * that is what turned fullscreen into a zoom, since the same rows were simply
+ * spread over a larger screen.
+ * @param winW  the window's width in pixels
+ * @param winH  the window's height in pixels
+ * @return the framebuffer size to render at
+ */
+fn viewportFor(winW : i32, winH : i32) : Viewport {
+    let w : i32 = winW;
+    let h : i32 = winH;
+    const px : i64 = (w as i64) * (h as i64);
+    const cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
+    if (px > cap) {
+        const k : f64 = ((cap as f64) / (px as f64)).sqrt();
+        w = ((w as f64) * k).floorToInt() as i32;
+        h = ((h as f64) * k).floorToInt() as i32;
+    }
+
+    if (w < Screen::MIN_RENDER_W) {
+        w = Screen::MIN_RENDER_W;
+    }
+    if (h < Screen::MIN_RENDER_H) {
+        h = Screen::MIN_RENDER_H;
+    }
+    return Viewport { w, h };
+}
+
+/**
+ * The one camera: eye position, cached look trig (yaw cos/sin, pitch cos/sin)
+ * and the lens. A value struct built per frame from the Player; every render
+ * pass projects through it so there is a single copy of the transform.
+ */
+struct Camera : Projector {
+    pub(crate) eye : Vec3,
+    cosy : f64,
+    siny : f64,
+    cosp : f64,
+    sinp : f64,
+    pub(crate) lens : Lens,
+
+    /**
+     * Rotate a world point into camera space (post yaw + pitch): x = right,
+     * y = up, z = forward depth. No perspective divide (near-clip happens on
+     * the camera-space polygon first).
+     * @param world  the world-space point
+     * @return the camera-space point (x, y, depth)
+     */
+    pub(crate) fn toCamera(self, world : Vec3) : Vec3 {
+        const dx : f64 = world.x - self.eye.x;
+        const dy : f64 = world.y - self.eye.y;
+        const dz : f64 = world.z - self.eye.z;
+        const rx : f64 = dx * self.cosy + dz * self.siny;
+        const rz : f64 = (0.0 - dx) * self.siny + dz * self.cosy;
+        return Vec3 {
+            x: rx,
+            y: dy * self.cosp - rz * self.sinp,
+            z: dy * self.sinp + rz * self.cosp,
+        };
+    }
+
+    /**
+     * Perspective-divide a camera-space point to screen + inverse depth. Callers
+     * that clipped in camera space feed the surviving vertices back through here.
+     * @param cam  the camera-space point (x, y, depth)
+     * @return the projected screen point
+     */
+    pub(crate) fn screenOf(self, cam : Vec3) : Projected {
+        return Projected {
+            sx: self.lens.hw + self.lens.focal * cam.x / cam.z,
+            sy: self.lens.hh - self.lens.focal * cam.y / cam.z,
+            iz: 1.0 / cam.z,
+            cz: cam.z,
+        };
+    }
+
+    /**
+     * Full projection of a finite world point (rotate + divide). The result's
+     * `cz` lets the caller apply its own near-plane rule.
+     * @param world  the world-space point
+     * @return the projected screen point
+     */
+    pub(crate) fn project(self, world : Vec3) : Projected {
+        return self.screenOf(self.toCamera(world));
+    }
+
+    /**
+     * Project a direction at infinity (a sky body / the sun): rotate only, no
+     * eye translation. `cz` < a small epsilon means it is behind the camera.
+     * @param dir  the sky direction (need not be unit)
+     * @return the projected screen point
+     */
+    pub(crate) fn projectDir(self, dir : Vec3) : Projected {
+        const rx : f64 = dir.x * self.cosy + dir.z * self.siny;
+        const rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
+        const ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
+        const rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
+        return Projected {
+            sx: self.lens.hw + self.lens.focal * rx / rz2,
+            sy: self.lens.hh - self.lens.focal * ry2 / rz2,
+            iz: 1.0 / rz2,
+            cz: rz2,
+        };
+    }
+}

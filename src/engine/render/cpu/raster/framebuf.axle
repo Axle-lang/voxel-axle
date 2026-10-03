@@ -1,0 +1,73 @@
+// framebuf — the software render target: a colour buffer and an inverse-depth
+// buffer, the column band one fill worker owns, and the seam a post effect
+// blends over a finished frame through.
+
+use smalt::Mem;
+use crate::engine::math::narrow::{ putFloatOf };
+
+/**
+ * The render target bundle: framebuffer + z-buffer base pointers and the frame
+ * size. A value-type struct passed in place of the four loose `pixels, zbuf, w,
+ * h` arguments that every render/raster routine used to take.
+ */
+struct FrameBuf {
+    pub(crate) pixels : i64,
+    pub(crate) zbuf : i64,
+    pub(crate) w : i32,
+    pub(crate) h : i32,
+}
+
+/**
+ * A full-frame post-process capability: consume the finished framebuffer (colour
+ * + depth) and blend an effect over it in place. Bloom, the volumetric god-rays
+ * and the underwater overlay each implement it, so the frame's post-chain is a
+ * set of uniform `PostEffect` steps rather than ad-hoc methods.
+ */
+trait PostEffect {
+    /**
+     * Blends this effect over the finished frame, in place.
+     * @param fb  the frame's colour and depth buffers
+     */
+    fn apply(mut self, fb : FrameBuf) : void;
+}
+
+/**
+ * Reset the z-buffer, leaving the colour alone.
+ *
+ * Its own loop, writing one buffer: interleaved with the colour fill the
+ * two strides defeat the compiler's fill idiom, and a depth clear is a
+ * run of zero bytes — the one shape a machine already has an instruction
+ * for.
+ * @param fb  the render target (framebuffer + z-buffer + size).
+ */
+fn clearDepth(fb : FrameBuf) : void {
+    const zbuf : i64 = fb.zbuf;
+    const n : i32 = fb.w * fb.h;
+    for (i of 0..n) {
+        putFloatOf(zbuf, i, 0.0);
+    }
+}
+
+/**
+ * Fill the frame with `bg` and reset the z-buffer.
+ *
+ * For a frame nothing paints a background into afterwards. Where the sky pass
+ * runs, it covers every pixel the opaque passes left, so `clearDepth` is the
+ * one that is wanted and this would be a whole frame written and thrown away.
+ * @param fb  the render target (framebuffer + z-buffer + size).
+ * @param bg  background colour.
+ */
+fn clearFrame(fb : FrameBuf, bg : i32) : void {
+    const pixels : i64 = fb.pixels;
+    const n : i32 = fb.w * fb.h;
+    for (i of 0..n) {
+        Mem::putWordOf(pixels, i, bg);
+    }
+    clearDepth(fb);
+}
+
+/** A worker's disjoint screen-column band [x0, x1) (no z-buffer race). */
+struct Band {
+    pub(crate) x0 : i32,
+    pub(crate) x1 : i32,
+}

@@ -14,10 +14,12 @@
 // is another, and measured, the build is the expensive two thirds.
 
 use smalt::Mem;
-use crate::engine::render::cpu::raster::{
-    rasterTriTex, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens,
-    Projected, VertAttribs, ScreenScratch
+use crate::engine::render::cpu::raster::triangle::{
+    rasterTriTex, columnSpan, RasterVert, RasterTri, VertAttribs, ScreenScratch,
 };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
+use crate::engine::render::cpu::raster::mip::{ MipAtlas };
+use crate::engine::render::view::camera::{ Camera, Lens, Projected };
 use crate::engine::shade::facelight::{ FaceLight };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::sky::atmosphere::{ FogTable };

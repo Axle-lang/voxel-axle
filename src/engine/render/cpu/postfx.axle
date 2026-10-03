@@ -13,7 +13,7 @@
 
 use smalt::Mem;
 use crate::engine::math::narrow::{ floatOf };
-use crate::engine::render::cpu::raster::{ FrameBuf, PostEffect };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
 use crate::configs::water::{ Water };
 

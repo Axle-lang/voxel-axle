@@ -17,10 +17,12 @@ use smalt::Mem;
 use smalt::Color;
 use crate::engine::ui::widget::{tintIf};
 use crate::engine::shade::daymodel::{ DayState };
-use crate::engine::render::cpu::raster::{
-    rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera,
-    Lens, Projected,
+use crate::engine::render::cpu::raster::triangle::{
+    rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri,
 };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
+use crate::engine::render::cpu::raster::mip::{ MipAtlas };
+use crate::engine::render::view::camera::{ Camera, Lens, Projected };
 use crate::engine::shade::facelight::{ sunExposure };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::sky::atmosphere::{ FogTable };

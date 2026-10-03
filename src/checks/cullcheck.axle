@@ -18,7 +18,7 @@
 // `voxel --cull-check` runs it and exits with the failure count.
 
 use crate::engine::render::cpu::world::chunkview::{ ViewCone, viewConeFor, chunkVisible };
-use crate::engine::render::cpu::raster::{ Lens, lensFor };
+use crate::engine::render::view::camera::{ Lens, lensFor };
 use crate::engine::entity::player::Player;
 use crate::configs::screen::{ Screen };
 use crate::configs::motion::{ Motion };

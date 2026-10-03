@@ -37,9 +37,9 @@ use crate::engine::render::cpu::world::chunkview::{
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene, Material };
 use crate::engine::render::cpu::selection::Selection;
-use crate::engine::render::cpu::raster::{
-    clearFrame, clearDepth, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected,
-};
+use crate::engine::render::cpu::raster::framebuf::{ clearFrame, clearDepth, FrameBuf };
+use crate::engine::render::view::camera::{ lensFor, Camera, Lens, Projected };
+use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::shade::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::engine::math::vec3::{ vec3 };
 use crate::engine::entity::player::Player;
