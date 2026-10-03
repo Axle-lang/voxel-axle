@@ -54,23 +54,29 @@ struct Material {
     hurt : bool,
 }
 
+/** One corner of a face being clipped: camera-space position and texture u/v. */
+struct ClipVert {
+    p : Vec3,
+    u : f64,
+    v : f64,
+}
+
+/** Corners a clipped quad can have: four, plus one per edge the near plane cuts. */
+const CLIP_MAX : i32 = 8;
+
 class MobView {
-    csx : i64,      // projected screen x / y / inverse depth (4 quad corners)
-    csy : i64,
-    ciz : i64,
-    cvis : i32[],   // per-corner near-plane visibility (1 = in front)
+    clipIn : ClipVert[],  // a quad's corners in camera space, before the near clip
+    clipOut : ClipVert[], // ...and the polygon that survives it
     obx : i64,      // oriented-box world corners (8 per body part)
     oby : i64,
     obz : i64,
     mobLight : LinRgb, // ambient light on the mob currently being drawn, per channel
     model : BoxModel,  // the boxes the mob being drawn described
 
-    /** Allocate the quad projection scratch and the oriented-box corner buffers. */
+    /** Allocate the clipping scratch and the oriented-box corner buffers. */
     constructor() {
-        self.csx = Mem::take(8 * 8);
-        self.csy = Mem::take(8 * 8);
-        self.ciz = Mem::take(8 * 8);
-        self.cvis = malloc<i32>(4);
+        self.clipIn = malloc<ClipVert>(CLIP_MAX);
+        self.clipOut = malloc<ClipVert>(CLIP_MAX);
         self.obx = Mem::take(8 * 8);
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
@@ -79,23 +85,85 @@ class MobView {
     }
 
     /**
-     * Project one world point into screen + inverse depth at slot k through the
-     * shared Camera. Mobs keep their own scratch so the pass is independent of
-     * the world face buffers.
-     * @param cam  the camera (eye + orientation + projection width)
-     * @param w    the world-space point
-     * @param k    scratch slot index to store the result in
+     * Clip the polygon in `clipIn[0..n)` against the near plane into
+     * `clipOut`, carrying the texture coordinates along each cut edge.
+     *
+     * The terrain has always been clipped; mobs and torches dropped a whole
+     * face the moment one corner crossed the plane, so walking up to an
+     * animal or a torch made it blink out a face at a time.
+     * @param n  corners in `clipIn`
+     * @return corners in `clipOut`, under 3 when nothing survives
      */
-    fn project(mut self, cam : Camera, w : Vec3, k : i32) : void {
-        const pr : Projected = cam.project(w);
-        if (pr.cz < Screen::NEAR_PLANE) {
-            self.cvis[k] = 0;
-            return;
+    fn clipNear(mut self, n : i32) : i32 {
+        const near : f64 = Screen::NEAR_PLANE;
+        let m : i32 = 0;
+        for (i of 0..n) {
+            const cur : ClipVert = self.clipIn[i];
+            const nxt : ClipVert = self.clipIn[(i + 1) % n];
+            const curIn : bool = cur.p.z >= near;
+            const nxtIn : bool = nxt.p.z >= near;
+            if (curIn) {
+                self.clipOut[m] = ClipVert {
+                    p: cur.p,
+                    u: cur.u,
+                    v: cur.v,
+                };
+                m++;
+            }
+            if (curIn != nxtIn) {
+                const t : f64 = (near - cur.p.z) / (nxt.p.z - cur.p.z);
+                self.clipOut[m] = ClipVert {
+                    p: vec3(
+                        cur.p.x + (nxt.p.x - cur.p.x) * t,
+                        cur.p.y + (nxt.p.y - cur.p.y) * t,
+                        near
+                    ),
+                    u: cur.u + (nxt.u - cur.u) * t,
+                    v: cur.v + (nxt.v - cur.v) * t,
+                };
+                m++;
+            }
         }
-        Mem::putRealOf(self.csx, k, pr.sx);
-        Mem::putRealOf(self.csy, k, pr.sy);
-        Mem::putRealOf(self.ciz, k, pr.iz);
-        self.cvis[k] = 1;
+        return m;
+    }
+
+    /**
+     * One clipped corner on screen, for a flat-colour fill.
+     * @param cam  the frame's camera
+     * @param k    the corner, in `clipOut`
+     * @return its screen position and inverse depth
+     */
+    fn flatAt(self, cam : Camera, k : i32) : ScreenVert {
+        const pr : Projected = cam.screenOf(self.clipOut[k].p);
+        return ScreenVert {
+            sx: pr.sx,
+            sy: pr.sy,
+            iz: pr.iz,
+        };
+    }
+
+    /**
+     * One clipped corner on screen, lit and textured for the triangle filler.
+     * @param cam  the frame's camera
+     * @param k    the corner, in `clipOut`
+     * @param tr   red light multiplier
+     * @param tg   green light multiplier
+     * @param tb   blue light multiplier
+     * @return the vertex
+     */
+    fn screenAt(self, cam : Camera, k : i32, tr : f64, tg : f64, tb : f64) : RasterVert {
+        const c : ClipVert = self.clipOut[k];
+        const pr : Projected = cam.screenOf(c.p);
+        return RasterVert {
+            sx: pr.sx as f32,
+            sy: pr.sy as f32,
+            iz: pr.iz as f32,
+            u: c.u as f32,
+            v: c.v as f32,
+            tr: tr as f32,
+            tg: tg as f32,
+            tb: tb as f32,
+        };
     }
 
     /**
@@ -157,11 +225,30 @@ class MobView {
             return;
         }
 
-        self.project(cam, a, 0);
-        self.project(cam, b, 1);
-        self.project(cam, c, 2);
-        self.project(cam, d, 3);
-        if (self.cvis[0] == 0 || self.cvis[1] == 0 || self.cvis[2] == 0 || self.cvis[3] == 0) {
+        // The quad in camera space, clipped where it crosses the near plane;
+        // the texture runs (0,1) (1,1) (1,0) (0,0) round its corners.
+        self.clipIn[0] = ClipVert {
+            p: cam.toCamera(a),
+            u: 0.0,
+            v: 1.0,
+        };
+        self.clipIn[1] = ClipVert {
+            p: cam.toCamera(b),
+            u: 1.0,
+            v: 1.0,
+        };
+        self.clipIn[2] = ClipVert {
+            p: cam.toCamera(c),
+            u: 1.0,
+            v: 0.0,
+        };
+        self.clipIn[3] = ClipVert {
+            p: cam.toCamera(d),
+            u: 0.0,
+            v: 0.0,
+        };
+        const corners : i32 = self.clipNear(4);
+        if (corners < 3) {
             return;
         }
 
@@ -172,154 +259,62 @@ class MobView {
         const shade : f64 = 0.80 + 0.20 * self.shadeMob(n.x, n.y, n.z, scene.ds);
         const bright : f64 = shade * self.mobLight.g;
 
-        const sx0 : f64 = Mem::realOf(self.csx, 0);
-        const sy0 : f64 = Mem::realOf(self.csy, 0);
-        const iz0 : f64 = Mem::realOf(self.ciz, 0);
-        const sx1 : f64 = Mem::realOf(self.csx, 1);
-        const sy1 : f64 = Mem::realOf(self.csy, 1);
-        const iz1 : f64 = Mem::realOf(self.ciz, 1);
-        const sx2 : f64 = Mem::realOf(self.csx, 2);
-        const sy2 : f64 = Mem::realOf(self.csy, 2);
-        const iz2 : f64 = Mem::realOf(self.ciz, 2);
-        const sx3 : f64 = Mem::realOf(self.csx, 3);
-        const sy3 : f64 = Mem::realOf(self.csy, 3);
-        const iz3 : f64 = Mem::realOf(self.ciz, 3);
+        // A struck mob glows red: lift the red multiplier, damp green/blue.
+        let tr : f64 = shade * self.mobLight.r;
+        let tg : f64 = bright;
+        let tb : f64 = shade * self.mobLight.b;
+        if (mat.hurt) {
+            tr = bright + 0.6;
+            tg = bright * 0.4;
+            tb = bright * 0.4;
+        }
+        const textured : bool = Atlas::USE_MOB_TEXTURES && mat.tile >= 0;
+        const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
+        const band : Band = Band { x0: 0, x1: fb.w };
 
-        if (Atlas::USE_MOB_TEXTURES && mat.tile >= 0) {
-            // A struck mob glows red: lift the red multiplier, damp green/blue.
-            let tr : f64 = shade * self.mobLight.r;
-            let tg : f64 = bright;
-            let tb : f64 = shade * self.mobLight.b;
-            if (mat.hurt) {
-                tr = bright + 0.6;
-                tg = bright * 0.4;
-                tb = bright * 0.4;
+        // A fan from the first corner: unclipped, that is (a, b, c) then
+        // (a, c, d), the two triangles the quad always was.
+        const v0 : RasterVert = self.screenAt(cam, 0, tr, tg, tb);
+        for (k of 1..corners - 1) {
+            const v1 : RasterVert = self.screenAt(cam, k, tr, tg, tb);
+            const v2 : RasterVert = self.screenAt(cam, k + 1, tr, tg, tb);
+            if (textured) {
+                // A mob is drawn straight into the full-width band rather than
+                // queued, so nothing reads the span — filled in anyway, so no
+                // triangle anywhere carries a stale one.
+                let (lo, hi) = columnSpan(
+                    self.flatAt(cam, 0).sx,
+                    self.flatAt(cam, k).sx,
+                    self.flatAt(cam, k + 1).sx
+                );
+                rasterTriTex(
+                    fb,
+                    RasterTri {
+                        a: v0,
+                        b: v1,
+                        c: v2,
+                        tile: mat.tile as i16,
+                        wrap: 0 as i8,
+                        minx: lo,
+                        maxx: hi,
+                    },
+                    scene.atlas,
+                    scene.gam,
+                    scene.fogT,
+                    band
+                );
+            } else {
+                rasterTri(
+                    fb,
+                    FlatTri {
+                        a: self.flatAt(cam, 0),
+                        b: self.flatAt(cam, k),
+                        c: self.flatAt(cam, k + 1),
+                        color: col,
+                    },
+                    scene.fogT
+                );
             }
-            const band : Band = Band { x0: 0, x1: fb.w };
-
-            // The queue's vertex is 32-bit; the projection and the light are
-            // narrowed here, once per corner.
-            const va : RasterVert = RasterVert {
-                sx: sx0 as f32,
-                sy: sy0 as f32,
-                iz: iz0 as f32,
-                u: 0.0 as f32,
-                v: 1.0 as f32,
-                tr: tr as f32,
-                tg: tg as f32,
-                tb: tb as f32,
-            };
-            const vb : RasterVert = RasterVert {
-                sx: sx1 as f32,
-                sy: sy1 as f32,
-                iz: iz1 as f32,
-                u: 1.0 as f32,
-                v: 1.0 as f32,
-                tr: tr as f32,
-                tg: tg as f32,
-                tb: tb as f32,
-            };
-            const vc : RasterVert = RasterVert {
-                sx: sx2 as f32,
-                sy: sy2 as f32,
-                iz: iz2 as f32,
-                u: 1.0 as f32,
-                v: 0.0 as f32,
-                tr: tr as f32,
-                tg: tg as f32,
-                tb: tb as f32,
-            };
-            const vd : RasterVert = RasterVert {
-                sx: sx3 as f32,
-                sy: sy3 as f32,
-                iz: iz3 as f32,
-                u: 0.0 as f32,
-                v: 0.0 as f32,
-                tr: tr as f32,
-                tg: tg as f32,
-                tb: tb as f32,
-            };
-            const tile : i16 = mat.tile as i16;
-
-            // A mob is drawn straight into the full-width band rather than
-            // queued, so nothing reads the span — filled in anyway, so no
-            // triangle anywhere carries a stale one.
-            let (abcLo, abcHi) = columnSpan(sx0, sx1, sx2);
-            let (acdLo, acdHi) = columnSpan(sx0, sx2, sx3);
-            const abc : RasterTri = RasterTri {
-                a: va,
-                b: vb,
-                c: vc,
-                tile,
-                wrap: 0 as i8,
-                minx: abcLo,
-                maxx: abcHi,
-            };
-            rasterTriTex(
-                fb,
-                abc,
-                scene.atlas,
-                scene.gam,
-                scene.fogT,
-                band
-            );
-            const acd : RasterTri = RasterTri {
-                a: va,
-                b: vc,
-                c: vd,
-                tile,
-                wrap: 0 as i8,
-                minx: acdLo,
-                maxx: acdHi,
-            };
-            rasterTriTex(
-                fb,
-                acd,
-                scene.atlas,
-                scene.gam,
-                scene.fogT,
-                band
-            );
-        } else {
-            const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), bright);
-            const v0 : ScreenVert = ScreenVert {
-                sx: sx0,
-                sy: sy0,
-                iz: iz0,
-            };
-            const v2 : ScreenVert = ScreenVert {
-                sx: sx2,
-                sy: sy2,
-                iz: iz2,
-            };
-            rasterTri(
-                fb,
-                FlatTri {
-                    a: v0,
-                    b: ScreenVert {
-                        sx: sx1,
-                        sy: sy1,
-                        iz: iz1,
-                    },
-                    c: v2,
-                    color: col,
-                },
-                scene.fogT
-            );
-            rasterTri(
-                fb,
-                FlatTri {
-                    a: v0,
-                    b: v2,
-                    c: ScreenVert {
-                        sx: sx3,
-                        sy: sy3,
-                        iz: iz3,
-                    },
-                    color: col,
-                },
-                scene.fogT
-            );
         }
     }
 
