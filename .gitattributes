@@ -11,3 +11,7 @@
 # the project reads as a code repo rather than "mostly Markdown/Python". Flip it
 # to false if you would rather keep .axle out of the language statistics.
 *.axle linguist-language=Rust linguist-detectable=true
+
+# Shell scripts run under bash on every platform, which reads a CR as part of
+# the command: keep them LF in every checkout.
+*.sh text eol=lf
