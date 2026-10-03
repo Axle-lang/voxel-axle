@@ -27,7 +27,7 @@ use crate::engine::shade::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::seams::{ CornerProbe, CornerSample };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3, ivec3 };
-use crate::engine::entity::player::Player;
+use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::block::blocks::{ fluidLevel, isWater, isSource };
 use crate::configs::blocks::{ Block };
@@ -55,178 +55,6 @@ fn faceDirFrom(d : i32) : FaceDir {
         4 => FaceDir::PosZ,
         _ => FaceDir::NegZ,
     };
-}
-
-/** Inward normal of one frustum plane, in world axes, through the eye. */
-struct ViewPlane {
-    nx : f64,
-    ny : f64,
-    nz : f64,
-}
-
-/**
- * The wedge of world a frame can see: where the eye is, and the five planes the
- * lens and the near clip cut the world with.
- *
- * The sides are the half that was missing. A chunk used to be kept whenever its
- * centre was anywhere but well behind the eye — half the world, where the
- * window shows about a hundred and six degrees of it — so half again as many
- * chunks as could ever be seen had every one of their faces projected, lit and
- * clipped before the raster threw them away offscreen.
- *
- * The planes are the REAL ones, in three dimensions, and that is not a
- * refinement — it is what makes the test correct. The first version of this
- * worked on the ground plane and carried the pitch as a fudge: a slack term
- * widened the sides by what a chunk's height could add to the depth, and a
- * chunk was allowed one chunk's length behind the eye. Both are wrong the
- * moment the camera looks steeply down from above the terrain, which is what
- * flying is. Looking down, the visible ground reaches BEHIND the eye — a point
- * below the eye has positive view depth however far back it sits — so chunks
- * that fill a third of the frame were being dropped for being behind.
- *
- * A plane through the eye with an inward normal has none of that: the test is
- * the same arithmetic at any pitch, any height, any lens.
- */
-struct ViewCone {
-    eyeX : f64,
-    eyeY : f64,
-    eyeZ : f64,
-    near : ViewPlane,   // the four sides and the near clip, inward normals
-    left : ViewPlane,
-    right : ViewPlane,
-    top : ViewPlane,
-    bottom : ViewPlane,
-    far : f64,          // the draw distance, plus a chunk's own extent
-}
-
-/**
- * The view cone for this eye and this lens.
- *
- * The half-angles are the lens's own: the projection puts the frame's edge at
- * `hw` (or `hh`) pixels from the centre and the film at `focal` pixels away, so
- * a point is inside a side plane exactly when its offset along that axis, times
- * the focal length, does not exceed its depth times the half-size. Written as a
- * dot product against a normal, that is the plane — and it needs no
- * normalising, because only the SIGN of the result is ever read.
- * @param p     player providing the eye position and orientation
- * @param lens  the frame's projection centre and focal length
- * @return the cone chunks are tested against
- */
-fn viewConeFor(p : Player, lens : Lens) : ViewCone {
-    // The camera basis. Forward carries the pitch; right lies in the ground
-    // plane, there being no roll; up is the third of the frame.
-    const fx : f64 = (0.0 - p.siny) * p.cosp;
-    const fy : f64 = p.sinp;
-    const fz : f64 = p.cosy * p.cosp;
-    const rx : f64 = p.cosy;
-    const rz : f64 = p.siny;
-    const ux : f64 = p.siny * p.sinp;
-    const uy : f64 = p.cosp;
-    const uz : f64 = (0.0 - p.cosy) * p.sinp;
-
-    return ViewCone {
-        eyeX: p.eye.x,
-        eyeY: p.eye.y,
-        eyeZ: p.eye.z,
-        near: ViewPlane {
-            nx: fx,
-            ny: fy,
-            nz: fz,
-        },
-        left: ViewPlane {
-            nx: fx * lens.hw + rx * lens.focal,
-            ny: fy * lens.hw,
-            nz: fz * lens.hw + rz * lens.focal,
-        },
-        right: ViewPlane {
-            nx: fx * lens.hw - rx * lens.focal,
-            ny: fy * lens.hw,
-            nz: fz * lens.hw - rz * lens.focal,
-        },
-        top: ViewPlane {
-            nx: fx * lens.hh - ux * lens.focal,
-            ny: fy * lens.hh - uy * lens.focal,
-            nz: fz * lens.hh - uz * lens.focal,
-        },
-        bottom: ViewPlane {
-            nx: fx * lens.hh + ux * lens.focal,
-            ny: fy * lens.hh + uy * lens.focal,
-            nz: fz * lens.hh + uz * lens.focal,
-        },
-        far: Render::DRAW_DIST + (World::CHUNK_SIZE as f64),
-    };
-}
-
-/**
- * Whether a box lies entirely on the outside of one plane through the eye.
- *
- * Only the box corner FURTHEST along the normal is tested. If even that one is
- * behind the plane, all eight are; if it is in front, the box straddles the
- * plane or clears it, and either way the box is kept.
- * @param pl   the plane's inward normal
- * @param lox  box low corner x, relative to the eye
- * @param loy  box low corner y, relative to the eye
- * @param loz  box low corner z, relative to the eye
- * @param hix  box high corner x, relative to the eye
- * @param hiy  box high corner y, relative to the eye
- * @param hiz  box high corner z, relative to the eye
- * @return true when nothing in the box is on the inward side
- */
-fn boxOutside(
-    pl : ViewPlane,
-    lox : f64,
-    loy : f64,
-    loz : f64,
-    hix : f64,
-    hiy : f64,
-    hiz : f64
-) : bool {
-    const x : f64 = pl.nx > 0.0 ? hix : lox;
-    const y : f64 = pl.ny > 0.0 ? hiy : loy;
-    const z : f64 = pl.nz > 0.0 ? hiz : loz;
-    return pl.nx * x + pl.ny * y + pl.nz * z < 0.0;
-}
-
-/**
- * A chunk is worth drawing only if some part of it can fall inside the cone.
- *
- * The chunk is its whole column — sixteen by the world's height by sixteen —
- * and the test is that box against the five planes. Nothing that could draw a
- * pixel is refused, because a box is only dropped when one plane has all eight
- * of its corners on the far side. A free function so the world-face pass
- * (ChunkRenderer) and the torch pass (Renderer) share the one visibility rule.
- * @param cone  the frame's view cone
- * @param cx    chunk x index
- * @param cz    chunk z index
- * @return true if the chunk should be drawn
- */
-fn chunkVisible(cone : ViewCone, cx : i32, cz : i32) : bool {
-    const s : f64 = World::CHUNK_SIZE as f64;
-    const lox : f64 = (cx as f64) * s - cone.eyeX;
-    const loz : f64 = (cz as f64) * s - cone.eyeZ;
-    const hix : f64 = lox + s;
-    const hiz : f64 = loz + s;
-    const mx : f64 = lox + s * 0.5;
-    const mz : f64 = loz + s * 0.5;
-    if (mx * mx + mz * mz > cone.far * cone.far) {
-        return false;
-    }
-
-    const loy : f64 = 0.0 - cone.eyeY;
-    const hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
-    if (boxOutside(cone.near, lox, loy, loz, hix, hiy, hiz)) {
-        return false;
-    }
-    if (boxOutside(cone.left, lox, loy, loz, hix, hiy, hiz)) {
-        return false;
-    }
-    if (boxOutside(cone.right, lox, loy, loz, hix, hiy, hiz)) {
-        return false;
-    }
-    if (boxOutside(cone.top, lox, loy, loz, hix, hiy, hiz)) {
-        return false;
-    }
-    return !boxOutside(cone.bottom, lox, loy, loz, hix, hiy, hiz);
 }
 
 /**
@@ -1347,7 +1175,6 @@ class ChunkRenderer {
      * Each worker owns its own queue and its own clipping scratch, so
      * nothing here is shared and nothing needs a lock.
      * @param man     chunk manager holding the loaded chunks and baked faces
-     * @param p       player providing the eye position (for chunk culling)
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
      * @param first   the first slot this worker takes
@@ -1356,14 +1183,13 @@ class ChunkRenderer {
     pub(crate) fn buildSlots(
         mut self,
         man : ChunkManager,
-        p : Player,
         cam : Camera,
         phase : f64,
         first : i32,
         stride : i32
     ) : void {
         const slots : i32 = World::SPAN * World::SPAN;
-        const cone : ViewCone = viewConeFor(p, cam.lens);
+        const cone : ViewCone = viewConeFor(cam);
         let slot : i32 = first;
         while (slot < slots) {
             if (man.cols.loaded[slot] == 1
@@ -1407,7 +1233,6 @@ class ChunkRenderer {
  * Worker job: project / clip / light one worker's share of the chunks.
  * @param r       the worker whose triangle queue the share is built into
  * @param man     chunk manager holding the loaded chunks and baked faces
- * @param p       player providing the eye position (for chunk culling)
  * @param cam     the camera (eye + orientation + projection width)
  * @param phase   animation time phase (scrolls flowing-water textures)
  * @param first   the first slot this worker takes
@@ -1417,12 +1242,11 @@ class ChunkRenderer {
 fn buildSlotsJob(
     r : ChunkRenderer,
     man : ChunkManager,
-    p : Player,
     cam : Camera,
     phase : f64,
     first : i32,
     stride : i32
 ) : i32 {
-    r.buildSlots(man, p, cam, phase, first, stride);
+    r.buildSlots(man, cam, phase, first, stride);
     return 0;
 }

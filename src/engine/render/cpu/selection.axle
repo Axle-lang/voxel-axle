@@ -11,9 +11,8 @@ use smalt::Mem;
 use smalt::Color;
 use crate::engine::math::narrow::{ floatOf };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
-use crate::engine::render::view::camera::{ Camera, Lens, Projected };
+use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::math::vec3::{ Vec3, vec3 };
-use crate::engine::entity::player::Player;
 use crate::configs::screen::{ Screen };
 
 class Selection {
@@ -128,9 +127,8 @@ class Selection {
      * Draw the Minecraft-style selection box: a soft, depth-tested wireframe on
      * the targeted block (bx, by, bz). Back edges are culled by the z-buffer so
      * it reads as an outline on the block, not a see-through cage.
-     * @param p     player providing the eye position and orientation
+     * @param cam   the frame's camera
      * @param fb    the render target (framebuffer + z-buffer + size)
-     * @param lens  the frame's projection centre + focal length
      * @param bx    targeted block x
      * @param by    targeted block y
      * @param bz    targeted block z
@@ -139,23 +137,13 @@ class Selection {
      */
     pub(crate) fn draw(
         self,
-        p : Player,
+        cam : Camera,
         fb : FrameBuf,
-        lens : Lens,
         bx : i32,
         by : i32,
         bz : i32,
         topH : f64
     ) : void {
-        const cam : Camera = Camera {
-            eye: p.eye,
-            cosy: p.cosy,
-            siny: p.siny,
-            cosp: p.cosp,
-            sinp: p.sinp,
-            lens,
-        };
-
         for (k of 0..8) {
             const cdx : f64 = (k & 1) as f64;
             const cdy : f64 = ((k / 2) & 1) as f64 * topH;

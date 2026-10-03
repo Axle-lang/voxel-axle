@@ -21,6 +21,7 @@ use crate::engine::seams::{ LightMoment };
 use crate::engine::render::cpu::renderer::Renderer;
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::render::view::camera::{ Viewport, viewportFor };
+use crate::app::view::{ viewOf };
 use crate::engine::ui::hud::drawHud;
 use crate::engine::ui::menu::{ drawPauseMenu, menuHit };
 use crate::game::world::terraingen::TerrainGen;
@@ -807,7 +808,7 @@ class Game {
         const start = self.clock.micros();
         self.renderer.render(
             self.man,
-            self.player,
+            viewOf(self.player),
             fb,
             underwater: s.underwater,
             phase: s.ripple,
@@ -816,9 +817,9 @@ class Game {
         );
         self.times.world += self.clock.micros() - start;
 
-        self.renderer.renderMobs(self.man, self.mobs, self.player, fb);
-        self.renderer.renderTorches(self.man, self.player, fb);
-        self.renderer.drawSky(self.player, fb, s.underwater);
+        self.renderer.renderMobs(self.man, self.mobs, fb);
+        self.renderer.renderTorches(self.man, fb);
+        self.renderer.drawSky(fb, s.underwater);
     }
 
     /**
@@ -831,7 +832,7 @@ class Game {
         if (s.underwater) {
             self.renderer.underwaterOverlay(fb, s.ripple);
         } else {
-            self.renderer.godRays(self.player, fb);
+            self.renderer.godRays(fb);
         }
 
         const rays = self.clock.micros();
@@ -850,7 +851,6 @@ class Game {
         if (self.aimsAtBlock()) {
             const cell = self.aimedCell();
             self.renderer.drawSelection(
-                self.player,
                 fb,
                 cell.x,
                 cell.y,

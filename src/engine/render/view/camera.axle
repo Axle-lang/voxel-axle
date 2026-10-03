@@ -133,16 +133,32 @@ fn viewportFor(winW : i32, winH : i32) : Viewport {
 }
 
 /**
+ * Where a frame is seen from: the eye and its look trig (yaw cos/sin, pitch
+ * cos/sin), with no lens yet.
+ *
+ * This is all the renderer and the sky ever wanted from the player, and it is
+ * what lets them not import one: whoever owns the eye hands this over once a
+ * frame, and the passes project through the `Camera` built from it.
+ */
+struct View {
+    pub(crate) eye : Vec3,
+    pub(crate) cosy : f64,
+    pub(crate) siny : f64,
+    pub(crate) cosp : f64,
+    pub(crate) sinp : f64,
+}
+
+/**
  * The one camera: eye position, cached look trig (yaw cos/sin, pitch cos/sin)
- * and the lens. A value struct built per frame from the Player; every render
+ * and the lens. A value struct built once a frame from a `View`; every render
  * pass projects through it so there is a single copy of the transform.
  */
 struct Camera : Projector {
     pub(crate) eye : Vec3,
-    cosy : f64,
-    siny : f64,
-    cosp : f64,
-    sinp : f64,
+    pub(crate) cosy : f64,
+    pub(crate) siny : f64,
+    pub(crate) cosp : f64,
+    pub(crate) sinp : f64,
     pub(crate) lens : Lens,
 
     /**
@@ -208,4 +224,21 @@ struct Camera : Projector {
             cz: rz2,
         };
     }
+}
+
+/**
+ * The camera a view is drawn through with this lens.
+ * @param view  the eye and its look trig
+ * @param lens  the projection centre and focal length of the target
+ * @return the frame's camera
+ */
+fn cameraOf(view : View, lens : Lens) : Camera {
+    return Camera {
+        eye: view.eye,
+        cosy: view.cosy,
+        siny: view.siny,
+        cosp: view.cosp,
+        sinp: view.sinp,
+        lens,
+    };
 }

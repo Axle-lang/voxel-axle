@@ -39,8 +39,7 @@ use crate::engine::sky::cloud::{ CloudField, cloudFieldAt };
 use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSky };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
-use crate::engine::render::view::camera::{ Lens };
-use crate::engine::entity::player::Player;
+use crate::engine::render::view::camera::{ Camera };
 
 /**
  * The sky, for one frame: the atmosphere's colour field, the cloud deck, and the
@@ -129,33 +128,31 @@ class SkyEngine {
      * cloud table is marched here rather than at draw time so the god-rays, which
      * run after the world, can read the same deck the sky was painted with.
      * @param ds         the day/night state
-     * @param p          player (camera orientation and eye)
-     * @param lens       the frame's projection centre + focal length
+     * @param cam        the frame's camera (orientation, eye height and lens)
      * @param worldTime  seconds since the run began, for the wind
      * @param fb         the render target, for the fog grid's size
      */
     pub(crate) fn update(
         mut self,
         ds : DayState,
-        p : Player,
-        lens : Lens,
+        cam : Camera,
         worldTime : f64,
         fb : FrameBuf
     ) : void {
         const t : i64 = monotonicNanos();
         self.dome = skyDomeFor(ds);
         self.rays = ViewRays {
-            cosy: p.cosy,
-            siny: p.siny,
-            cosp: p.cosp,
-            sinp: p.sinp,
-            hw: lens.hw,
-            hh: lens.hh,
-            focal: lens.focal,
+            cosy: cam.cosy,
+            siny: cam.siny,
+            cosp: cam.cosp,
+            sinp: cam.sinp,
+            hw: cam.lens.hw,
+            hh: cam.lens.hh,
+            focal: cam.lens.focal,
         };
 
         const field : CloudField = cloudFieldAt(worldTime);
-        self.cloudSky.march(field, ds, p.eye.y, self.skyPixels);
+        self.cloudSky.march(field, ds, cam.eye.y, self.skyPixels);
         self.lastFog = self.fogT.build(
             self.dome,
             self.rays,
@@ -171,11 +168,10 @@ class SkyEngine {
      * the deck composited over it, then the sun and moon, which the same deck can
      * hide. Called AFTER the world, mobs and torches — it reads their z.
      * @param ds    the day/night state
-     * @param p     player (camera orientation)
+     * @param cam   the frame's camera
      * @param fb    the render target
-     * @param lens  the frame's projection centre + focal length
      */
-    pub(crate) fn draw(mut self, ds : DayState, p : Player, fb : FrameBuf, lens : Lens) : void {
+    pub(crate) fn draw(mut self, ds : DayState, cam : Camera, fb : FrameBuf) : void {
         const t : i64 = monotonicNanos();
         const deck : CloudDome = self.cloudSky.dome();
         self.paintNow[0] = SkyPaintFrame {
@@ -185,7 +181,7 @@ class SkyEngine {
             fb,
         };
         self.pool.run(self.paintPass, SKY_BANDS);
-        drawCelestial(ds, p, fb, lens, deck);
+        drawCelestial(ds, cam, fb, deck);
 
         let seen : i32 = 0;
         for (i of 0..SKY_BANDS) {

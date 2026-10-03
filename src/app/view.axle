@@ -1,0 +1,24 @@
+// view — where the frame is seen from, taken off the player.
+//
+// The one place the program connects the body it simulates to the eye it
+// renders through. The engine's render passes take a `View` and never name a
+// player, so a free camera, a replay or a second viewport is a different
+// function here, not a change below.
+
+use crate::engine::entity::player::Player;
+use crate::engine::render::view::camera::{ View };
+
+/**
+ * Where the frame is seen from: the player's eye and its look trig.
+ * @param p  the player
+ * @return the view the renderer projects through
+ */
+fn viewOf(p : Player) : View {
+    return View {
+        eye: p.eye,
+        cosy: p.cosy,
+        siny: p.siny,
+        cosp: p.cosp,
+        sinp: p.sinp,
+    };
+}

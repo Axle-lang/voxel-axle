@@ -17,9 +17,10 @@
 //
 // `voxel --cull-check` runs it and exits with the failure count.
 
-use crate::engine::render::cpu::world::chunkview::{ ViewCone, viewConeFor, chunkVisible };
-use crate::engine::render::view::camera::{ Lens, lensFor };
+use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
+use crate::engine::render::view::camera::{ Lens, lensFor, cameraOf };
 use crate::engine::entity::player::Player;
+use crate::app::view::{ viewOf };
 use crate::configs::screen::{ Screen };
 use crate::configs::motion::{ Motion };
 use crate::configs::render::{ Render };
@@ -136,7 +137,7 @@ fn runCullCheck() : i32 {
                 const yaw : f64 = 6.28318530717959 * (y as f64) / (YAW_STEPS as f64);
                 p.aimAt(yaw, pitch);
                 p.refresh();
-                const cone : ViewCone = viewConeFor(p, lens);
+                const cone : ViewCone = viewConeFor(cameraOf(viewOf(p), lens));
                 for (cz of -RING..=RING) {
                     for (cx of -RING..=RING) {
                         tested++;

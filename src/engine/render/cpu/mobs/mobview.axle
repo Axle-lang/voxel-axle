@@ -22,12 +22,11 @@ use crate::engine::render::cpu::raster::triangle::{
 };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
-use crate::engine::render::view::camera::{ Camera, Lens, Projected };
+use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::shade::facelight::{ sunExposure };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::sky::atmosphere::{ FogTable };
 use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
-use crate::engine::entity::player::Player;
 use crate::engine::entity::mobs::MobManager;
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::seams::{ ChannelLevels, ActorVisual };
@@ -38,17 +37,15 @@ use crate::configs::screen::{ Screen };
 
 /**
  * The per-frame context for the mob pass: the atlas mip chain, the colour space
- * the faces are lit in, the distance-fog colour, the day/night state (sun
- * direction + daylight for shading) and the projection half-width. Bundled so
- * each draw helper takes one `scene` instead of threading five loose values
- * through every call.
+ * the faces are lit in, the distance-fog colour and the day/night state (sun
+ * direction + daylight for shading). Bundled so each draw helper takes one
+ * `scene` instead of threading four loose values through every call.
  */
 struct MobScene {
     atlas : MipAtlas,
     gam : Gamma,
     fogT : FogTable,
     ds : DayState,
-    lens : Lens,
 }
 
 /** One box face's surface: flat fill colour, atlas tile (<0 = flat), hurt tint. */
@@ -140,7 +137,7 @@ class MobView {
      * One face of a mob box: project 4 corners, backface-cull against the eye,
      * then fill atlas-textured (or flat-shaded). `mat.hurt` tints the face red
      * for the damage flash. Public because the block torches reuse it.
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param a      world-space corner a
      * @param b      world-space corner b
@@ -152,7 +149,7 @@ class MobView {
      */
     pub(crate) fn drawQuad(
         mut self,
-        p : Player,
+        cam : Camera,
         fb : FrameBuf,
         a : Vec3,
         b : Vec3,
@@ -165,18 +162,10 @@ class MobView {
         const mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
         const my : f64 = (a.y + b.y + c.y + d.y) * 0.25;
         const mz : f64 = (a.z + b.z + c.z + d.z) * 0.25;
-        if ((p.eye.x - mx) * n.x + (p.eye.y - my) * n.y + (p.eye.z - mz) * n.z <= 0.0) {
+        if ((cam.eye.x - mx) * n.x + (cam.eye.y - my) * n.y + (cam.eye.z - mz) * n.z <= 0.0) {
             return;
         }
 
-        const cam : Camera = Camera {
-            eye: p.eye,
-            cosy: p.cosy,
-            siny: p.siny,
-            cosp: p.cosp,
-            sinp: p.sinp,
-            lens: scene.lens,
-        };
         self.project(cam, a, 0);
         self.project(cam, b, 1);
         self.project(cam, c, 2);
@@ -334,7 +323,7 @@ class MobView {
     /**
      * One face of an oriented box: the 4 vertices are corner indices into the
      * `ob*` world-corner buffers filled by drawObox.
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param i0     corner index for vertex 0
      * @param i1     corner index for vertex 1
@@ -346,7 +335,7 @@ class MobView {
      */
     fn oquad(
         mut self,
-        p : Player,
+        cam : Camera,
         fb : FrameBuf,
         i0 : i32,
         i1 : i32,
@@ -378,7 +367,7 @@ class MobView {
         );
 
         self.drawQuad(
-            p,
+            cam,
             fb,
             c0,
             c1,
@@ -397,7 +386,7 @@ class MobView {
      * head/body/legs turn together as a rigid model. The +forward face carries
      * `faceTile` (the animal's face), the rest `skinTile`. Death collapses the
      * box (sink + squash + topple along the heading).
-     * @param p         player providing the eye position and orientation
+     * @param cam       the frame's camera
      * @param a         the actor whose frame the box is placed in (seam-typed)
      * @param fb        the render target (framebuffer + z-buffer + size)
      * @param place     the box centre + half-extents in the mob frame
@@ -408,7 +397,7 @@ class MobView {
      */
     fn drawObox(
         mut self,
-        p : Player,
+        cam : Camera,
         a : dyn ActorVisual,
         fb : FrameBuf,
         place : BoxPlacement,
@@ -478,7 +467,7 @@ class MobView {
             hurt,
         };
         self.oquad(
-            p,
+            cam,
             fb,
             1,
             5,
@@ -489,7 +478,7 @@ class MobView {
             scene
         );
         self.oquad(
-            p,
+            cam,
             fb,
             4,
             0,
@@ -500,7 +489,7 @@ class MobView {
             scene
         );
         self.oquad(
-            p,
+            cam,
             fb,
             2,
             3,
@@ -511,7 +500,7 @@ class MobView {
             scene
         );
         self.oquad(
-            p,
+            cam,
             fb,
             4,
             5,
@@ -522,7 +511,7 @@ class MobView {
             scene
         );
         self.oquad(
-            p,
+            cam,
             fb,
             1,
             0,
@@ -536,7 +525,7 @@ class MobView {
         // Once tipping over, the underside comes into view, so draw it too.
         if (pr > 0.0) {
             self.oquad(
-                p,
+                cam,
                 fb,
                 0,
                 1,
@@ -551,17 +540,17 @@ class MobView {
 
     /**
      * Draw a chicken as a stack of oriented boxes (legs, body, head, beak, wattle).
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      chicken actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawChicken(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawChicken(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         const sw : f64 = (a.walkPhase()).sin() * 0.08;   // forward leg stride
         const leg : i32 = Color::packBytes(232, 150, 40);
         const body : i32 = Color::packBytes(236, 236, 232);
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.07, 0.10, sw), half: vec3(0.035, 0.10, 0.04) },
@@ -571,7 +560,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0 - 0.07, 0.10, 0.0 - sw), half: vec3(0.035, 0.10, 0.04) },
@@ -581,7 +570,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.27, 0.0), half: vec3(0.15, 0.14, 0.18) },
@@ -591,7 +580,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.47, 0.18), half: vec3(0.11, 0.12, 0.10) },
@@ -601,7 +590,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.45, 0.30), half: vec3(0.05, 0.04, 0.06) },
@@ -611,7 +600,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.58, 0.08), half: vec3(0.05, 0.06, 0.04) },
@@ -624,16 +613,16 @@ class MobView {
 
     /**
      * Draw a sheep as a stack of oriented boxes (four legs, woolly body, head).
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      sheep actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawSheep(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawSheep(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         const sw : f64 = (a.walkPhase()).sin() * 0.11;
         const leg : i32 = Color::packBytes(54, 46, 40);
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.18 + sw), half: vec3(0.07, 0.16, 0.07) },
@@ -643,7 +632,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.20, 0.16, 0.18 - sw), half: vec3(0.07, 0.16, 0.07) },
@@ -653,7 +642,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -666,7 +655,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.18 + sw), half: vec3(0.07, 0.16, 0.07) },
@@ -676,7 +665,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.50, 0.0), half: vec3(0.28, 0.30, 0.40) },
@@ -686,7 +675,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.54, 0.46), half: vec3(0.15, 0.15, 0.14) },
@@ -699,16 +688,16 @@ class MobView {
 
     /**
      * Draw a cow as a stack of oriented boxes (four legs, body, head).
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      cow actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawCow(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawCow(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         const sw : f64 = (a.walkPhase()).sin() * 0.12;
         const leg : i32 = Color::packBytes(70, 54, 44);
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0 - 0.26, 0.20, 0.24 + sw), half: vec3(0.09, 0.20, 0.09) },
@@ -718,7 +707,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.26, 0.20, 0.24 - sw), half: vec3(0.09, 0.20, 0.09) },
@@ -728,7 +717,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -741,7 +730,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.26, 0.20, 0.0 - 0.24 + sw), half: vec3(0.09, 0.20, 0.09) },
@@ -751,7 +740,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.60, 0.0), half: vec3(0.38, 0.34, 0.50) },
@@ -761,7 +750,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.64, 0.58), half: vec3(0.18, 0.18, 0.18) },
@@ -774,16 +763,16 @@ class MobView {
 
     /**
      * Draw a pig as a stack of oriented boxes (four legs, body, head, snout).
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      pig actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawPig(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawPig(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         const sw : f64 = (a.walkPhase()).sin() * 0.10;
         const leg : i32 = Color::packBytes(196, 128, 128);
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0 - 0.20, 0.16, 0.20 + sw), half: vec3(0.07, 0.16, 0.07) },
@@ -793,7 +782,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.20, 0.16, 0.20 - sw), half: vec3(0.07, 0.16, 0.07) },
@@ -803,7 +792,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -816,7 +805,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.20, 0.16, 0.0 - 0.20 + sw), half: vec3(0.07, 0.16, 0.07) },
@@ -826,7 +815,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.46, 0.0), half: vec3(0.30, 0.26, 0.42) },
@@ -836,7 +825,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.50, 0.48), half: vec3(0.18, 0.17, 0.16) },
@@ -846,7 +835,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement { ctr: vec3(0.0, 0.47, 0.64), half: vec3(0.08, 0.07, 0.05) },
@@ -862,12 +851,12 @@ class MobView {
      * iconic face on the head's forward face; once the fuse is lit it swaps to
      * the "gilet jaune" charge skin/face, swells to 1.25x and strobes white
      * (faster as the blast nears). The `color` args are the lighting base.
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      creeper actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawCreeper(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawCreeper(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         const sw : f64 = (a.walkPhase()).sin() * 0.10;
         const fuse : i32 = a.fuseLevel();
 
@@ -909,7 +898,7 @@ class MobView {
         // forward face carries the creeper / meme mug. Every extent and offset
         // is scaled by `s` so the swell grows from the feet.
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -922,7 +911,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -935,7 +924,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -948,7 +937,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -961,7 +950,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -974,7 +963,7 @@ class MobView {
             scene
         );
         self.drawObox(
-            p,
+            cam,
             a,
             fb,
             BoxPlacement {
@@ -1025,7 +1014,7 @@ class MobView {
      * sampled once (mobLight) and applied by drawQuad.
      * @param man     chunk manager (light maps, for per-mob ambient light)
      * @param mm      mob manager holding the per-species arrays
-     * @param p       player providing the eye position and orientation
+     * @param cam     the frame's camera
      * @param fb      the render target (framebuffer + z-buffer + size)
      * @param scene   the per-frame mob context (atlas, fog, day-state, hw)
      * @param lcurve  the renderer's brightness lookup table
@@ -1034,7 +1023,7 @@ class MobView {
         mut self,
         man : ChunkManager,
         mm : MobManager,
-        p : Player,
+        cam : Camera,
         fb : FrameBuf,
         scene : MobScene,
         lcurve : i64
@@ -1047,7 +1036,7 @@ class MobView {
         for (i of 0..n) {
             const a : dyn ActorVisual = mm.actorAt(i);
             self.mobLight = self.mobLightAt(man, a.pos(), lcurve, day);
-            self.drawActor(p, a, fb, scene);
+            self.drawActor(cam, a, fb, scene);
         }
     }
 
@@ -1055,18 +1044,18 @@ class MobView {
      * Dispatch one actor to its per-species box model, switched on the seam's
      * `kind()`. The geometry stays per-species; only the collection iteration and
      * the field reads flow through the ActorVisual seam.
-     * @param p      player providing the eye position and orientation
+     * @param cam    the frame's camera
      * @param a      the actor to draw (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
      * @param scene  the per-frame mob context
      */
-    fn drawActor(mut self, p : Player, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
+    fn drawActor(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
         match a.kind() {
-            MobKind::Chicken => { self.drawChicken(p, a, fb, scene); }
-            MobKind::Sheep => { self.drawSheep(p, a, fb, scene); }
-            MobKind::Cow => { self.drawCow(p, a, fb, scene); }
-            MobKind::Pig => { self.drawPig(p, a, fb, scene); }
-            _ => { self.drawCreeper(p, a, fb, scene); }
+            MobKind::Chicken => { self.drawChicken(cam, a, fb, scene); }
+            MobKind::Sheep => { self.drawSheep(cam, a, fb, scene); }
+            MobKind::Cow => { self.drawCow(cam, a, fb, scene); }
+            MobKind::Pig => { self.drawPig(cam, a, fb, scene); }
+            _ => { self.drawCreeper(cam, a, fb, scene); }
         }
     }
 }

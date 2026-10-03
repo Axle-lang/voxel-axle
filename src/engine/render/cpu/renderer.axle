@@ -1,4 +1,4 @@
-// render — the frame conductor.
+// renderer — the software frame conductor.
 //
 // One class, and what it does is decide the ORDER of a frame: clear, sky
 // gradient and celestial bodies, the world faces, the mobs, the selection
@@ -6,15 +6,18 @@
 // Every heavy job lives in a component it composes and none of them knows
 // about the others:
 //
-//   `SkyEngine`    (render::cpu::sky::skyengine)     owns everything above the ground
-//   `TextureAtlas` (render::cpu::atlas)      owns the mip chain
-//   `GammaTables`  (shade::gamma)       owns the sRGB <-> linear tables
-//   `DayLighting`  (shade::daymodel)    owns the sun / sky / brightness cache
-//   `ChunkRenderer`(render::cpu::world::chunkview)  the world-face raster crew
-//   `MobView`      (render::cpu::mobs::mobview)    the mob box models
-//   `Selection`    (render::cpu::selection)  the targeted-block wireframe
-//   `Bloom`        (render::cpu::bloom)      the soft glow
-//   `GodRayFX` / `UnderwaterFX` (render::cpu::postfx)  the other two post passes
+//   `SkyEngine`      (cpu::sky::skyengine)      everything above the ground
+//   `TextureAtlas`   (cpu::atlas)               the mip chain
+//   `GammaTables`    (shade::gamma)             the sRGB <-> linear tables
+//   `DayLighting`    (shade::daymodel)          the sun / sky / brightness cache
+//   `ChunkRenderer`  (cpu::world::chunkview)    the world-face raster crew
+//   `MobView`        (cpu::mobs::mobview)       the mob box models
+//   `Selection`      (cpu::selection)           the targeted-block wireframe
+//   `Bloom`          (cpu::bloom)               the soft glow
+//   `GodRayFX` / `UnderwaterFX` (cpu::postfx)   the other two post passes
+//
+// It is handed a `View` once a frame and builds the frame's `Camera` from it;
+// nothing below it knows there is a player.
 //
 // The two worker counts live here, next to the `Task` arrays that mirror
 // them: a fixed-array size must be an integer literal, so the pair is kept in
@@ -31,18 +34,16 @@ use crate::engine::render::cpu::sky::skyengine::{ SkyEngine };
 use crate::engine::render::cpu::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::engine::render::cpu::atlas::{ TextureAtlas };
 use crate::engine::shade::daymodel::{ DayLighting };
-use crate::engine::render::cpu::world::chunkview::{
-    ChunkRenderer, buildSlotsJob, chunkVisible, viewConeFor, ViewCone,
-};
+use crate::engine::render::cpu::world::chunkview::{ ChunkRenderer, buildSlotsJob };
+use crate::engine::render::view::frustum::{ chunkVisible, viewConeFor, ViewCone };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene, Material };
 use crate::engine::render::cpu::selection::Selection;
 use crate::engine::render::cpu::raster::framebuf::{ clearFrame, clearDepth, FrameBuf };
-use crate::engine::render::view::camera::{ lensFor, Camera, Lens, Projected };
+use crate::engine::render::view::camera::{ lensFor, cameraOf, Camera, Lens, Projected, View };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::shade::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::engine::math::vec3::{ vec3 };
-use crate::engine::entity::player::Player;
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::entity::mobs::MobManager;
 use crate::configs::atlas::{ Tile };
@@ -117,17 +118,15 @@ class RasterCrew {
      * Fill every member's triangle queue, the slots dealt round-robin: member 0
      * on this thread, the rest on their own.
      * @param man    chunk manager holding the loaded chunks and baked faces
-     * @param p      player providing the eye position and orientation
      * @param cam    the camera (eye + orientation + projection width)
      * @param phase  animation time phase (scrolls flowing-water textures)
      */
-    pub(crate) fn build(mut self, man : ChunkManager, p : Player, cam : Camera, phase : f64) : void {
+    pub(crate) fn build(mut self, man : ChunkManager, cam : Camera, phase : f64) : void {
         let builders : Task<i32>[5];
         for (i of 0..5) {
             builders[i] = spawn buildSlotsJob(
                 self.members[(i + 1) as i64],
                 man,
-                p,
                 cam,
                 phase,
                 i + 1,
@@ -137,7 +136,6 @@ class RasterCrew {
 
         self.members[0].buildSlots(
             man,
-            p,
             cam,
             phase,
             0,
@@ -223,6 +221,7 @@ class BandFill : Job {
 class Renderer {
     lens : Lens,          // projection centre + focal length; rebuilt on resize so
                           // the world keeps its scale and the FOV tracks the window
+    cam : Camera,         // this frame's camera: the view `render` was handed, through `lens`
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
     day : DayLighting,    // owns the day/night colour + brightness cache
@@ -250,6 +249,16 @@ class Renderer {
      */
     constructor() {
         self.lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
+        self.cam = cameraOf(
+            View {
+                eye: vec3(0.0, 0.0, 0.0),
+                cosy: 1.0,
+                siny: 0.0,
+                cosp: 1.0,
+                sinp: 0.0,
+            },
+            self.lens
+        );
         self.atlas = new TextureAtlas();
         self.gamma = new GammaTables();
         self.day = new DayLighting();
@@ -327,7 +336,6 @@ class Renderer {
      * owns its pixels, so no two threads touch the same z-buffer word,
      * and each band walks every worker's queue.
      * @param man     chunk manager holding the loaded chunks and baked faces
-     * @param p       player providing the eye position and orientation
      * @param fb      the render target (framebuffer + z-buffer + size)
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
@@ -340,7 +348,6 @@ class Renderer {
     pub(file) fn drawWorld(
         mut self,
         man : ChunkManager,
-        p : Player,
         fb : FrameBuf,
         cam : Camera,
         phase : f64,
@@ -357,7 +364,7 @@ class Renderer {
             day,
             lcurve
         );
-        self.crew.build(man, p, cam, phase);
+        self.crew.build(man, cam, phase);
 
         const tFill : i64 = monotonicNanos();
         self.frame[0] = fb;
@@ -388,7 +395,7 @@ class Renderer {
      * Mobs, torches, the sky paint and post-fx are layered on by the caller
      * after this returns.
      * @param man        chunk manager holding the loaded chunks and baked faces
-     * @param p          player providing the eye position and orientation
+     * @param view       where the frame is seen from (the eye and its look trig)
      * @param fb         the render target (framebuffer + z-buffer + size)
      * @param underwater true when the eye is submerged (clears to deep water,
      *                   skips the sky/celestial pass)
@@ -399,7 +406,7 @@ class Renderer {
     pub(crate) fn render(
         mut self,
         man : ChunkManager,
-        p : Player,
+        view : View,
         fb : FrameBuf,
         underwater : bool,
         phase : f64,
@@ -409,6 +416,10 @@ class Renderer {
         // Refresh the sun direction, daylight factor and sky/fog colour, and keep
         // the value snapshot to hand to the sky draws (and the gradient thread).
         const ds : DayState = self.day.update(dayTime);
+
+        // One Camera carries the eye + look trig + projection width for every
+        // pass this frame, the sky's and the post chain's included.
+        self.cam = cameraOf(view, self.lens);
 
         // Under water the cleared "void" is deep water, and nothing paints over
         // it — `drawSky` returns early down there, so the colour has to be laid
@@ -425,23 +436,12 @@ class Renderer {
         // The sky moves on by a frame whether or not it is drawn: the fog reads
         // its colour field, and the world is fogged even from under water. It
         // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
-        self.sky.update(ds, p, self.lens, worldTime, fb);
+        self.sky.update(ds, self.cam, worldTime, fb);
 
-        // One Camera carries the eye + look trig + projection width for every
-        // face this frame; the world raster owns the rest of the pass.
-        const cam : Camera = Camera {
-            eye: p.eye,
-            cosy: p.cosy,
-            siny: p.siny,
-            cosp: p.cosp,
-            sinp: p.sinp,
-            lens: self.lens,
-        };
         self.drawWorld(
             man,
-            p,
             fb,
-            cam,
+            self.cam,
             phase,
             self.atlas.mip(),
             self.gamma.view(),
@@ -455,15 +455,14 @@ class Renderer {
      * Paint the sky into every pixel the opaque passes left empty. Call after
      * the world, mobs and torches: it reads the z-buffer they wrote, and only
      * computes the pixels that are actually sky.
-     * @param p           player (camera orientation)
      * @param fb          the render target (framebuffer + z-buffer + size)
      * @param underwater  true when the eye is submerged — no sky is visible
      */
-    pub(crate) fn drawSky(mut self, p : Player, fb : FrameBuf, underwater : bool) : void {
+    pub(crate) fn drawSky(mut self, fb : FrameBuf, underwater : bool) : void {
         if (underwater) {
             return;
         }
-        self.sky.draw(self.day.state(), p, fb, self.lens);
+        self.sky.draw(self.day.state(), self.cam, fb);
     }
 
     /**
@@ -491,25 +490,16 @@ class Renderer {
      * terrain silhouettes carve warm bright shafts out of the sky glow. Additive,
      * warm-tinted, scaled by daylight. Skipped with the sun below the horizon or
      * behind the camera. Call after the opaque world + mobs + torches are drawn.
-     * @param p   player (camera orientation)
      * @param fb  the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn godRays(self, p : Player, fb : FrameBuf) : void {
+    pub(crate) fn godRays(self, fb : FrameBuf) : void {
         const ds : DayState = self.day.state();
         if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
             return;
         }
 
         // Project the sun direction to screen through the shared camera.
-        const cam : Camera = Camera {
-            eye: p.eye,
-            cosy: p.cosy,
-            siny: p.siny,
-            cosp: p.cosp,
-            sinp: p.sinp,
-            lens: self.lens,
-        };
-        const pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
+        const pr : Projected = self.cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
         if (pr.cz < 0.05) {
             return;   // sun behind the camera
         }
@@ -580,10 +570,9 @@ class Renderer {
      * quads + a top), reusing the oriented-quad path. Torch voxels emit no cube
      * faces in the mesh; they are collected per slot and drawn here.
      * @param man  chunk manager holding the per-slot torch lists
-     * @param p    player providing the eye position and orientation
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn renderTorches(self, man : ChunkManager, p : Player, fb : FrameBuf) : void {
+    pub(crate) fn renderTorches(self, man : ChunkManager, fb : FrameBuf) : void {
         const hw : f64 = 0.09;
         const ht : f64 = 0.55;
         const mat : Material = Material {
@@ -602,7 +591,7 @@ class Renderer {
         });
 
         const slots : i32 = World::SPAN * World::SPAN;
-        const cone : ViewCone = viewConeFor(p, self.lens);
+        const cone : ViewCone = viewConeFor(self.cam);
         for (slot of 0..slots) {
             if (man.cols.loaded[slot] == 1
                 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
@@ -620,7 +609,7 @@ class Renderer {
                     const y0 : f64 = man.mesher.torches.ty[base + ti] as f64;
                     const y1 : f64 = y0 + ht;
                     self.mobs.drawQuad(
-                        p,
+                        self.cam,
                         fb,
                         vec3(x1, y0, z1),
                         vec3(x1, y0, z0),
@@ -631,7 +620,7 @@ class Renderer {
                         scene
                     );
                     self.mobs.drawQuad(
-                        p,
+                        self.cam,
                         fb,
                         vec3(x0, y0, z0),
                         vec3(x0, y0, z1),
@@ -642,7 +631,7 @@ class Renderer {
                         scene
                     );
                     self.mobs.drawQuad(
-                        p,
+                        self.cam,
                         fb,
                         vec3(x0, y0, z1),
                         vec3(x1, y0, z1),
@@ -653,7 +642,7 @@ class Renderer {
                         scene
                     );
                     self.mobs.drawQuad(
-                        p,
+                        self.cam,
                         fb,
                         vec3(x1, y0, z0),
                         vec3(x0, y0, z0),
@@ -664,7 +653,7 @@ class Renderer {
                         scene
                     );
                     self.mobs.drawQuad(
-                        p,
+                        self.cam,
                         fb,
                         vec3(x0, y1, z0),
                         vec3(x1, y1, z0),
@@ -682,8 +671,7 @@ class Renderer {
     /**
      * Build this frame's mob/torch scene: the atlas mip chain, the colour space,
      * the distance-fog colour and the day/night state (from the render
-     * components) plus the projection half-width. Handed to the MobView draws
-     * each frame.
+     * components). Handed to the MobView draws each frame.
      * @return the per-frame mob scene context
      */
     fn mobScene(mut self) : MobScene {
@@ -693,7 +681,6 @@ class Renderer {
             gam: self.gamma.view(),
             fogT: self.sky.fog(),
             ds,
-            lens: self.lens,
         };
     }
 
@@ -704,20 +691,18 @@ class Renderer {
      * z-buffer (so terrain correctly occludes animals behind it).
      * @param man  chunk manager (light maps, for per-mob ambient light)
      * @param mm   mob manager holding the per-species arrays
-     * @param p    player providing the eye position and orientation
      * @param fb   the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn renderMobs(
         self,
         man : ChunkManager,
         mm : MobManager,
-        p : Player,
         fb : FrameBuf
     ) : void {
         self.mobs.drawAll(
             man,
             mm,
-            p,
+            self.cam,
             fb,
             self.mobScene(),
             self.day.curve()
@@ -746,7 +731,6 @@ class Renderer {
     /**
      * Draw the soft, depth-tested selection outline on the targeted block via
      * the owned Selection helper.
-     * @param p     player providing the eye position and orientation
      * @param fb    the render target (framebuffer + z-buffer + size)
      * @param bx    targeted block x
      * @param by    targeted block y
@@ -756,7 +740,6 @@ class Renderer {
      */
     pub(crate) fn drawSelection(
         self,
-        p : Player,
         fb : FrameBuf,
         bx : i32,
         by : i32,
@@ -764,9 +747,8 @@ class Renderer {
         topH : f64
     ) : void {
         self.sel.draw(
-            p,
+            self.cam,
             fb,
-            self.lens,
             bx,
             by,
             bz,
