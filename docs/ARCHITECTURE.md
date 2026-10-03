@@ -164,8 +164,18 @@ Kept here so they are not mistaken for the design:
 - `engine/entity/mob` imports `world::sim::BlockSim` and `audio::sfx` because a
   `think` step can explode (the creeper) and every mob can speak; both belong
   behind seams.
-- `engine/audio/sfx` holds one voice table per species (`MobKind`), so a new
-  species still edits it.
+- `engine/audio/sfx` lists one line per species (`mobVoice("chicken")`), and
+  `MobKind` / `Mobs::KIND_COUNT` live in `configs`, so a new species still
+  touches both; a species left out is silent rather than a stray read.
+- The game sometimes ends with a segfault after it has finished (seen on
+  `main` before this layout, intermittent, after `--snap` has written its
+  capture). The worker threads are stopped and joined before anything is
+  released, so the suspect is the teardown of the composed objects; it needs a
+  debugger, not more guessing.
+- Nothing allocated with `Mem::take` is released at shutdown (the light
+  volumes, the mesh, the sky tables). Harmless for a process that is exiting,
+  but a renderer that can be torn down and rebuilt — a GPU backend falling back
+  to software — will need `close()` all the way down.
 - `render/cpu/world/chunkview` (1250 lines) mixes scene extraction (corner
   probes, water heights, shadow-run splitting) with CPU clipping and queueing;
   it splits along a `FaceSink` seam as part of GPU step 2.
