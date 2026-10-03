@@ -13,8 +13,9 @@
 
 use smalt::Mem;
 use crate::engine::block::blocks::{
-    tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, boxOf
+    tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable,
 };
+use crate::engine::block::box::{ boxOf };
 
 /**
  * Cells a greedy run may span.

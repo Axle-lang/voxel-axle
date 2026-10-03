@@ -1,0 +1,130 @@
+// box — a block's shape within its cell, and the one function that answers it.
+//
+// Collision, the mesher, the picker and the selection outline all read a block's
+// extent through `boxOf`, so a new partial block (a slab, a carpet) is one arm
+// in its shape capability and nothing else.
+
+use crate::engine::block::props::{ shapeOf };
+use crate::engine::block::blocks::{ hasCollisionBox };
+use crate::configs::blocks::{ Block };
+
+/**
+ * A block's box **within its own cell**, in cell units: 0 is the cell
+ * floor, 1 its ceiling.
+ *
+ * This is the engine's shape model, and it is deliberately an interval
+ * rather than a height. A height can only describe a box resting on the
+ * floor — a snow layer, a bottom slab — so with one the engine cannot
+ * represent a top slab, and every system that wanted to ask "does the
+ * body fit here" could only ask "is the body below the top".
+ *
+ * The defaults are a full cube, so a literal names only what it changes.
+ */
+struct BlockBox {
+    /** Bottom of the box, 0 at the cell floor. */
+    pub(crate) yMin : f64 = 0.0,
+
+    /** Top of the box, 1 at the cell ceiling. */
+    pub(crate) yMax : f64 = 1.0,
+
+    /**
+     * The box's vertical extent.
+     * @return the height in cell units
+     */
+    pub(crate) fn height(self) : f64 { return self.yMax - self.yMin; }
+
+    /**
+     * Whether the box fills its cell.
+     * @return whether it is a full cube
+     */
+    pub(crate) fn isFull(self) : bool { return self.yMin <= 0.0 && self.yMax >= 1.0; }
+
+    /**
+     * Whether the box has no extent at all.
+     * @return whether it is empty
+     */
+    pub(crate) fn isEmpty(self) : bool { return self.yMax <= self.yMin; }
+
+    /**
+     * Whether the box sits on the cell floor.
+     * @return whether it rests on the floor
+     */
+    pub(crate) fn restsOnFloor(self) : bool { return self.yMin <= 0.0; }
+
+    /**
+     * The box's top, in world Y, for a cell whose floor is at `cellY`.
+     * @param cellY  the world Y of the cell floor
+     * @return the world Y of the box's top
+     */
+    pub(crate) fn topAt(self, cellY : f64) : f64 { return cellY + self.yMax; }
+
+    /**
+     * The box's bottom, in world Y, for a cell whose floor is at `cellY`.
+     * @param cellY  the world Y of the cell floor
+     * @return the world Y of the box's bottom
+     */
+    pub(crate) fn bottomAt(self, cellY : f64) : f64 { return cellY + self.yMin; }
+}
+
+/** Levels a layered block is quantised to — eighths of a cell, as Minecraft does. */
+const BLOCK_LEVELS : i32 = 8;
+
+/**
+ * THE single authority for a block's box.
+ *
+ * A pure function of the **stored voxel** — its id and its level — and of
+ * nothing else. That is the whole point of the signature: the height used
+ * to come from noise sampled at the cell's world coordinates, which meant
+ * a snow layer could not be placed, dug or changed (it was whatever the
+ * noise said there), the block table had to import the terrain field, and
+ * through it the world seed reached behind the collision capability.
+ *
+ * `level` is the stored level, 1..8 for a layered block. **Zero means
+ * "unset"** and takes the id's own default, so every writer that does not
+ * care about levels keeps working and full blocks are unaffected.
+ *
+ * A block with no collision box answers an empty box rather than a full
+ * cube, so a caller that forgets the predicate gets "nothing here" rather
+ * than a phantom wall.
+ *
+ * @param id     the block id occupying the cell
+ * @param level  the cell's stored level; 0 for the id's default
+ * @return the block's box within its cell
+ */
+fn boxOf(id : Block, level : i32) : BlockBox {
+    if (!hasCollisionBox(id)) {
+        return BlockBox { yMax: 0.0 };
+    }
+    if (!shapeOf(id).isLayered()) {
+        // One field named: an empty struct literal is not a form the parser
+        // accepts, even when every field has a default.
+        return BlockBox { yMax: 1.0 };
+    }
+    let n : i32 = level;
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > BLOCK_LEVELS) {
+        n = BLOCK_LEVELS;
+    }
+    return BlockBox { yMax: (n as f64) / (BLOCK_LEVELS as f64) };
+}
+
+/**
+ * The level a real height quantises to, 1..8.
+ *
+ * What a generator calls once, to turn a continuous field into the level
+ * it stores — after which nothing re-derives it.
+ * @param height  a height in cell units
+ * @return the level that height rounds to, at least 1
+ */
+fn levelOfHeight(height : f64) : i32 {
+    let n : i32 = (height * (BLOCK_LEVELS as f64)).round() as i32;
+    if (n < 1) {
+        n = 1;
+    }
+    if (n > BLOCK_LEVELS) {
+        n = BLOCK_LEVELS;
+    }
+    return n;
+}

@@ -19,7 +19,7 @@
 
 use crate::engine::math::vec3::{ IVec3 };
 use crate::configs::blocks::{ Block };
-use crate::engine::block::blocks::{ BlockBox };
+use crate::engine::block::box::{ BlockBox };
 
 // ─── Voxel read capabilities ────────────────────────────────────────────────
 

@@ -1,0 +1,479 @@
+// props — every behavioural capability of a block, as a value and a factory.
+//
+// One tiny value struct per capability, each implementing its trait with plain
+// field returns, plus one `match id` factory. Blocks that share an attribute
+// collapse into an or-pattern arm; the `_` arm is the common default (a plain
+// full-cube solid). Appearance is the one capability large enough for its own
+// file (block::surface).
+
+use crate::engine::block::traits::{
+    Voidable, Occluding, Collidable, Fluid, Shaped, Foliage, Weighted, Emissive, Audible, Diggable,
+};
+use crate::configs::audio::{ AudioMaterial };
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+
+/** Air-ness: the one field the emptiness capability needs. */
+struct Emptiness : Voidable {
+    air : bool,
+
+    /**
+     * Whether the block is air.
+     * @return true for the air block
+     */
+    pub(crate) fn isAir(self) : bool { return self.air; }
+}
+
+/**
+ * Emptiness for a block: only air is empty.
+ * @param id  the block
+ * @return its emptiness capability
+ */
+fn emptyOf(id : Block) : Emptiness {
+    return match id {
+        Block::Air => Emptiness { air: true },
+        _ => Emptiness { air: false },
+    };
+}
+
+/** Light/sight occlusion flags. */
+struct Occlusion : Occluding {
+    transparent : bool,
+    opaque : bool,
+    transmit : f64,
+
+    /**
+     * Whether a face against this block is drawn (light/air passes).
+     * @return transparency
+     */
+    pub(crate) fn isTransparent(self) : bool { return self.transparent; }
+
+    /**
+     * Whether the block stops light and casts shade.
+     * @return opacity
+     */
+    pub(crate) fn isOpaque(self) : bool { return self.opaque; }
+
+    /**
+     * The fraction of a light ray that survives one block of this.
+     * @return the transmittance
+     */
+    pub(crate) fn lightTransmit(self) : f64 { return self.transmit; }
+}
+
+/**
+ * Occlusion for a block, on three axes that are NOT the same question.
+ *
+ * `transparent` is about sight: whether the face behind it is drawn. `opaque`
+ * is about the flood-filled light volumes, which are a level per cell and so
+ * can only answer yes or no. `transmit` is about the RAYS — the cast shadow and
+ * the sky-access bake — and those can carry a fraction, which is the only one of
+ * the three that can describe a canopy honestly.
+ *
+ * Air / water / torch / snow layer let sight and light through. Leaves cull
+ * faces like a solid and stay out of the flood's way, but they dim a ray that
+ * crosses them. Everything else is a wall to all three.
+ * @param id  the block
+ * @return its occlusion capability
+ */
+fn occlusionOf(id : Block) : Occlusion {
+    return match id {
+        Block::Air
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+        | Block::Torch | Block::SnowLayer
+            => Occlusion {
+                transparent: true,
+                opaque: false,
+                transmit: 1.0,
+            },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Occlusion {
+                transparent: false,
+                opaque: false,
+                transmit: Light::LEAF_TRANSMIT,
+            },
+        _ => Occlusion {
+            transparent: false,
+            opaque: true,
+            transmit: 0.0,
+        },
+    };
+}
+
+/** Physical-presence flags: aim target, collision box, walk-through. */
+struct Collision : Collidable {
+    solid : bool,
+    collisionBox : bool,
+    collidable : bool,
+
+    /**
+     * Whether the block is a "real" (non-air, non-water) block.
+     * @return solidity
+     */
+    pub(crate) fn isSolid(self) : bool { return self.solid; }
+
+    /**
+     * Whether the block carries a physical collision box.
+     * @return whether it has a box
+     */
+    pub(crate) fn hasCollisionBox(self) : bool { return self.collisionBox; }
+
+    /**
+     * Whether the player collides with / stands on the block.
+     * @return whether collidable
+     */
+    pub(crate) fn isCollidable(self) : bool { return self.collidable; }
+}
+
+/**
+ * Collision for a block: air and water have no presence at all; a torch is
+ * solid to aim at but has no box; the snow layer has a box you don't collide
+ * with; everything else is a full standable solid.
+ * @param id  the block
+ * @return its collision capability
+ */
+fn collisionOf(id : Block) : Collision {
+    return match id {
+        Block::Air
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+            => Collision {
+                solid: false,
+                collisionBox: false,
+                collidable: false,
+            },
+        Block::Torch => Collision {
+            solid: true,
+            collisionBox: false,
+            collidable: false,
+        },
+        Block::SnowLayer => Collision {
+            solid: true,
+            collisionBox: true,
+            collidable: false,
+        },
+        _ => Collision {
+            solid: true,
+            collisionBox: true,
+            collidable: true,
+        },
+    };
+}
+
+/** Water state: is-water / is-source and the flow level. */
+struct Flow : Fluid {
+    water : bool,
+    source : bool,
+    fluid : i32,
+
+    /**
+     * Whether the block is any water (source or flowing).
+     * @return whether water
+     */
+    pub(crate) fn isWater(self) : bool { return self.water; }
+
+    /**
+     * Whether the block is the still water source.
+     * @return whether the source
+     */
+    pub(crate) fn isSource(self) : bool { return self.source; }
+
+    /**
+     * The water amount of the cell (8 source, 7..1 flowing, 0 none).
+     * @return fluid level
+     */
+    pub(crate) fn fluidLevel(self) : i32 { return self.fluid; }
+}
+
+/**
+ * Fluid state for a block: the still source is level 8; each flowing block
+ * carries its own level 7..1; everything else is dry.
+ * @param id  the block
+ * @return its fluid capability
+ */
+fn flowOf(id : Block) : Flow {
+    return match id {
+        Block::Water => Flow {
+            water: true,
+            source: true,
+            fluid: 8,
+        },
+        Block::FlowWater1 => Flow {
+            water: true,
+            source: false,
+            fluid: 1,
+        },
+        Block::FlowWater2 => Flow {
+            water: true,
+            source: false,
+            fluid: 2,
+        },
+        Block::FlowWater3 => Flow {
+            water: true,
+            source: false,
+            fluid: 3,
+        },
+        Block::FlowWater4 => Flow {
+            water: true,
+            source: false,
+            fluid: 4,
+        },
+        Block::FlowWater5 => Flow {
+            water: true,
+            source: false,
+            fluid: 5,
+        },
+        Block::FlowWater6 => Flow {
+            water: true,
+            source: false,
+            fluid: 6,
+        },
+        Block::FlowWater7 => Flow {
+            water: true,
+            source: false,
+            fluid: 7,
+        },
+        _ => Flow {
+            water: false,
+            source: false,
+            fluid: 0,
+        },
+    };
+}
+
+/** Non-cube geometry flags. */
+struct Shape : Shaped {
+    snow : bool,
+    partial : bool,
+    layered : bool,
+
+    /**
+     * Whether the block is the thin partial-height snow layer.
+     * @return whether snow layer
+     */
+    pub(crate) fn isSnowLayer(self) : bool { return self.snow; }
+
+    /**
+     * Whether the block has a partial, floor-resting box.
+     * @return whether partial
+     */
+    pub(crate) fn isPartialShape(self) : bool { return self.partial; }
+
+    /**
+     * Whether the stored level sets the height.
+     * @return whether layered
+     */
+    pub(crate) fn isLayered(self) : bool { return self.layered; }
+}
+
+/**
+ * Shape for a block: only the snow layer is a partial floor-resting box
+ * today, and it is the one whose height its stored level sets.
+ * @param id  the block
+ * @return its shape capability
+ */
+fn shapeOf(id : Block) : Shape {
+    return match id {
+        Block::SnowLayer => Shape {
+            snow: true,
+            partial: true,
+            layered: true,
+        },
+        _ => Shape {
+            snow: false,
+            partial: false,
+            layered: false,
+        },
+    };
+}
+
+/** Plant-family flags: leaves vs grassy top. */
+struct Plant : Foliage {
+    leaves : bool,
+    grassy : bool,
+
+    /**
+     * Whether the block is a leaf block.
+     * @return whether leaves
+     */
+    pub(crate) fn isLeaves(self) : bool { return self.leaves; }
+
+    /**
+     * Whether the block is a grass-family surface.
+     * @return whether grassy
+     */
+    pub(crate) fn isGrassy(self) : bool { return self.grassy; }
+}
+
+/**
+ * Foliage for a block: the grass-family surfaces are grassy; the six log
+ * species' canopies plus cherry are leaves; everything else is neither.
+ * @param id  the block
+ * @return its foliage capability
+ */
+fn plantOf(id : Block) : Plant {
+    return match id {
+        Block::Grass | Block::GrassSavanna | Block::GrassJungle
+        | Block::GrassSwamp | Block::GrassTaiga
+            => Plant { leaves: false, grassy: true },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Plant { leaves: true, grassy: false },
+        _ => Plant { leaves: false, grassy: false },
+    };
+}
+
+/** Gravity flag. */
+struct Weight : Weighted {
+    falling : bool,
+
+    /**
+     * Whether the block is subject to gravity.
+     * @return whether it falls
+     */
+    pub(crate) fn falls(self) : bool { return self.falling; }
+}
+
+/**
+ * Weight for a block: sand, red sand and gravel drop when unsupported.
+ * @param id  the block
+ * @return its weight capability
+ */
+fn weightOf(id : Block) : Weight {
+    return match id {
+        Block::Sand | Block::RedSand | Block::Gravel => Weight { falling: true },
+        _ => Weight { falling: false },
+    };
+}
+
+/** Emitted-light level. */
+struct Emission : Emissive {
+    pub(crate) r : i32,
+    pub(crate) g : i32,
+    pub(crate) b : i32,
+
+    /**
+     * How far the block's light carries, as the strongest channel — what a
+     * caller asking "does this glow, and how much" wants.
+     * @return emitted light (0 none, 1..15)
+     */
+    pub(crate) fn lightEmission(self) : i32 {
+        let m : i32 = self.r;
+        if (self.g > m) {
+            m = self.g;
+        }
+        if (self.b > m) {
+            m = self.b;
+        }
+        return m;
+    }
+}
+
+/**
+ * Emission for a block, PER CHANNEL: a level each for red, green and blue,
+ * which is both how bright the source is and what colour it is.
+ *
+ * The flood loses a level per block travelled, so a channel that starts lower
+ * also reaches less far — a torch is white-hot at its own block and warms to
+ * orange at the edge of its reach, which is what a flame does. Colour and
+ * falloff are the same number on purpose; there is nothing else for the level
+ * to mean.
+ * @param id  the block
+ * @return its emission capability
+ */
+fn emissionOf(id : Block) : Emission {
+    return match id {
+        Block::Glowstone => Emission {
+            r: 15,
+            g: 14,
+            b: 12,
+        },
+        Block::Torch => Emission {
+            r: 14,
+            g: 11,
+            b: 8,
+        },
+        _ => Emission {
+            r: 0,
+            g: 0,
+            b: 0,
+        },
+    };
+}
+
+/** Sound material. */
+struct Sound : Audible {
+    matId : AudioMaterial,
+
+    /**
+     * Footstep / dig sound material.
+     * @return the material id
+     */
+    pub(crate) fn material(self) : AudioMaterial { return self.matId; }
+}
+
+/**
+ * Sound for a block, grouped by material family; stone is the default for
+ * ores, bricks, terracotta, glowstone, torch, water, air and the snow layer.
+ * @param id  the block
+ * @return its sound capability
+ */
+fn soundOf(id : Block) : Sound {
+    return match id {
+        Block::Grass | Block::GrassSavanna | Block::GrassJungle
+        | Block::GrassSwamp | Block::GrassTaiga
+        | Block::Podzol | Block::Mycelium | Block::Dirt | Block::CoarseDirt
+            => Sound { matId: AudioMaterial::Grass },
+        Block::Sand | Block::RedSand | Block::Sandstone | Block::RedSandstone
+            => Sound { matId: AudioMaterial::Sand },
+        Block::Gravel | Block::Clay
+            => Sound { matId: AudioMaterial::Gravel },
+        Block::Snow
+            => Sound { matId: AudioMaterial::Snow },
+        Block::Ice | Block::PackedIce
+            => Sound { matId: AudioMaterial::Glass },
+        Block::Wood | Block::Planks | Block::WoodBirch | Block::WoodSpruce | Block::WoodAcacia
+        | Block::WoodJungle | Block::WoodDarkOak | Block::Pumpkin | Block::Bamboo
+        | Block::CherryLog
+            => Sound { matId: AudioMaterial::Wood },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+        | Block::Cactus | Block::Melon | Block::MushroomStem
+        | Block::RedMushroom | Block::BrownMushroom
+            => Sound { matId: AudioMaterial::Foliage },
+        _ => Sound { matId: AudioMaterial::Stone },
+    };
+}
+
+/** Break resistance. */
+struct Toughness : Diggable {
+    hard : f64,
+
+    /**
+     * Break resistance (unused today; reserved for digging).
+     * @return hardness
+     */
+    pub(crate) fn hardness(self) : f64 { return self.hard; }
+}
+
+/**
+ * Toughness for a block: air / water / torch break instantly (0.0), leaves are
+ * flimsy (0.2), the snow layer barely there (0.1), every full block is 1.0.
+ * @param id  the block
+ * @return its toughness capability
+ */
+fn toughnessOf(id : Block) : Toughness {
+    return match id {
+        Block::Air | Block::Torch
+        | Block::Water | Block::FlowWater1 | Block::FlowWater2 | Block::FlowWater3
+        | Block::FlowWater4 | Block::FlowWater5 | Block::FlowWater6 | Block::FlowWater7
+            => Toughness { hard: 0.0 },
+        Block::Leaves | Block::LeavesBirch | Block::LeavesSpruce | Block::LeavesAcacia
+        | Block::LeavesJungle | Block::LeavesDarkOak | Block::CherryLeaves
+            => Toughness { hard: 0.2 },
+        Block::SnowLayer => Toughness { hard: 0.1 },
+        _ => Toughness { hard: 1.0 },
+    };
+}

@@ -12,9 +12,7 @@
 // falling to the world height — so every disturbance terminates.
 
 use crate::engine::world::chunks::ChunkManager;
-use crate::engine::block::blocks::{
-    isWater, isSolid, falls, fluidLevel, fluidOfLevel, isSource
-};
+use crate::engine::block::blocks::{ isWater, isSolid, falls, fluidLevel, fluidOfLevel, isSource };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };

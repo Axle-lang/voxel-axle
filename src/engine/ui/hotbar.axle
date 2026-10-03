@@ -6,7 +6,7 @@
 use smalt::Mem;
 use smalt::Color;
 use smalt::{Frame, Rect};
-use crate::engine::block::blocks::tileFor;
+use crate::engine::block::blocks::{ tileFor };
 use crate::configs::atlas::{ Atlas };
 use crate::configs::blocks::{ Block };
 use crate::configs::face::{ FaceDir };

@@ -13,7 +13,8 @@ use crate::game::world::terrain::{
     terrainHeight, temperature, humidity, treeHash, hashI, snowDepth
 };
 use crate::game::world::biomes::{ biomeAt, biomeDef, biomeSurface, BiomeDef };
-use crate::engine::block::blocks::{ isLeaves, levelOfHeight };
+use crate::engine::block::blocks::{ isLeaves };
+use crate::engine::block::box::{ levelOfHeight };
 use crate::engine::world::voxstore::VoxStore;
 use crate::game::world::treegen::{ stampTree };
 use crate::engine::math::vec3::{ IVec3, ivec3 };

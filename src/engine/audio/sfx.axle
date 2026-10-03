@@ -24,7 +24,7 @@
 
 use smalt::{AssetFile, Mixer, SoundBank};
 
-use crate::engine::block::blocks::materialOf;
+use crate::engine::block::blocks::{ materialOf };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3 };
 use crate::configs::audio::{ Audio, AudioMaterial };
 use crate::configs::blocks::{ Block };

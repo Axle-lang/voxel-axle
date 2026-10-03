@@ -1,0 +1,175 @@
+// traits — what the engine can ask about a block, one capability at a time.
+//
+// Block behaviour is split into small, single-responsibility CAPABILITY traits.
+// Data can't live on a trait, so every capability pairs its trait with a value
+// `struct` (block::props, block::surface) that holds exactly those fields and
+// returns them through trivial getters.
+
+use crate::configs::audio::{ AudioMaterial };
+use crate::configs::face::{ FaceDir };
+
+/** Emptiness: whether the cell holds the air block (no substance at all). */
+trait Voidable {
+    /**
+     * Whether the block is air.
+     * @return true for the air block
+     */
+    fn isAir(self) : bool;
+}
+
+/** How light and sight pass through the cell — face culling and shading. */
+trait Occluding {
+    /**
+     * Whether a face against this block is drawn.
+     * @return transparency
+     */
+    fn isTransparent(self) : bool;
+
+    /**
+     * Whether the block stops the flood-filled light.
+     * @return opacity
+     */
+    fn isOpaque(self) : bool;
+
+    /**
+     * The fraction of a light ray that survives one block of this (0 = shade, 1 = clear).
+     * @return the transmittance
+     */
+    fn lightTransmit(self) : f64;
+}
+
+/** Physical presence: what the look-ray targets and the player stands against. */
+trait Collidable {
+    /**
+     * Whether the look-ray targets the block.
+     * @return solidity
+     */
+    fn isSolid(self) : bool;
+
+    /**
+     * Whether the block carries a physical box.
+     * @return whether it has a box
+     */
+    fn hasCollisionBox(self) : bool;
+
+    /**
+     * Whether the player collides with / stands on the block.
+     * @return whether collidable
+     */
+    fn isCollidable(self) : bool;
+}
+
+/** Water behaviour: is-water / is-source and the flow level (0 = dry). */
+trait Fluid {
+    /**
+     * Whether the block is any water.
+     * @return whether water
+     */
+    fn isWater(self) : bool;
+
+    /**
+     * Whether the block is the still water source.
+     * @return whether the source
+     */
+    fn isSource(self) : bool;
+
+    /**
+     * The water amount of the cell (8 source, 7..1 flowing, 0 none).
+     * @return fluid level
+     */
+    fn fluidLevel(self) : i32;
+}
+
+/** Non-cube geometry: the block's box within its own cell. */
+trait Shaped {
+    /**
+     * Whether the block is the thin snow layer.
+     * @return whether snow layer
+     */
+    fn isSnowLayer(self) : bool;
+
+    /**
+     * Whether the block's box is smaller than its cell.
+     * @return whether partial
+     */
+    fn isPartialShape(self) : bool;
+
+    /**
+     * Whether the block's height is set by its stored level rather than fixed.
+     * @return whether layered
+     */
+    fn isLayered(self) : bool;
+}
+
+/** Plant-family surfaces: leaves (light-leaking canopy) and grassy tops. */
+trait Foliage {
+    /**
+     * Whether the block is a leaf block.
+     * @return whether leaves
+     */
+    fn isLeaves(self) : bool;
+
+    /**
+     * Whether the block is a grass-family surface.
+     * @return whether grassy
+     */
+    fn isGrassy(self) : bool;
+}
+
+/** Gravity: whether the block drops when unsupported (sand / gravel). */
+trait Weighted {
+    /**
+     * Whether the block falls when unsupported.
+     * @return whether it falls
+     */
+    fn falls(self) : bool;
+}
+
+/** Light the block radiates into the world (0 none, 1..15). */
+trait Emissive {
+    /**
+     * How far the block's light carries.
+     * @return emitted light (0 none, 1..15)
+     */
+    fn lightEmission(self) : i32;
+}
+
+/** Sound identity: the footstep / dig material. */
+trait Audible {
+    /**
+     * The footstep / dig material.
+     * @return the material id
+     */
+    fn material(self) : AudioMaterial;
+}
+
+/** Appearance: per-face atlas tile, bounce albedo and fallback colour. */
+trait Textured {
+    /**
+     * Atlas tile for the given face.
+     * @param dir  the face direction
+     * @return the atlas tile index
+     */
+    fn tile(self, dir : FaceDir) : i32;
+
+    /**
+     * Surface albedo for coloured indirect light.
+     * @return packed rgb
+     */
+    fn albedo(self) : i32;
+
+    /**
+     * Base colour (fallback / hotbar swatch).
+     * @return packed rgb
+     */
+    fn color(self) : i32;
+}
+
+/** Break resistance (reserved for digging). */
+trait Diggable {
+    /**
+     * Break resistance.
+     * @return hardness
+     */
+    fn hardness(self) : f64;
+}

@@ -22,7 +22,8 @@
 // on (VoxelQuery / VoxelEdit / LightSample) never moved.
 
 use std::sys::sleep;
-use crate::engine::block::blocks::{ isSolid, isCollidable, boxOf, BlockBox };
+use crate::engine::block::blocks::{ isSolid, isCollidable };
+use crate::engine::block::box::{ boxOf, BlockBox };
 use crate::engine::world::voxstore::{ VoxStore, VoxData };
 use crate::engine::world::mesh::meshbuf::{ ColumnRing };
 use crate::engine::world::light::lightstore::{ LightEngine };

@@ -18,9 +18,8 @@ use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
 use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::engine::world::voxstore::VoxStore;
 use crate::engine::world::mesh::meshbuf::{ ColumnRing };
-use crate::engine::block::blocks::{
-    isOpaque, lightTransmit, emissionOf, albedoFor, Emission
-};
+use crate::engine::block::blocks::{ isOpaque, lightTransmit, albedoFor };
+use crate::engine::block::props::{ emissionOf, Emission };
 use crate::engine::world::seams::{
     LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels,
 };
