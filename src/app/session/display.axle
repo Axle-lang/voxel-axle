@@ -1,0 +1,146 @@
+// display — the window, and the framebuffer and depth buffer the game draws
+// into it.
+
+use smalt::{ Bmp, Frame, Mem, Platform, PlatformError, Surface, Window, WindowDesc };
+use crate::engine::math::narrow::{ FLOAT_BYTES };
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
+use crate::engine::render::view::camera::{ Viewport, viewportFor };
+
+const WINDOW_TITLE : string = "Axle Voxel — survival";
+
+/**
+ * The window, and the framebuffer and depth buffer the game draws into it.
+ * Both buffers follow the window's shape, so their addresses are read each
+ * frame and never kept: a resize moves them.
+ */
+class Display {
+    platform : Platform,
+    pub(crate) win : Window,
+    screen : Surface,
+    zbuf : i64,
+
+    /**
+     * Opens a window of this size, with a framebuffer already its shape, so
+     * nothing has to be resized into place on frame two.
+     * @param w  the window's width, in pixels
+     * @param h  the window's height, in pixels
+     */
+    constructor(w : i32, h : i32) ! PlatformError {
+        const vp = viewportFor(w, h);
+        const desc = WindowDesc {
+            title: WINDOW_TITLE,
+            w,
+            h,
+            resizable: true,
+        };
+
+        self.platform = new Platform()?;
+        self.win = self.platform.open(desc)?;
+        self.screen = new Surface(vp.w, vp.h);
+        self.zbuf = takeDepth(vp);
+    }
+
+    /**
+     * The framebuffer's width — not the window's, once the pixel budget caps it.
+     * @return the width, in pixels
+     */
+    pub(crate) fn width(self) : i32 {
+        return self.screen.width();
+    }
+
+    /**
+     * The framebuffer's height — not the window's, once the pixel budget caps it.
+     * @return the height, in pixels
+     */
+    pub(crate) fn height(self) : i32 {
+        return self.screen.height();
+    }
+
+    /**
+     * The render target the world passes fill.
+     * @return this frame's pixels, depth buffer and shape
+     */
+    pub(crate) fn frameBuf(self) : FrameBuf {
+        return FrameBuf {
+            pixels: self.screen.base(),
+            zbuf: self.zbuf,
+            w: self.width(),
+            h: self.height(),
+        };
+    }
+
+    /**
+     * The same pixels, as the drawing surface the overlay paints on.
+     * @return a `Frame` valid for this frame only
+     */
+    pub(crate) fn overlay(mut self) : Frame {
+        return self.screen.frame();
+    }
+
+    /**
+     * A window-space point in framebuffer pixels.
+     * @param x  the point's x, in window pixels
+     * @param y  the point's y, in window pixels
+     * @return the point, scaled by the framebuffer-to-window ratio
+     */
+    pub(crate) fn toFrame(self, x : i32, y : i32) : (x: i32, y: i32) {
+        const winW = self.win.width().max(1);
+        const winH = self.win.height().max(1);
+        return (x * self.width() / winW, y * self.height() / winH);
+    }
+
+    /**
+     * Matches the framebuffer to the window — both axes, up to a pixel budget —
+     * so going fullscreen widens the view instead of zooming into it.
+     * @return whether the buffers were reallocated
+     */
+    pub(crate) fn fit(mut self) : bool {
+        const winW = self.win.width();
+        const winH = self.win.height();
+        if (winW < 1 || winH < 1) {
+            return false;
+        }
+
+        const want = viewportFor(winW, winH);
+        if (want.w == self.width() && want.h == self.height()) {
+            return false;
+        }
+
+        self.screen.resize(want.w, want.h);
+        Mem::release(self.zbuf);
+        self.zbuf = takeDepth(want);
+        return true;
+    }
+
+    /** Blits the framebuffer to the window, scaled to its client area. */
+    pub(crate) fn present(mut self) : void {
+        self.screen.present(self.win);
+    }
+
+    /**
+     * Writes what is on screen to a BMP file.
+     * @param path  the file to write
+     * @return whether the file was written
+     */
+    pub(crate) fn capture(mut self, path : string) : bool {
+        return Bmp::write(path, self.screen.frame());
+    }
+
+    /** Releases the buffers before the window, the window before the platform. */
+    pub(crate) fn close(self) : void {
+        Mem::release(self.zbuf);
+        self.screen.close();
+        self.win.close();
+        self.platform.close();
+    }
+}
+
+/**
+ * A depth buffer for a framebuffer of this shape.
+ * @param vp  the framebuffer's shape
+ * @return the buffer's address, released with `Mem::release`
+ */
+fn takeDepth(vp : Viewport) : i64 {
+    const pixels = (vp.w as i64) * (vp.h as i64);
+    return Mem::take(pixels * FLOAT_BYTES);
+}

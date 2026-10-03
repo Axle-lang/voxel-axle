@@ -1,0 +1,95 @@
+// state — the small values one run of the game keeps between frames: input
+// edges, the scripted view and walk, the clocks a frame renders by, and the
+// per-pass timings `--snap` reports.
+
+use crate::engine::entity::player::{ Player };
+use crate::engine::render::cpu::renderer::Renderer;
+
+/** One input's level last frame, so a press is seen once, on its way down. */
+struct Edge {
+    pub(crate) held : bool = false;
+
+    /**
+     * Records this frame's level.
+     * @param down  whether the input is down now
+     * @return whether it went down since the last call
+     */
+    pub(crate) fn rose(mut self, down : bool) : bool {
+        const pressed = down && !self.held;
+        self.held = down;
+        return pressed;
+    }
+}
+
+/** A view fixed by `--look`, held against the mouse for the whole run. */
+struct LookPin {
+    pub(crate) on : bool;
+    pub(crate) yaw : f64;
+    pub(crate) pitch : f64;
+}
+
+/** `--walk`: a sprint straight ahead until `reach` blocks from where it began. */
+struct ScriptedWalk {
+    pub(crate) reach : f64;
+    pub(crate) x0 : f64;
+    pub(crate) z0 : f64;
+
+    /**
+     * Whether the walk still has ground to cover, and so drives the player.
+     * @param p  the player being walked
+     * @return true while the player is closer than `reach` to where the walk began
+     */
+    pub(crate) fn drives(self, p : Player) : bool {
+        if (self.reach <= 0.0) {
+            return false;
+        }
+        const dx = p.pos.x - self.x0;
+        const dz = p.pos.z - self.z0;
+        return dx * dx + dz * dz < self.reach * self.reach;
+    }
+}
+
+/** Where in its days and seconds the run is, as this frame renders it. */
+struct Scene {
+    pub(crate) dayTime : f64;    // [0, 1), the sun's hour
+    pub(crate) seconds : f64;    // since the run began: the wind, and so the clouds
+    pub(crate) ripple : f64;     // the water's phase
+    pub(crate) underwater : bool;
+}
+
+/** Microseconds spent in each render pass, summed over the run for `--snap`. */
+struct FrameTimes {
+    pub(crate) world : i64 = 0;
+    pub(crate) rays : i64 = 0;
+    pub(crate) bloom : i64 = 0;
+    pub(crate) blit : i64 = 0;
+    pub(crate) frames : i64 = 0;
+
+    /**
+     * Prints the per-frame averages. The world pass is split in two, because
+     * its queue build runs on six workers and its fill on twelve bands.
+     * @param r  the renderer, which times the fill and the sky itself
+     */
+    pub(crate) fn report(self, r : Renderer) : void {
+        const n = self.frames;
+        if (n == 0) {
+            return;
+        }
+
+        const world = self.world / n;
+        const fill = r.fillMicros() / n;
+        const build = world - fill;
+        const skyMarch = r.skyMarchMicros() / n;
+        const skyDraw = r.skyDrawMicros() / n;
+
+        Console::println("  world = build ${build}us (6 workers)"
+            + " + fill ${fill}us (12 bands)"
+            + " over ${r.triCount()} tris");
+        Console::println("  per frame (us): world=${world}"
+            + " sky=${skyMarch}+${skyDraw}"
+            + " rays=${self.rays / n}"
+            + " bloom=${self.bloom / n}"
+            + " blit=${self.blit / n}"
+            + "  over ${n} frames");
+    }
+}

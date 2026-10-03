@@ -1,0 +1,132 @@
+// boot — putting a run together: the world with the game's terrain attached,
+// the player stood on it, the renderer with its atlas, and the values the light
+// thread is handed.
+
+use smalt::Mem;
+use crate::engine::io::assets::Assets;
+use crate::engine::world::chunks::{ ChunkManager };
+use crate::engine::world::seams::{ LightMoment };
+use crate::engine::entity::player::{ Player };
+use crate::engine::math::vec3::{ ivec3 };
+use crate::engine::render::cpu::renderer::Renderer;
+use crate::game::world::terraingen::TerrainGen;
+use crate::game::rules::start::{ Spawn, openYaw };
+use crate::configs::atlas::{ Atlas };
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/** How far ahead of the player `--torch` stands its torch, in blocks. */
+const TORCH_AHEAD : f64 = 3.5;
+
+/**
+ * An empty world, with the game's terrain attached. The kernel drives it
+ * through the `Generator` seam and never names `TerrainGen`.
+ * @return the world, with no chunk loaded yet
+ */
+fn newWorld() : ChunkManager {
+    const man = new ChunkManager();
+    man.attachGenerator(new TerrainGen(World::SPAN * World::SPAN));
+    return man;
+}
+
+/**
+ * Generates the ring around a column, finds an open hilltop on it, and stands
+ * the player there facing the clearing.
+ * @param man  the world, with its generator attached
+ * @param x    the start column's x
+ * @param z    the start column's z
+ * @return the player, on the ground, with the chunks around them loaded
+ */
+fn placePlayer(man : ChunkManager, x : i32, z : i32) : Player {
+    // The hilltop search reads heights, so the chunks it scans must exist first.
+    loadAround(man, x as f64, z as f64);
+    let sp : Spawn = new Spawn();
+    sp.find(man, x, z);
+
+    const px = (sp.sx as f64) + 0.5;
+    const pz = (sp.sz as f64) + 0.5;
+    let player : Player = new Player(px, sp.h as f64, pz);
+    player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
+    player.refresh();
+
+    loadAround(man, player.pos.x, player.pos.z);
+    return player;
+}
+
+/**
+ * Loads every chunk of the view ring around a point before returning.
+ * @param man  the world to stream
+ * @param x    the centre's world x
+ * @param z    the centre's world z
+ */
+fn loadAround(man : ChunkManager, x : f64, z : f64) : void {
+    while (man.ensureLoaded(chunkOf(x), chunkOf(z)) > 0) {
+    }
+}
+
+/**
+ * A renderer for a framebuffer of this size, with `atlas.raw` loaded into its
+ * mip chain. Level 0 is a full copy, so the file's buffer is released at once.
+ * @param w  the framebuffer's width
+ * @param h  the framebuffer's height
+ * @return the renderer, ready for its first frame
+ */
+fn newRenderer(w : i32, h : i32) : Renderer {
+    const renderer = new Renderer();
+    renderer.setViewport(w, h);
+
+    const tile = Atlas::TILE_PX as i64;
+    const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
+    const atlas = Mem::take(bytes);
+    if (Assets::loadAtlas(atlas, bytes) != bytes) {
+        Console::println("warning: atlas.raw not found next to the binary"
+            + " — textures will be blank");
+    }
+
+    renderer.setAtlas(atlas);
+    Mem::release(atlas);
+    return renderer;
+}
+
+/**
+ * `--torch`: stands a torch on the ground `TORCH_AHEAD` blocks in front of the
+ * player, through the same edit path a right-click takes. A night capture of
+ * coloured light needs a source in frame, and one placed by hand is a capture
+ * nobody can reproduce.
+ * @param man  the world to place into
+ * @param p    the player whose facing the torch is placed along
+ */
+fn plantTorch(man : ChunkManager, p : Player) : void {
+    const x = (p.pos.x - p.yaw.sin() * TORCH_AHEAD).floorToInt() as i32;
+    const z = (p.pos.z + p.yaw.cos() * TORCH_AHEAD).floorToInt() as i32;
+    const cell = ivec3(x, man.columnHeight(x, z) + 1, z);
+
+    man.placeAt(cell, Block::Torch);
+    man.lightUpdate(cell);
+    Console::println("torch at (${cell.x}, ${cell.y}, ${cell.z})");
+}
+
+/**
+ * The hour, and the column the light ring follows, for the light thread.
+ * @param p        the player, whose column the ring follows
+ * @param dayTime  the time of day, in [0, 1)
+ * @param seconds  seconds since the run began
+ * @return the moment to publish
+ */
+fn momentAt(p : Player, dayTime : f64, seconds : f64) : LightMoment {
+    return LightMoment {
+        dayTime,
+        seconds,
+        camX: p.pos.x.floorToInt() as i32,
+        camZ: p.pos.z.floorToInt() as i32,
+    };
+}
+
+/**
+ * The index of the chunk containing a world coordinate.
+ * @param p  a world-space coordinate along one axis
+ * @return the chunk index along that axis
+ */
+fn chunkOf(p : f64) : i32 {
+    return (p / (World::CHUNK_SIZE as f64)).floorToInt() as i32;
+}

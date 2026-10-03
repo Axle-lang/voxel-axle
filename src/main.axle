@@ -21,7 +21,7 @@
 // or the game itself — a `app::session::game::Game`.
 
 use smalt::{ PlatformError };
-use crate::app::session::game::Game;
+use crate::app::session::game::{ Game };
 use crate::app::cli::{ hasFlag, wantsPhysicsCheck };
 use crate::checks::physcheck::runPhysicsCheck;
 use crate::checks::lightcheck::runLightCheck;

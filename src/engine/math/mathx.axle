@@ -93,3 +93,12 @@ pub fn wrapAngle(a : f64) : f64 {
     }
     return r;
 }
+
+/**
+ * `v` wrapped into `[0, 1)`.
+ * @param v  any value
+ * @return its fractional part, non-negative
+ */
+fn fract(v : f64) : f64 {
+    return v - (v.floorToInt() as f64);
+}
