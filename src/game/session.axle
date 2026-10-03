@@ -5,23 +5,8 @@
 // whichever is showing, and is skipped while a paused screen is unchanged.
 
 use smalt::{
-    BitmapFont,
-    Bmp,
-    Clock,
-    Event,
-    EventKind,
-    Events,
-    Face,
-    Frame,
-    FramePacer,
-    Mem,
-    mixerLoop,
-    MouseButton,
-    Platform,
-    PlatformError,
-    Surface,
-    Window,
-    WindowDesc,
+    BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, Frame, FramePacer, Mem, mixerLoop,
+    MouseButton, Platform, PlatformError, Surface, Window, WindowDesc,
 };
 use crate::kernel::kio::input::Keys;
 use crate::kernel::kio::assets::Assets;
@@ -41,21 +26,11 @@ use crate::game::world::terraingen::TerrainGen;
 use crate::game::entities::fauna::Fauna;
 use crate::game::start::{ Spawn, openYaw };
 use crate::game::controls::{
-    applyLook,
-    Intent,
-    readGameMode,
-    readHotbar,
-    readIntent,
+    applyLook, Intent, readGameMode, readHotbar, readIntent,
 };
 use crate::game::stepaudio::{ StepTimers, stepAudio };
 use crate::game::cli::{
-    dayTimeArg,
-    hasFlag,
-    lookPin,
-    snapDeadline,
-    startColumn,
-    walkBlocks,
-    windowSize,
+    dayTimeArg, hasFlag, lookPin, snapDeadline, startColumn, walkBlocks, windowSize,
 };
 use crate::game::ray::{ Picker, cellInPlayer };
 use crate::game::tick::TickManager;

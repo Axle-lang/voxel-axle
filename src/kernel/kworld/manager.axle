@@ -29,12 +29,7 @@ use crate::kernel::kworld::lightstore::{ LightEngine };
 use crate::kernel::kworld::chunkmesher::{ ChunkMesher, MeshSource };
 use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
 use crate::kernel::seams::{
-    VoxelQuery,
-    VoxelEdit,
-    LightSample,
-    CornerProbe,
-    CornerSample,
-    ChannelLevels
+    VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels
 };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };

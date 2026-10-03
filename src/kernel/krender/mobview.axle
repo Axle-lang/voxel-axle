@@ -18,17 +18,8 @@ use smalt::Color;
 use crate::kernel::krender::color::{tintIf};
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::raster::{
-    rasterTriTex,
-    rasterTri,
-    columnSpan,
-    RasterVert,
-    RasterTri,
-    FrameBuf,
-    MipAtlas,
-    Band,
-    Camera,
-    Lens,
-    Projected,
+    rasterTriTex, rasterTri, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera,
+    Lens, Projected,
 };
 use crate::kernel::klight::facelight::{ sunExposure };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };

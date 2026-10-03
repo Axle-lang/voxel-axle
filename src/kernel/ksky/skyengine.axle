@@ -30,17 +30,10 @@
 use smalt::WorkerPool;
 use std::time::monotonicNanos;
 use crate::kernel::ksky::atmosphere::{
-    FogTable,
-    FogTables,
-    SkyDome,
-    ViewRays,
-    skyDomeFor
+    FogTable, FogTables, SkyDome, ViewRays, skyDomeFor
 };
 use crate::kernel::ksky::backdrop::{
-    SkyPaint,
-    SkyPaintFrame,
-    SKY_BANDS,
-    drawCelestial
+    SkyPaint, SkyPaintFrame, SKY_BANDS, drawCelestial
 };
 use crate::kernel::ksky::cloud::{ CloudField, cloudFieldAt };
 use crate::kernel::ksky::clouddome::{ CloudDome, CloudSky };

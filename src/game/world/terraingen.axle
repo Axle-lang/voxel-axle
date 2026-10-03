@@ -10,12 +10,7 @@
 
 use crate::kernel::kworld::manager::Generator;
 use crate::kernel::kworld::noise::{
-    terrainHeight,
-    temperature,
-    humidity,
-    treeHash,
-    hashI,
-    snowDepth
+    terrainHeight, temperature, humidity, treeHash, hashI, snowDepth
 };
 use crate::game::world::biomes::{ biomeAt, biomeDef, biomeSurface, BiomeDef };
 use crate::kernel::kblock::blocks::{ isLeaves, levelOfHeight };

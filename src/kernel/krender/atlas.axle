@@ -7,12 +7,7 @@
 
 use smalt::Mem;
 use crate::kernel::krender::raster::{
-    buildMipChain,
-    mipChainTexels,
-    mipLevelOffset,
-    mipLevelSize,
-    MipAtlas,
-    MipSource,
+    buildMipChain, mipChainTexels, mipLevelOffset, mipLevelSize, MipAtlas, MipSource,
 };
 use crate::kernel::klight::gamma::{ Gamma };
 use crate::configs::atlas::{ Atlas };

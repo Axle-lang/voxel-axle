@@ -32,24 +32,13 @@ use crate::kernel::krender::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::kernel::krender::atlas::{ TextureAtlas };
 use crate::kernel::klight::daymodel::{ DayLighting };
 use crate::kernel::krender::chunkview::{
-    ChunkRenderer,
-    buildSlotsJob,
-    chunkVisible,
-    viewConeFor,
-    ViewCone,
+    ChunkRenderer, buildSlotsJob, chunkVisible, viewConeFor, ViewCone,
 };
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::krender::mobview::{ MobView, MobScene, Material };
 use crate::kernel::krender::selection::Selection;
 use crate::kernel::krender::raster::{
-    clearFrame,
-    clearDepth,
-    lensFor,
-    FrameBuf,
-    MipAtlas,
-    Camera,
-    Lens,
-    Projected,
+    clearFrame, clearDepth, lensFor, FrameBuf, MipAtlas, Camera, Lens, Projected,
 };
 use crate::kernel::klight::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::kernel::kmath::vec3::{ vec3 };

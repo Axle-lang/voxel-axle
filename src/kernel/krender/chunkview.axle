@@ -15,18 +15,8 @@
 
 use smalt::Mem;
 use crate::kernel::krender::raster::{
-    rasterTriTex,
-    columnSpan,
-    RasterVert,
-    RasterTri,
-    FrameBuf,
-    MipAtlas,
-    Band,
-    Camera,
-    Lens,
-    Projected,
-    VertAttribs,
-    ScreenScratch
+    rasterTriTex, columnSpan, RasterVert, RasterTri, FrameBuf, MipAtlas, Band, Camera, Lens,
+    Projected, VertAttribs, ScreenScratch
 };
 use crate::kernel::klight::facelight::{ FaceLight };
 use crate::kernel::klight::gamma::{ Gamma, LinRgb };

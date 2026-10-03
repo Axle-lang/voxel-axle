@@ -13,13 +13,7 @@
 
 use smalt::Mem;
 use crate::kernel::kblock::blocks::{
-    tileFor,
-    isWater,
-    isTransparent,
-    isPartialShape,
-    isOpaque,
-    isCollidable,
-    boxOf
+    tileFor, isWater, isTransparent, isPartialShape, isOpaque, isCollidable, boxOf
 };
 
 /**

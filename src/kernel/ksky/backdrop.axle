@@ -18,11 +18,7 @@ use smalt::Color;
 use crate::kernel::klight::daymodel::{ DayState };
 use crate::kernel::ksky::viewray::{ ViewRay };
 use crate::kernel::ksky::atmosphere::{
-    SkyColour,
-    SkyDome,
-    ViewRays,
-    ViewRow,
-    packSky
+    SkyColour, SkyDome, ViewRays, ViewRow, packSky
 };
 use crate::kernel::ksky::clouddome::{ CloudDome, CloudSample };
 use crate::kernel::krender::raster::{ FrameBuf, Camera, Lens, Projected };
