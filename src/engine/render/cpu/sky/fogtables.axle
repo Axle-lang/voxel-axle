@@ -1,0 +1,237 @@
+// fogtables — what the fog does, as two tables the rasteriser reads instead of
+// computing: the sky's colour over a coarse grid of the SCREEN, and how much of
+// it has accumulated by a given depth.
+//
+// The colour grid asks the same `SkyDome` the sky pass paints, with the cloud
+// deck composited in, so distant terrain dissolves into the sky actually behind
+// it. The colour varies slowly across the frame, so a coarse table sampled
+// bilinearly is indistinguishable from the real thing and costs one lookup in
+// the raster's innermost loop.
+
+use smalt::Mem;
+use crate::engine::sky::viewray::{ ViewRay };
+use crate::engine::sky::atmosphere::{ SkyColour, SkyDome };
+use crate::engine::render::cpu::sky::viewrays::{ ViewRays, ViewRow };
+use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSample };
+use crate::configs::render::{ Render };
+
+/**
+ * Where one screen row falls in the fog grid: the row's first cell, the step to
+ * the row below it, and how far between the two the row sits.
+ *
+ * A scanline crosses one grid row, so this is taken once for the whole line and
+ * the per-pixel read is left with only what actually varies along it.
+ */
+struct FogRow {
+    pub(crate) base : i32,
+    pub(crate) stride : i32,
+    pub(crate) ty : f64,
+}
+
+/**
+ * What the fog does, as two tables the rasteriser reads instead of computing:
+ * the sky's colour over a coarse grid of the SCREEN, and how much of it has
+ * accumulated by a given depth.
+ *
+ * The colour grid is coarse on purpose — the sky changes slowly across a frame,
+ * so a bilinear read of a thirty-by-twenty grid is the same picture as the exact
+ * evaluation and is affordable where the exact one is not.
+ *
+ * The depth curve is a table rather than a formula because the formula wants to
+ * be `1 - exp(-density × depth)`, and an `exp` per pixel in the fill loop is not
+ * worth it when 256 entries resolve it exactly. Exponential rather than the
+ * linear ramp it replaces: a linear ramp begins at a distance, and that
+ * beginning is a visible ring on the ground drawn across the world. Extinction
+ * has no beginning — it is already happening at one block, just not enough to
+ * see.
+ */
+struct FogTable {
+    cols : i32,
+    rows : i32,
+    r : i64,
+    g : i64,
+    b : i64,
+    curve : i64,      // FOG_CURVE_STEPS f64: fog fraction by depth
+    xscale : f64,     // screen px → grid column
+    yscale : f64,
+    dscale : f64,     // depth → curve index
+
+    /**
+     * The half of the sky read that depends only on the row.
+     *
+     * Called once per scanline by the world raster, which asks for the sky
+     * behind almost every pixel it fills: the grid is thirty-odd columns over
+     * the whole frame, so one of its cells is thirty pixels wide, and finding
+     * the row it is in was being redone for every one of them.
+     * @param py  screen y
+     * @return where that row sits in the grid
+     */
+    pub(crate) fn rowAt(self, py : i32) : FogRow {
+        const fy : f64 = (py as f64) * self.yscale;
+        let iy : i32 = fy.floorToInt() as i32;
+        if (iy < 0) {
+            iy = 0;
+        }
+        if (iy > self.rows - 1) {
+            iy = self.rows - 1;
+        }
+        const w : i32 = self.cols + 1;
+        return FogRow {
+            base: iy * w,
+            stride: w,
+            ty: fy - (iy as f64),
+        };
+    }
+
+    /**
+     * The sky's colour behind a pixel on an already-located row.
+     * @param row  the row from `rowAt`
+     * @param px   screen x
+     * @return the colour distant terrain dissolves into there
+     */
+    pub(crate) fn skyIn(self, row : FogRow, px : i32) : SkyColour {
+        const fx : f64 = (px as f64) * self.xscale;
+        let ix : i32 = fx.floorToInt() as i32;
+        if (ix < 0) {
+            ix = 0;
+        }
+        if (ix > self.cols - 1) {
+            ix = self.cols - 1;
+        }
+
+        const tx : f64 = fx - (ix as f64);
+        const ty : f64 = row.ty;
+        const i0 : i32 = row.base + ix;
+        const i1 : i32 = i0 + row.stride;
+        const a : f64 = (1.0 - tx) * (1.0 - ty);
+        const b : f64 = tx * (1.0 - ty);
+        const c : f64 = (1.0 - tx) * ty;
+        const d : f64 = tx * ty;
+        return SkyColour {
+            r: Mem::realOf(self.r, i0) * a + Mem::realOf(self.r, i0 + 1) * b
+             + Mem::realOf(self.r, i1) * c + Mem::realOf(self.r, i1 + 1) * d,
+            g: Mem::realOf(self.g, i0) * a + Mem::realOf(self.g, i0 + 1) * b
+             + Mem::realOf(self.g, i1) * c + Mem::realOf(self.g, i1 + 1) * d,
+            b: Mem::realOf(self.b, i0) * a + Mem::realOf(self.b, i0 + 1) * b
+             + Mem::realOf(self.b, i1) * c + Mem::realOf(self.b, i1 + 1) * d,
+        };
+    }
+
+    /**
+     * How much of the view at `depth` blocks is sky rather than surface.
+     * @param depth  camera-space depth in blocks
+     * @return the fog fraction, 0..1
+     */
+    pub(crate) fn amount(self, depth : f64) : f64 {
+        const i : i32 = (depth * self.dscale).floorToInt() as i32;
+        if (i < 0) {
+            return 0.0;
+        }
+        if (i >= FOG_CURVE_STEPS) {
+            return 1.0;
+        }
+        return Mem::realOf(self.curve, i);
+    }
+}
+
+/** Entries in the depth→fog curve, over 0..`Render::DRAW_DIST` blocks. */
+const FOG_CURVE_STEPS : i32 = 256;
+
+/** Columns and rows of the screen-space sky grid the fog reads. */
+const FOG_GRID_COLS : i32 = 32;
+const FOG_GRID_ROWS : i32 = 20;
+
+/**
+ * Owns the fog's two tables and refills them each frame.
+ *
+ * A class rather than a rebuilt value because the buffers are the same size
+ * every frame and there is no reason to give them back; the `FogTable` it hands
+ * out is a value view over them, which is what crosses `spawn` into the fill
+ * bands.
+ */
+class FogTables {
+    r : i64,
+    g : i64,
+    b : i64,
+    curve : i64,
+
+    /** Allocate the screen-space colour grid and the depth curve. */
+    constructor() {
+        const n : i64 = ((FOG_GRID_COLS + 1) as i64) * ((FOG_GRID_ROWS + 1) as i64) * 8;
+        self.r = Mem::take(n);
+        self.g = Mem::take(n);
+        self.b = Mem::take(n);
+        self.curve = Mem::take((FOG_CURVE_STEPS as i64) * 8);
+
+        for (i of 0..FOG_CURVE_STEPS) {
+            // 1 - e^(-(d/scale)^2): squared, so the near field is genuinely clear
+            // and the far field closes fast. A plain exponential fogs the middle
+            // distance more than the eye expects on a clear day.
+            const d : f64 = ((i as f64) + 0.5) / (FOG_CURVE_STEPS as f64) * Render::DRAW_DIST;
+            const t : f64 = d / Render::FOG_SCALE;
+            const e : f64 = (0.0 - t * t).exp();
+            Mem::putRealOf(self.curve, i as i64, 1.0 - e);
+        }
+    }
+
+    /**
+     * Refill the screen-space sky grid for this frame's dome and camera, and
+     * hand back the view the rasteriser reads.
+     *
+     * The cloud is composited in, exactly as the gradient does it, because the
+     * grid's whole purpose is that distant terrain dissolves into the sky
+     * actually painted behind it — and under a cloudy horizon that sky is
+     * cloud.
+     * @param dome   the sky's colour field this frame
+     * @param rays   how a screen pixel becomes a direction
+     * @param cloud  the cloud deck, as the gradient reads it
+     * @param w      framebuffer width
+     * @param h      framebuffer height
+     * @return the table view
+     */
+    pub(crate) fn build(
+        mut self,
+        dome : SkyDome,
+        rays : ViewRays,
+        cloud : CloudDome,
+        w : i32,
+        h : i32
+    ) : FogTable {
+        const gw : i32 = FOG_GRID_COLS + 1;
+        const stepX : f64 = (w as f64) / (FOG_GRID_COLS as f64);
+        const stepY : f64 = (h as f64) / (FOG_GRID_ROWS as f64);
+
+        for (gy of 0..=FOG_GRID_ROWS) {
+            const vr : ViewRow = rays.row((gy as f64) * stepY + 0.5);
+            for (gx of 0..=FOG_GRID_COLS) {
+                const ray : ViewRay = rays.dir(vr, (gx as f64) * stepX + 0.5);
+                let c : SkyColour = dome.colourAt(ray);
+                const cl : CloudSample = cloud.sample(ray);
+                if (cl.a > 0.002) {
+                    const keep : f64 = 1.0 - cl.a;
+                    c = SkyColour {
+                        r: c.r * keep + cl.r,
+                        g: c.g * keep + cl.g,
+                        b: c.b * keep + cl.b,
+                    };
+                }
+                const i : i32 = gy * gw + gx;
+                Mem::putRealOf(self.r, i as i64, c.r);
+                Mem::putRealOf(self.g, i as i64, c.g);
+                Mem::putRealOf(self.b, i as i64, c.b);
+            }
+        }
+
+        return FogTable {
+            cols: FOG_GRID_COLS,
+            rows: FOG_GRID_ROWS,
+            r: self.r,
+            g: self.g,
+            b: self.b,
+            curve: self.curve,
+            xscale: (FOG_GRID_COLS as f64) / (w as f64),
+            yscale: (FOG_GRID_ROWS as f64) / (h as f64),
+            dscale: (FOG_CURVE_STEPS as f64) / Render::DRAW_DIST,
+        };
+    }
+}

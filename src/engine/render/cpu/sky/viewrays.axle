@@ -1,0 +1,112 @@
+// viewrays — how a screen pixel becomes a direction in the world, and how a
+// sky colour becomes a display word at that pixel.
+//
+// The inverse of the camera's projection, split into its row-constant and
+// per-pixel halves so a full-screen pass can afford it, plus the dither that
+// keeps an untextured gradient from banding. CPU painter only: a GPU sky gets
+// its direction from the interpolated vertex and needs neither.
+
+use crate::engine::sky::viewray::{ ViewRay };
+use crate::engine::sky::atmosphere::{ SkyColour, shoulder };
+use crate::engine::math::noise2::{ hashI };
+use crate::engine::math::mathx::{ clampI32 };
+
+/**
+ * A triangular dither in [-1, 1), one deterministic value per pixel.
+ *
+ * The sky is the one surface in the frame with no texture on it, so it is the
+ * one place where eight bits is not enough: its gradients cross a whole channel
+ * over tens of degrees, which at this resolution is a fresh contour line every
+ * twenty pixels. Those contours follow the gradient's own level sets — circles
+ * about the zenith for the elevation ramp, circles about the sun for the halo.
+ *
+ * A dither of plus or minus one unit before the truncation trades that structure
+ * for noise below the level a single pixel can show, which is the whole of why
+ * it works: the banding is visible because it is ORGANISED, not because it is
+ * large. Two hashes summed give the triangular distribution, which is the one
+ * that leaves no residual correlation with the signal.
+ * @param px  pixel x
+ * @param py  pixel y
+ * @return the offset to add before truncating
+ */
+fn ditherAt(px : i32, py : i32) : f64 {
+    return hashI(px, py, 0) + hashI(px, py, 4177) - 1.0;
+}
+
+/**
+ * Roll off, dither and pack a sky colour into a display word.
+ * @param c   the colour, in display range but possibly over it
+ * @param px  pixel x, for the dither
+ * @param py  pixel y, for the dither
+ * @return the packed colour
+ */
+fn packSky(c : SkyColour, px : i32, py : i32) : i32 {
+    const d : f64 = ditherAt(px, py);
+    return clampI32((shoulder(c.r) + d).floorToInt() as i32, 0, 255) * 65536
+        + clampI32((shoulder(c.g) + d).floorToInt() as i32, 0, 255) * 256
+        + clampI32((shoulder(c.b) + d).floorToInt() as i32, 0, 255);
+}
+
+/** The row-constant half of a view ray — the part that depends only on `py`. */
+struct ViewRow {
+    rz0c : f64,
+    dyw : f64,
+}
+
+/**
+ * How a screen pixel becomes a direction in the world: the camera's look trig
+ * and the lens, together.
+ *
+ * Everything that has to ask "what is out THERE, through this pixel" goes
+ * through it — the sky gradient, the fog's colour grid, and the clouds. It was
+ * open-coded once, inside the gradient loop, which is why nothing else could ask.
+ *
+ * The row half is split out because it is genuinely row-constant: hoisting it is
+ * what keeps a full-screen per-pixel pass affordable, and a `dirAt(px, py)` that
+ * recomputed it would quietly cost a millisecond a frame.
+ */
+struct ViewRays {
+    cosy : f64,
+    siny : f64,
+    cosp : f64,
+    sinp : f64,
+    hw : f64,
+    hh : f64,
+    focal : f64,
+
+    /**
+     * The part of the view ray that depends only on the screen row.
+     * @param py  screen y (pixel centre)
+     * @return the row-constant terms
+     */
+    pub(crate) fn row(self, py : f64) : ViewRow {
+        const ndcy : f64 = (self.hh - py) / self.focal;
+        return ViewRow {
+            rz0c: self.cosp - ndcy * self.sinp,
+            dyw: ndcy * self.cosp + self.sinp,
+        };
+    }
+
+    /**
+     * The world direction through a pixel on that row, inverting the camera's
+     * yaw / pitch rotation.
+     * @param r   the row's constant terms
+     * @param px  screen x (pixel centre)
+     * @return the direction, and 1 / its length
+     */
+    pub(crate) fn dir(self, r : ViewRow, px : f64) : ViewRay {
+        const ndcx : f64 = (px - self.hw) / self.focal;
+        const dx : f64 = ndcx * self.cosy - r.rz0c * self.siny;
+        const dz : f64 = ndcx * self.siny + r.rz0c * self.cosy;
+        let len : f64 = (dx * dx + r.dyw * r.dyw + dz * dz).sqrt();
+        if (len < 0.0001) {
+            len = 0.0001;
+        }
+        return ViewRay {
+            dx,
+            dy: r.dyw,
+            dz,
+            inv: 1.0 / len,
+        };
+    }
+}

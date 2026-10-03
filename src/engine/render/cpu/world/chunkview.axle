@@ -22,7 +22,7 @@ use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::render::view::camera::{ Camera, Lens, Projected };
 use crate::engine::shade::facelight::{ FaceLight };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
-use crate::engine::sky::atmosphere::{ FogTable };
+use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::shade::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::seams::{ CornerProbe, CornerSample };

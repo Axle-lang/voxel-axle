@@ -25,7 +25,7 @@ use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::shade::facelight::{ sunExposure };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
-use crate::engine::sky::atmosphere::{ FogTable };
+use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
 use crate::engine::entity::mobs::MobManager;
 use crate::engine::world::chunks::ChunkManager;

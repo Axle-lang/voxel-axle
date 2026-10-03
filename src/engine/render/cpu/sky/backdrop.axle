@@ -17,9 +17,8 @@ use crate::engine::math::narrow::{ floatOf };
 use smalt::Color;
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::sky::viewray::{ ViewRay };
-use crate::engine::sky::atmosphere::{
-    SkyColour, SkyDome, ViewRays, ViewRow, packSky
-};
+use crate::engine::sky::atmosphere::{ SkyColour, SkyDome };
+use crate::engine::render::cpu::sky::viewrays::{ ViewRays, ViewRow, packSky };
 use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSample };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::render::view::camera::{ Camera, Projected };

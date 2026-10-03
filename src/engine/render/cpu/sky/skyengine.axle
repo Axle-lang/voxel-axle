@@ -29,9 +29,9 @@
 
 use smalt::WorkerPool;
 use std::time::monotonicNanos;
-use crate::engine::sky::atmosphere::{
-    FogTable, FogTables, SkyDome, ViewRays, skyDomeFor
-};
+use crate::engine::render::cpu::sky::fogtables::{ FogTable, FogTables };
+use crate::engine::sky::atmosphere::{ SkyDome, skyDomeFor };
+use crate::engine::render::cpu::sky::viewrays::{ ViewRays };
 use crate::engine::render::cpu::sky::backdrop::{
     SkyPaint, SkyPaintFrame, SKY_BANDS, drawCelestial
 };
