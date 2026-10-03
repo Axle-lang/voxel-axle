@@ -2,16 +2,16 @@
 
 # ⛏️ voxel
 
-### A Minecraft-style survival world, software-rendered on the CPU — written entirely in [**Axle**](https://axle-lang.dev)
+### A Minecraft-style survival world, rendered by hand on the CPU or the GPU — written entirely in [**Axle**](https://axle-lang.dev)
 
-No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand across worker threads, over an infinite streamed voxel landscape.
+No engine. Every pixel of terrain, sky, water and mobs is shaded by the game's own code — a software rasteriser across worker threads, or the same light model in its own shaders on a GPU — over an infinite streamed voxel landscape.
 
 <p align="center">
   <a href="https://axle-lang.dev"><img alt="Powered by Axle" src="https://img.shields.io/badge/powered%20by-Axle-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
   <a href="https://axle-lang.dev"><img alt="Axle 0.12.1+" src="https://img.shields.io/badge/axle-0.12.1%2B-5B4BE1?style=for-the-badge&labelColor=1b1b2b"></a>
 </p>
 <p align="center">
-  <img alt="Rendering: 100% CPU" src="https://img.shields.io/badge/rendering-100%25%20CPU-FF7A45?style=flat-square&labelColor=1b1b2b">
+  <img alt="Rendering: CPU or GPU" src="https://img.shields.io/badge/rendering-CPU%20%C2%B7%20GPU-FF7A45?style=flat-square&labelColor=1b1b2b">
   <img alt="smalt" src="https://img.shields.io/badge/smalt-window%20%2B%20software%20mixer-1D6FB8?style=flat-square&labelColor=1b1b2b">
   <img alt="Threaded" src="https://img.shields.io/badge/threaded-audio%20%C2%B7%20light%20%C2%B7%20raster-9C27B0?style=flat-square&labelColor=1b1b2b">
   <img alt="Platforms" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-2E7D32?style=flat-square&labelColor=1b1b2b">
@@ -55,7 +55,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 | | |
 |---|---|
 | **Language** | 100% [Axle](https://axle-lang.dev) — game *and* platform layer; nothing is C, nothing is vendored |
-| **Rendering** | Software rasteriser on the CPU — perspective-correct 128 px HD textures, mip-chain + anisotropic filtering, shared z-buffer |
+| **Rendering** | Software rasteriser on the CPU — perspective-correct 128 px HD textures, mip-chain + anisotropic filtering, shared z-buffer — or the same frame on a GPU through smalt's Vulkan renderer, with the game's own shaders |
 | **World** | Infinite, streamed voxel terrain · 17 biomes · continentalness / erosion / peaks-and-valleys noise |
 | **Lighting** | Flood-filled sky + block light with AO · day/night sun · soft shadows · god-rays · bloom · atmospheric sky |
 | **Simulation** | Voxel-accurate AABB physics · fall/drown damage + regen · falling sand & water flow · texture-skinned mobs |
@@ -69,6 +69,7 @@ No GPU. No engine. Every pixel of terrain, sky, water and mobs is shaded by hand
 - 💡 **A real lighting engine** — a propagating sky + block light field with ambient occlusion, a day/night cycle with a moving sun, soft directional shadows, one-bounce colour bleed, screen-space god-rays, bloom and an atmospheric sky.
 - 🐔 **Texture-skinned mobs** — chickens, sheep, cows, pigs and creepers wander, graze, flee and die, lit by the same scene light.
 - 🎨 **HD software rasteriser** — perspective-correct 128 px textures, a mip-chain with anisotropic filtering, near-plane clipping and a shared z-buffer — no GPU touched.
+- 🖥️ **Two backends, one picture** — on a machine with a GPU the frame is drawn through Vulkan by shaders that carry the software renderer's light model line for line; without one, the rasteriser draws it. `--cpu` / `--gpu` choose.
 - 🧵 **Threaded by design** — audio mixing, the light engine and the triangle rasteriser each run on their own threads, so it stays smooth under load.
 
 ## 🕹️ Controls
@@ -218,6 +219,7 @@ src/
     shade/ sky/                      backend-neutral shading + sky MODEL
     render/view/                     backend-neutral: View, Camera, frustum
     render/cpu/                      the software rasteriser and sky painter
+    render/gpu/                      the GPU backend, on smalt's Vulkan renderer
     ui/ audio/ io/                   overlay, sound cues, input + assets
   game/         content, injected: biomes, terrain, trees, the species, the rules
   app/          the running program: window, loop, controls, CLI
@@ -226,7 +228,7 @@ src/
 ```
 
 Dependencies point one way — `math` → models (`block`, `shade`, `sky`) →
-`world` → `entity` → `render/view` → `render/cpu` / `ui` → `game` → `app` — and
+`world` → `entity` → `render/view` → `render/cpu` / `render/gpu` / `ui` → `game` → `app` — and
 nothing in `engine/` imports `game/` or `app/`.
 
 ### Seams — the capability contracts
@@ -295,13 +297,14 @@ Real Minecraft block textures are baked into `atlas.raw` as a vertical strip of 
 - `--look <yaw°> <pitch°>` pins the view for the whole run: the spawn's own yaw is overridden and the mouse is ignored. Two captures can only be compared as images if they are framed identically, and the grab hands the first frames whatever motion the mouse happened to have.
 - `--daytime <0..1>` starts the day clock at that hour (0.42 mid-morning, 0.75 sunset, 0.9 night), so a capture can be taken at the hour that shows what it is about instead of waiting four real minutes for the sky to come round.
 - smalt's own limits, and what each would take to lift, are in [`vendor/smalt/LIMITATIONS.md`](vendor/smalt/LIMITATIONS.md).
+- `--cpu` draws with the software rasteriser, `--gpu` with the GPU and nothing else; without either, the GPU when there is one. The shaders are compiled into `src/engine/render/gpu/spirv.axle` by `tools/build_shaders.sh <glslang>` — only needed after editing `shaders/`.
 - Other run flags: `--size <w> <h>` opens the window at that size, `--walk <blocks>` sprints straight ahead that far (a repeatable streaming load), `--torch` plants a torch in front of the start.
-- Headless checks: `--physics-check`, `--light-check`, `--biome-scan`, `--cull-check`, `--frame-check`, `--model-check` — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#verifying-a-refactor).
+- Headless checks: `--physics-check`, `--light-check`, `--biome-scan`, `--cull-check`, `--frame-check`, `--surface-check`, `--model-check` — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#verifying-a-refactor).
 
 ---
 
 <div align="center">
 
-Built with ❤️ and zero GPUs in **[Axle](https://axle-lang.dev)** · learn the language at **[axle-lang.dev](https://axle-lang.dev)**
+Built with ❤️ in **[Axle](https://axle-lang.dev)** · learn the language at **[axle-lang.dev](https://axle-lang.dev)**
 
 </div>

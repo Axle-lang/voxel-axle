@@ -32,7 +32,9 @@ engine/
     voxstore       the voxel field + per-slot face watermark
     chunks         ChunkManager: streaming, edits, mesh flush; composes the rest
     mesh/          mesher (voxels → faces, torches, collision tops) · meshbuf
-    light/         volumes · flood · sun · skyaccess · bake · sample · engine
+    light/         volumes (the flood's levels) · flood · surface (what the ray bakes
+                   leave, per column, only where faces read it) · sun · skyaccess ·
+                   bake · sample · engine
     sim/           blocksim (falling blocks, flowing water)
   entity/        bodies
     seams          ActorVisual — what a creature exposes to whoever draws it
@@ -51,15 +53,24 @@ engine/
       framedesc      FrameDesc — camera, hour, deck, creature boxes, torches,
                      aimed block, HUD state
       framebuilder   FrameBuilder — reads the game into a FrameDesc
-      boxpose        where a creature's box stands (corners, normals)
+      boxpose        where a creature's box stands (corners, faces, the light on
+                     each), and a torch as a box
     cpu/           the software backend
       cpubackend     CpuBackend — the target, the pass order, the overlay
-      renderer       the passes it composes
+      renderer       SoftRenderer — the passes it composes
       raster/        framebuf · triangle · mip
       world/         chunkview (terrain faces → triangle queues → banded fill)
       mobs/          mobview (draws the frame's creature boxes)
       sky/           the sky PAINTER: skyengine · backdrop · fogtables · viewrays
       atlas · bloom · postfx · selection
+    gpu/           the GPU backend, on smalt's `Renderer`
+      gpubackend     GpuBackend — the scene, its passes, the overlay
+      terrainmesh    one chunk's faces → the terrain shader's vertices
+      terrainmeshes  the ring's meshes, rebuilt when a chunk's mesh or light moves
+      entitymesh     creatures, torches and the outline, one mesh a frame
+      uniforms       the frame's `user` vectors (`shaders/voxel.glsl` reads them)
+      clouddeck      the cloud deck as a texture
+      voxelshaders   the shaders, uploaded · spirv (generated from `shaders/`)
   ui/            the overlay, drawn through smalt's `Frame`: hud · health ·
                  hotbar · menu · uiscale · widget
   audio/         sfx
@@ -78,7 +89,8 @@ configs, smalt
               └ engine/entity, engine/audio, engine/io
                   └ engine/render/view                (neutral: camera, frustum)
                       └ engine/render/frame           (neutral: reads the game into a frame)
-                          └ engine/render/cpu, engine/ui  (a backend, and the overlay it draws)
+                          └ engine/render/cpu, engine/render/gpu, engine/ui
+                                                      (the backends, and the overlay they draw)
                               └ game                  (content: implements the engine's seams)
                                   └ app               (wires everything, runs the loop)
                                       └ checks, main
@@ -95,9 +107,9 @@ What that rule means in practice, and what it bought:
   place that maps the body to the eye); the frame's `Camera` is built from it
   and every pass projects through that one value.
 - **A backend reads the game only through its frame.** `engine/render/cpu`
-  (and a GPU backend beside it) imports no creature, not the world's manager,
-  light or block sim, and not the frame builder; the world reaches it
-  read-only through `world::seams::TerrainView`.
+  and `engine/render/gpu` import no creature, not the world's manager, light
+  or block sim, and not the frame builder; the world reaches them read-only
+  through `world::seams::TerrainView`. Neither names the other.
 - **The sky model does not import the renderer.** `sky/atmosphere` answers a
   direction's colour; the pixel-to-direction inverse, the dithered packing and
   the screen-space fog grid are the CPU painter's and live under `render/cpu/sky`.
@@ -133,52 +145,58 @@ on the frame side, once.
 `--frame-check` prints what a swept set of frames contains, so a change to
 what is drawn shows up there, for every backend at once.
 
-## Where a GPU renderer goes
+## The GPU backend
 
-The cut above is the one a second backend needs. `render/view`, `render/frame`,
-`shade` and `sky` are shared; a GPU backend is a sibling of `render/cpu`,
-another `RenderBackend`:
+`render/gpu` is a second `RenderBackend`, on smalt's `Renderer` (Vulkan). At
+start-up the game opens it (`app/session/boot.openBackend`) and falls back to
+the software one when there is no GPU; `--cpu` asks for the software one,
+`--gpu` for the GPU and nothing else. A GPU lost mid-run hands over to the
+software backend too.
 
-```
-engine/render/
-  view/   shared — Camera (→ view/projection matrices), frustum (→ draw list)
-  frame/  shared — the FrameDesc both backends draw
-  cpu/    software rasteriser
-  gpu/    the new backend, on smalt's `gpu::Renderer` (Vulkan, software fallback)
-```
+It draws the same `FrameDesc` with the same arithmetic. The light is not
+approximated: the shaders in `shaders/` are the CPU's formulas
+(`shade::gamma`, `shade::facelight`, `shade::cornerlight`,
+`sky::atmosphere`, `sky::clouddome`, `render/cpu/postfx`) written again,
+line for line, and `shaders/voxel.glsl` says so at its top. A change to one
+of those is a change to both.
 
-What each piece becomes on the GPU side:
+Where the two still differ, on purpose:
 
-| Today (CPU) | GPU counterpart |
+- a texture seen from afar is filtered by the GPU's trilinear and
+  anisotropic sampler, not the CPU's mip and tap choice (up close both read
+  the full-size tile the same way);
+- the bloom runs at full resolution with twice the radius, where the CPU
+  blurs at half resolution;
+- the fog's sky is computed per pixel, where the CPU interpolates a coarse
+  grid;
+- the GPU draws faces past `DRAW_DIST` (wholly fogged) that the CPU skips;
+- water faces take no bounce tint (their colour bytes carry the flow);
+- the aimed block's outline is in the 3-D scene, so it is fogged and
+  bloomed with it, where the CPU draws it after the post effects.
+
+Two pinned captures show the same cloud deck only when they drew about as
+many frames before the capture: the deck is marched a slice a frame. The
+`--snap` report gives the count (`over N builds`); a slower start means a
+different sky, not a different renderer.
+
+| CPU | GPU |
 |---|---|
-| `render/view::Camera`, `frustum` | shared as is: uniforms + per-chunk draw list |
-| `sky::atmosphere::SkyDome`, `shade::daymodel::DayState` | uniforms of a fullscreen sky pass |
-| `sky::clouddome::CloudDome` (`FrameDesc.clouds`) | a texture the sky pass reads |
-| `render/cpu/sky/*` (painter, fog grid) | the sky shader |
-| `FrameDesc.boxes` (placed by `frame::boxpose`) | per-frame dynamic mesh |
-| `world::mesh` face records (`meshbuf`) | per-chunk instanced-quad buffers |
-| `world::light::volumes` | 3-D textures sampled per fragment |
-| `render/cpu/{bloom,postfx}` | post-process passes |
-| `ui/*` drawn into `Frame` | smalt's overlay layer (see the caveat below) |
+| `chunkview` lights each face corner every frame | `terrainmesh` copies what a corner reads of the light volumes into its vertex when the chunk's mesh (`meshGen`) or light (`lightGen`) changes; `terrain.vert` does the rest per frame |
+| shadow runs split per frame | split the same way when the chunk is meshed |
+| `mobview`, `renderTorches`, `selection` | `entitymesh`, one mesh a frame, from the same `boxpose` |
+| the sky painter | `sky.frag` (a background), the deck a texture rewritten each frame |
+| fog tables | `fog.frag`, a pass reading the depth |
+| `postfx`, `bloom` | `godrays`, `underwater`, `bright` / `blur` / `composite` passes |
+| `drawHud`, `drawPauseMenu` into the framebuffer | the same calls into smalt's overlay; the pause veil is a pass |
+| `--snap` writes the framebuffer | smalt reads the frame back |
 
-Steps that remain before a GPU backend can be written, in order:
+Coordinates on the GPU are measured from the eye's chunk corner, so a 32-bit
+float keeps its precision far from the origin; chunk meshes are chunk-local.
 
-1. **A `RenderBackend` seam.** Done: `render::backend::RenderBackend`
-   (`draw`, `resize`, `capture`, `name`, `report`, `close`), implemented by
-   `render::cpu::cpubackend::CpuBackend`, held by the game as a one-slot
-   `dyn RenderBackend[]` (a trait-typed field cannot hold a class).
-2. **Make the chunk mesh self-contained.** Partly done: the face corner table
-   is one copy (`world/mesh/facegeom`), and the mesher records each face's
-   kind, its four corner heights (sloped water, partial-block tops) and its
-   water flow, and bumps `meshGen[slot]` on every rebuild so a backend knows
-   when to re-upload. What `render/cpu/world/chunkview` still reads every
-   frame is the light that moves with the sun — sun visibility, sky access,
-   bounce — and it splits quads along shadow edges; a retained GPU mesh
-   samples those per fragment or bakes them per corner (GPU phase 2).
-3. **Overlay on a transparent layer.** smalt's GPU overlay treats 0 as
-   transparent, so the pause dim and black drop shadows must change, the
-   crosshair must become a `Frame` op, and the selection outline belongs in the
-   3-D pass (it needs depth).
+The shaders are compiled into `render/gpu/spirv.axle` by
+`tools/build_shaders.sh <glslang>` (smalt's `tools/spirv_tables.py`); the
+Axle build does not run it. The frame's `user` vectors are one contract
+between `render/gpu/uniforms.axle` and `shaders/voxel.glsl`.
 
 ## Verifying a refactor
 
@@ -192,14 +210,16 @@ axle build -O 3
 ./target/voxel --biome-scan      # biome tally over a wide grid
 ./target/voxel --cull-check      # frustum never drops a visible chunk
 ./target/voxel --frame-check     # what a swept set of frames contains
+./target/voxel --surface-check   # the baked sun, sky access and bounce every face reads
 ./target/voxel --model-check     # every species describes a body
 tools/check_layers.sh            # the dependency rules above
 ```
 
 Capture their output before a structural change and `diff` it after: a pure
 restructure leaves them identical. They do not exercise the game loop or the
-renderer, so finish with one pinned capture:
-`./target/voxel --snap 4000 --at 294456 109296 --look 225 -8 --daytime 0.42`.
+renderer, so finish with one pinned capture on each backend, side by side:
+`./target/voxel --cpu --snap 4000 --at 294456 109296 --look 225 -8 --daytime 0.42`,
+then the same with `--gpu`.
 
 ## Known debts
 
@@ -217,7 +237,7 @@ Kept here so they are not mistaken for the design:
   released, so the suspect is the teardown of the composed objects; it needs a
   debugger, not more guessing.
 - Nothing allocated with `Mem::take` is released at shutdown (the light
-  volumes, the mesh, the sky tables). Harmless for a process that is exiting,
+  levels and surface tables, the mesh, the sky tables). Harmless for a process that is exiting,
   but a renderer that can be torn down and rebuilt — a GPU backend falling back
   to software — will need `close()` all the way down.
 - `render/cpu/world/chunkview` (about 1050 lines) mixes scene extraction

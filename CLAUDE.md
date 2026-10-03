@@ -1,7 +1,8 @@
 # CLAUDE.md — voxel-axle
 
-A Minecraft-style voxel game written in **Axle** and software-rendered into a
-window opened by [**smalt**](https://github.com/Axle-lang/smalt), the platform layer —
+A Minecraft-style voxel game written in **Axle**, rendered by its own software
+rasteriser or, when there is a GPU, by its own shaders through smalt's Vulkan
+renderer, into a window opened by [**smalt**](https://github.com/Axle-lang/smalt), the platform layer —
 also Axle, calling
 Win32 or X11 + ALSA depending on the build's target. Source under `src/**.axle`,
 config in `axle.toml`. See `README.md` for the controls and
@@ -14,13 +15,19 @@ plan — read it before moving or adding a file.
   content reaches it through injection seams (`Generator`, `MobSpawner`,
   `ActorVisual.buildModel`).
 - Backend-neutral rendering (`engine/render/view`, `engine/render/frame`,
-  `engine/shade`, `engine/sky`) never imports `engine/render/cpu` — that is
-  the line a GPU backend (`engine/render/gpu`, next to `cpu`) will plug in at.
+  `engine/shade`, `engine/sky`) never imports a backend, and the two backends
+  (`engine/render/cpu`, `engine/render/gpu`) never import each other.
 - The game draws through one call, `RenderBackend.draw(frame, world, win)`.
   What a frame shows is decided in `engine/render/frame/framebuilder`, never
   in a backend; a backend imports no creature, world manager or frame builder.
 - Nothing under `engine/render` or `engine/sky` names the player: the
   renderer is handed a `View` (`app/view.axle`) and builds one `Camera`.
+- The GPU's shaders (`shaders/`) are the CPU's light model written again:
+  a change to `shade/`, `sky/atmosphere`, `sky/clouddome` or the CPU post
+  effects is a change to the matching shader too. After editing `shaders/`,
+  regenerate `src/engine/render/gpu/spirv.axle` with
+  `tools/build_shaders.sh <glslang>`; the frame's `user` vectors are one
+  contract between `render/gpu/uniforms.axle` and `shaders/voxel.glsl`.
 - A file that grows past ~700 lines is doing more than one job: split it
   along the jobs, not by line count.
 
@@ -122,6 +129,7 @@ flag. `-O 3` is numerically identical here: `--physics-check` and
 axle --version        # 0.12.1+ required
 axle run -O 3         # from the project root
 axle run -O 3 -- --snap    # play 3 s, write voxel.bmp, quit — a headless check
+axle run -O 3 -- --cpu     # the software rasteriser; --gpu: the GPU and nothing else
 axle run -O 3 -- --at 294456 109296   # start at a named column, reproducibly
 axle run -O 3 -- --snap --at 294456 109296 --look 225 -8   # the same framed image, twice
 ```
@@ -138,10 +146,12 @@ comparing two runs, pass `--at` or you are comparing two worlds.
 
 Before and after any structural change, run the headless checks and diff
 their output: `--physics-check`, `--light-check`, `--biome-scan`,
-`--cull-check`, `--frame-check` print byte-identical text when behaviour is
-unchanged, and `--model-check` exits non-zero if a species lost its body.
+`--cull-check`, `--frame-check`, `--surface-check` print byte-identical text
+when behaviour is unchanged, and `--model-check` exits non-zero if a species
+lost its body.
 `tools/check_layers.sh` holds the dependency rules. None of them draws a
-pixel — finish with one pinned `--snap`.
+pixel — finish with one pinned `--snap` on each backend (`--cpu`, `--gpu`)
+and compare the two images.
 
 Useful Axle commands: `axle build <in>`, `axle run <in>`,
 `axle check <in>` (type-check only).
