@@ -42,6 +42,7 @@ class SkyAccess {
     rays : HemiRays,      // M precomputed upper-hemisphere ray directions
     cursor : i32,         // round-robin slot index for the throttled bake
     dirty : i8[],         // per-slot "sky access needs (re)baking" flag
+    crew : Task<i32>[],   // the spawned shares of a backlog bake
 
     /**
      * The ray table and the per-slot bookkeeping over a ring of `slots`.
@@ -71,6 +72,7 @@ class SkyAccess {
         }
 
         self.dirty = newSlotFlags(slots);
+        self.crew = malloc<Task<i32>>(BAKE_WORKERS - 1);
     }
 
     /**
@@ -218,13 +220,12 @@ class SkyAccess {
         // over the crew instead; the trickle is for the one or two chunks that
         // arrive as you walk.
         if (dirtyCount(self.ring, self.dirty) > BAKE_WORKERS) {
-            let crew : Task<i32>[7];
-            for (i of 0..7) {
-                crew[i] = spawn skyAccessJob(self, i + 1, BAKE_WORKERS, ceil);
+            for (i of 0..BAKE_WORKERS - 1) {
+                self.crew[i] = spawn skyAccessJob(self, i + 1, BAKE_WORKERS, ceil);
             }
             self.bakeDirty(0, BAKE_WORKERS, ceil);
-            for (i of 0..7) {
-                const r : i32 = crew[i].join();
+            for (i of 0..BAKE_WORKERS - 1) {
+                const r : i32 = self.crew[i].join();
             }
             return;
         }

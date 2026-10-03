@@ -12,8 +12,8 @@ use crate::configs::world::{ World };
  * It only ever runs on a ring that has just filled — the start of a run, or a
  * walk into new chunks — so it is a burst, not a load: the render is between
  * frames or waiting on the very chunks this is lighting. Sized for the burst,
- * not for a steady share of the machine. Mirrored by the `Task` arrays the
- * bakes spawn into, whose size must be a literal.
+ * not for a steady share of the machine. One share runs on the light thread
+ * itself; the rest are spawned.
  */
 const BAKE_WORKERS : i32 = 8;
 

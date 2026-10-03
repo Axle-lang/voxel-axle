@@ -36,6 +36,7 @@ class SunShadows {
                              // holds, so it is skipped; the all-zero a slot starts
                              // with matches nothing, so a fresh slot always bakes
     clouds : CloudMap,       // the sun's transmittance through the deck, per column
+    crew : Task<i32>[],      // the spawned shares of a priority bake
 
     /**
      * The bake's bookkeeping over a ring of `slots`.
@@ -50,6 +51,7 @@ class SunShadows {
         self.dirty = newSlotFlags(slots);
         self.baked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
         self.clouds = new CloudMap();
+        self.crew = malloc<Task<i32>>(BAKE_WORKERS - 1);
     }
 
     /**
@@ -381,15 +383,12 @@ class SunShadows {
             // The shares are disjoint by slot, and a slot's bake WRITES only its
             // own volume while it READS the neighbours' voxels, which nothing
             // here changes: no lock, nothing shared but the world itself.
-            // Seven spawned and one run here: an array size has to be a literal,
-            // so the 7 and `BAKE_WORKERS` move together.
-            let crew : Task<i32>[7];
-            for (i of 0..7) {
-                crew[i] = spawn sunBakeJob(self, i + 1, BAKE_WORKERS, sun, ceil);
+            for (i of 0..BAKE_WORKERS - 1) {
+                self.crew[i] = spawn sunBakeJob(self, i + 1, BAKE_WORKERS, sun, ceil);
             }
             self.bakeDirty(0, BAKE_WORKERS, sun, ceil);
-            for (i of 0..7) {
-                const r : i32 = crew[i].join();
+            for (i of 0..BAKE_WORKERS - 1) {
+                const r : i32 = self.crew[i].join();
             }
         } else if (fresh > 0) {
             // A chunk or two walked into: less work than starting the threads

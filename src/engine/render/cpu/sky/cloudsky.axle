@@ -50,10 +50,10 @@ use crate::engine::render::cpu::sky::clouddome::{
 };
 use crate::configs::cloud::{ Cloud };
 
-/** Frames a full refresh is spread over. Mirrored by nothing; see `SKY_CREW`. */
+/** Frames a full refresh is spread over. */
 const SKY_SLICES : i32 = 32;
 
-/** Workers the march and the chase are split across; mirrored by the `Task` array. */
+/** Workers the march and the chase are split across, the caller among them. */
 const SKY_CREW : i32 = 4;
 
 /**
@@ -125,9 +125,11 @@ class CloudSky {
     refSz : f64,
     refField : CloudField, // ...and the wind, all frozen with it
     light : DeckLight,    // this frame's light, applied when the table is read
+    crew : Task<i32>[],   // the spawned shares: every worker but the caller's
 
     /** Allocate the tables, empty until the first march. */
     constructor() {
+        self.crew = malloc<Task<i32>>(SKY_CREW - 1);
         self.work = newTable();
         self.target = newTable();
         self.show = newTable();
@@ -209,13 +211,12 @@ class CloudSky {
             self.freezeView(field, ds, eyeY);
         }
 
-        let crew : Task<i32>[3];
-        for (i of 0..3) {
-            crew[i] = spawn cloudSliceJob(self, i);
+        for (i of 0..SKY_CREW - 1) {
+            self.crew[i] = spawn cloudSliceJob(self, i);
         }
-        self.frameShare(3);
-        for (i of 0..3) {
-            const d : i32 = crew[i].join();
+        self.frameShare(SKY_CREW - 1);
+        for (i of 0..SKY_CREW - 1) {
+            const d : i32 = self.crew[i].join();
         }
 
         self.slice++;
@@ -231,7 +232,13 @@ class CloudSky {
      */
     pub(file) fn frameShare(mut self, who : i32) : void {
         const rows : i32 = SKY_N / SKY_CREW;
-        self.chaseRows(who * rows, (who + 1) * rows);
+        // The last share takes whatever the division left, so a table size
+        // that is not a multiple of the crew still has every row chased.
+        let end : i32 = (who + 1) * rows;
+        if (who == SKY_CREW - 1) {
+            end = SKY_N;
+        }
+        self.chaseRows(who * rows, end);
         self.marchRows(self.slice + SKY_SLICES * who, SKY_SLICES * SKY_CREW);
     }
 
@@ -243,13 +250,12 @@ class CloudSky {
      */
     fn fill(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
         self.freezeView(field, ds, eyeY);
-        let crew : Task<i32>[3];
-        for (i of 0..3) {
-            crew[i] = spawn cloudFillJob(self, i);
+        for (i of 0..SKY_CREW - 1) {
+            self.crew[i] = spawn cloudFillJob(self, i);
         }
-        self.marchRows(3, SKY_CREW);
-        for (i of 0..3) {
-            const d : i32 = crew[i].join();
+        self.marchRows(SKY_CREW - 1, SKY_CREW);
+        for (i of 0..SKY_CREW - 1) {
+            const d : i32 = self.crew[i].join();
         }
 
         const bytes : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;

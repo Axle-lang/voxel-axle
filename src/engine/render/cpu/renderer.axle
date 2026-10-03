@@ -18,10 +18,6 @@
 //
 // It is handed a `View` once a frame and builds the frame's `Camera` from it;
 // nothing below it knows there is a player.
-//
-// The two worker counts live here, next to the `Task` arrays that mirror
-// them: a fixed-array size must be an integer literal, so the pair is kept in
-// step by hand and cannot be a config field.
 
 use smalt::Mem;
 use smalt::{ Job, WorkerPool };
@@ -55,11 +51,7 @@ use crate::configs::world::{ World };
 
 /**
  * Independent world-raster workers, each with its own triangle queue and
- * clipping scratch.
- *
- * A literal, and mirrored by the `Task` array in `drawWorld`, because a
- * fixed-array size must be an integer literal — not a `const`, and not a
- * `static` field, so the two are kept in step by hand.
+ * clipping scratch: one on the calling thread, the rest spawned per frame.
  */
 const BUILD_WORKERS : i32 = 6;
 
@@ -78,6 +70,7 @@ const RASTER_BANDS : i32 = 12;
  */
 class RasterCrew {
     members : ChunkRenderer[],
+    builders : Task<i32>[], // one slot per member but the first, which runs on the caller
 
     /** Build every member of the crew. */
     constructor() {
@@ -85,6 +78,7 @@ class RasterCrew {
         for (i of 0..BUILD_WORKERS) {
             self.members[i as i64] = new ChunkRenderer();
         }
+        self.builders = malloc<Task<i32>>(BUILD_WORKERS - 1);
     }
 
     /**
@@ -122,9 +116,8 @@ class RasterCrew {
      * @param phase  animation time phase (scrolls flowing-water textures)
      */
     pub(crate) fn build(mut self, man : ChunkManager, cam : Camera, phase : f64) : void {
-        let builders : Task<i32>[5];
-        for (i of 0..5) {
-            builders[i] = spawn buildSlotsJob(
+        for (i of 0..BUILD_WORKERS - 1) {
+            self.builders[i] = spawn buildSlotsJob(
                 self.members[(i + 1) as i64],
                 man,
                 cam,
@@ -142,8 +135,8 @@ class RasterCrew {
             BUILD_WORKERS
         );
 
-        for (i of 0..5) {
-            const d : i32 = builders[i].join();
+        for (i of 0..BUILD_WORKERS - 1) {
+            const d : i32 = self.builders[i].join();
         }
     }
 

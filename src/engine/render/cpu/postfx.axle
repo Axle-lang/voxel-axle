@@ -17,6 +17,9 @@ use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
 use crate::configs::water::{ Water };
 
+/** Row bands the god-ray scatter splits into: one on the caller, the rest spawned. */
+const GOD_RAY_BANDS : i32 = 8;
+
 /**
  * The sun projected to screen space plus the god-ray exposure: bundles the
  * three loose `sunSx, sunSy, expo` scalars that the god-ray driver, its row
@@ -58,12 +61,9 @@ class GodRayFX : PostEffect {
         // queue — this splits with no redundant work at all and scales with
         // the cores it is given. It was costing a fifth of the frame on two
         // of them.
-        // Eight, as a literal: a fixed-array size must be one — not a
-        // `const` and not a `static` field — so the count and the `Task`
-        // array below are kept in step by hand.
-        const bh : i32 = (fb.h + 7) / 8;
-        let jobs : Task<i32>[7];
-        for (i of 0..7) {
+        const bh : i32 = (fb.h + GOD_RAY_BANDS - 1) / GOD_RAY_BANDS;
+        let jobs : Task<i32>[] = malloc<Task<i32>>(GOD_RAY_BANDS - 1);
+        for (i of 0..GOD_RAY_BANDS - 1) {
             let y0 : i32 = bh * (i + 1);
             let y1 : i32 = bh * (i + 2);
             if (y1 > fb.h) {
@@ -81,9 +81,10 @@ class GodRayFX : PostEffect {
         }
         self.rows(fb, 0, firstEnd);
 
-        for (i of 0..7) {
+        for (i of 0..GOD_RAY_BANDS - 1) {
             const d : i32 = jobs[i].join();
         }
+        free(jobs);
     }
 
     /**
