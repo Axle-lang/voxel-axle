@@ -453,6 +453,7 @@ class Renderer {
      */
     pub(crate) fn drawSky(mut self, fb : FrameBuf, underwater : bool) : void {
         if (underwater) {
+            self.sky.hidden();
             return;
         }
         self.sky.draw(self.day.state(), self.cam, fb);

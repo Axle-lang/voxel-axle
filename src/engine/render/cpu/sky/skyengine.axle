@@ -193,6 +193,16 @@ class SkyEngine {
     }
 
     /**
+     * Record a frame in which no sky was visible at all — the eye is under
+     * water and nothing was painted. The march prices itself off the sky the
+     * last frame showed, and without this it kept the last count from above the
+     * surface and marched at full cost for a deck nobody could see.
+     */
+    pub(crate) fn hidden(mut self) : void {
+        self.skyPixels = 0;
+    }
+
+    /**
      * Microseconds the cloud march and fog build have taken, accumulated over the run.
      * @return the total, in microseconds
      */
