@@ -23,7 +23,7 @@ use crate::engine::world::chunks::ChunkManager;
 use crate::game::world::terraingen::TerrainGen;
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::engine::block::blocks::{ emissionOf, isOpaque, Emission };
-use crate::engine::seams::{ ChannelLevels };
+use crate::engine::world::seams::{ ChannelLevels };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 use crate::configs::cloud::{ Cloud };

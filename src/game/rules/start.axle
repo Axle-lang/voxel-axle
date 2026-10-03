@@ -16,7 +16,7 @@
 // capability — so making it a runtime value threads a seed through the
 // kernel's seams. Worth doing, and not the same change as this one.
 
-use crate::engine::seams::VoxelQuery;
+use crate::engine::world::seams::{ VoxelQuery };
 use crate::configs::world::{ World };
 
 /** How far out a random start may land, in blocks, on each axis. */

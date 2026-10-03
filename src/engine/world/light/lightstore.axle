@@ -21,8 +21,8 @@ use crate::engine::world::mesh::meshbuf::{ ColumnRing };
 use crate::engine::block::blocks::{
     isOpaque, lightTransmit, emissionOf, albedoFor, Emission
 };
-use crate::engine::seams::{
-    LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels
+use crate::engine::world::seams::{
+    LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels,
 };
 use crate::configs::blocks::{ Block };
 use crate::configs::light::{ Light };

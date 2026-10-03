@@ -14,7 +14,7 @@
 // samples the world columns under the body's footprint (`collisionHeight`
 // already folds tree trunks into the solid surface).
 
-use crate::engine::seams::VoxelQuery;
+use crate::engine::world::seams::{ VoxelQuery };
 use crate::engine::block::blocks::{ isWater, fluidLevel };
 use crate::configs::motion::{ Motion };
 use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };

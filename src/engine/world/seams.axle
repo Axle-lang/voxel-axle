@@ -1,28 +1,25 @@
-// seams — the inter-kernel capability contracts ("coutures").
+// world::seams — the capability contracts the voxel world provides.
 //
-// Single source of truth for the boundaries between the kernels. Each seam is a
-// SMALL, well-named capability trait (one responsibility). Convenience "bundle"
-// super-traits (VoxelQuery / VoxelEdit / LightSample) compose the fine-grained
-// capabilities so a provider conforms once and a consumer can still depend on
-// the whole surface — while a consumer that needs only one capability depends on
-// just that trait (e.g. the picker takes `dyn VoxelReader`, not all of VoxelQuery).
+// Each seam is a SMALL, well-named capability trait (one responsibility).
+// Convenience "bundle" super-traits (VoxelQuery / VoxelEdit / LightSample)
+// compose the fine-grained capabilities so a provider conforms once and a
+// consumer can still depend on the whole surface — while a consumer that needs
+// only one capability depends on just that trait (e.g. the picker takes
+// `dyn VoxelQuery`, never the concrete `ChunkManager`).
 //
-//   PROVIDER                    BUNDLE (fine-grained capabilities)
-//   kworld (ChunkManager)   ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
-//                               VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
-//                                             + DayCycle + LightPrime + LightThread
-//                               LightSample : BlockLightField + SkyLightField
-//                                             + SunLightField + BounceLightField
-//   kentity (Mob)           ->  ActorVisual : Kinded + Animated (+ pose/flash/fuse)
+//   PROVIDER                 BUNDLE (fine-grained capabilities)
+//   world (ChunkManager) ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
+//                            VoxelEdit   : VoxelWriter + LightMutator + ChunkStreamer
+//                                          + DayCycle + LightPrime + LightThread
+//                            LightSample : BlockLightField + SkyLightField
+//                                          + SunLightField + BounceLightField
 //
-// Rules: a kernel edits only its own files; implement the capabilities you
-// PROVIDE, and take the narrowest capability you CONSUME as a `dyn Capability`
-// parameter. Preserve these signatures verbatim or flag a change in your report.
+// The app→engine injection seam the world consumes, `Generator`, lives with
+// the ChunkManager that holds it (world::chunks).
 
-use crate::engine::math::vec3::{ Vec3, IVec3 };
+use crate::engine::math::vec3::{ IVec3 };
 use crate::configs::blocks::{ Block };
 use crate::engine::block::blocks::{ BlockBox };
-use crate::configs::mobs::{ MobKind };
 
 // ─── Voxel read capabilities ────────────────────────────────────────────────
 
@@ -317,66 +314,3 @@ trait LightSample :
      */
     fn cornerSample(self, probe : CornerProbe) : CornerSample;
 }
-
-// ─── Actor render-view capabilities (provided by kentity, read by krender) ───
-
-/** Which species an actor is (selects its billboard model). */
-trait Kinded {
-    /**
-     * The actor's species.
-     * @return the mob kind
-     */
-    fn kind(self) : MobKind;
-}
-
-/** Animation state driving the billboard pose. */
-trait Animated {
-    /**
-     * Walk-cycle phase driving the leg swing.
-     * @return the walk phase
-     */
-    fn walkPhase(self) : f64;
-
-    /**
-     * Collapse progress: 0 at the moment of death, 1 when gone.
-     * @return the normalized death-collapse progress
-     */
-    fn deathProgress(self) : f64;
-}
-
-/**
- * The render-facing view of a living actor. krender's billboard pass iterates
- * `dyn ActorVisual` (via MobManager.actorCount() / actorAt(i)) instead of the
- * old five per-species arrays.
- */
-trait ActorVisual : Kinded, Animated {
-    /**
-     * The actor's world-space position.
-     * @return the position
-     */
-    fn pos(self) : Vec3;
-
-    /**
-     * Facing angle in radians (the whole box model turns to it).
-     * @return the heading
-     */
-    fn heading(self) : f64;
-
-    /**
-     * Remaining frames of the red hurt flash.
-     * @return the hurt-flash countdown, 0 when not flashing
-     */
-    fn hurtFlash(self) : i32;
-
-    /**
-     * Fuse charge level, for the swell / strobe of a charging creeper.
-     * @return the fuse level, or a value below zero when idle
-     */
-    fn fuseLevel(self) : i32;
-}
-
-// NOTE: the app→kernel INJECTION seams are NOT here — they live with the kernel
-// that consumes them, so each kernel stays self-contained/splittable:
-//   * Generator   (terrain gen)  -> world::chunks   (held by ChunkManager)
-//   * MobSpawner  (mob roster)   -> entity::mob      (held by MobManager)
-// This file holds only the kernel↔kernel capability contracts above.

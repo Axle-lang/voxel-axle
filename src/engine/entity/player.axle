@@ -7,7 +7,7 @@
 // gravity always has a say.
 
 use crate::engine::entity::entity::Entity;
-use crate::engine::seams::VoxelQuery;
+use crate::engine::world::seams::{ VoxelQuery };
 use crate::engine::block::blocks::{ isWater };
 use crate::configs::blocks::{ Block };
 use crate::configs::health::{ Health };

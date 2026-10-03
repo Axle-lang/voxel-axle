@@ -7,7 +7,7 @@
 use std::numeric::math;
 use crate::engine::entity::mob::{ Mob, MobState, Hostile };
 use crate::engine::entity::player::{ GameMode, Player };
-use crate::engine::seams::{ VoxelQuery, VoxelEdit };
+use crate::engine::world::seams::{ VoxelQuery, VoxelEdit };
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::engine::audio::sfx::AudioManager;
 use crate::engine::math::vec3::{ IVec3, ivec3 };

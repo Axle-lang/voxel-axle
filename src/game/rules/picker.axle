@@ -4,7 +4,7 @@
 // small "would this block trap the player?" test used to refuse placing
 // inside yourself.
 
-use crate::engine::seams::VoxelQuery;
+use crate::engine::world::seams::{ VoxelQuery };
 use crate::engine::entity::player::Player;
 use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
 use crate::configs::gameplay::{ Gameplay };

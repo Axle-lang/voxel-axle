@@ -1,0 +1,67 @@
+// entity::seams — the capability contracts a living actor provides to whoever
+// draws or hears it.
+//
+// The render passes iterate `dyn ActorVisual` (via MobManager.actorCount() /
+// actorAt(i)) instead of naming a species class. The app→engine injection seam
+// the population consumes, `MobSpawner`, lives with the MobManager that holds
+// it (entity::mob).
+
+use crate::engine::math::vec3::{ Vec3 };
+use crate::configs::mobs::{ MobKind };
+
+// ─── Actor render-view capabilities (provided by kentity, read by krender) ───
+
+/** Which species an actor is (selects its billboard model). */
+trait Kinded {
+    /**
+     * The actor's species.
+     * @return the mob kind
+     */
+    fn kind(self) : MobKind;
+}
+
+/** Animation state driving the billboard pose. */
+trait Animated {
+    /**
+     * Walk-cycle phase driving the leg swing.
+     * @return the walk phase
+     */
+    fn walkPhase(self) : f64;
+
+    /**
+     * Collapse progress: 0 at the moment of death, 1 when gone.
+     * @return the normalized death-collapse progress
+     */
+    fn deathProgress(self) : f64;
+}
+
+/**
+ * The render-facing view of a living actor. krender's billboard pass iterates
+ * `dyn ActorVisual` (via MobManager.actorCount() / actorAt(i)) instead of the
+ * old five per-species arrays.
+ */
+trait ActorVisual : Kinded, Animated {
+    /**
+     * The actor's world-space position.
+     * @return the position
+     */
+    fn pos(self) : Vec3;
+
+    /**
+     * Facing angle in radians (the whole box model turns to it).
+     * @return the heading
+     */
+    fn heading(self) : f64;
+
+    /**
+     * Remaining frames of the red hurt flash.
+     * @return the hurt-flash countdown, 0 when not flashing
+     */
+    fn hurtFlash(self) : i32;
+
+    /**
+     * Fuse charge level, for the swell / strobe of a charging creeper.
+     * @return the fuse level, or a value below zero when idle
+     */
+    fn fuseLevel(self) : i32;
+}

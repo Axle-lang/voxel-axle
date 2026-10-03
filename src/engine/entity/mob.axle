@@ -15,7 +15,8 @@
 
 use crate::engine::entity::entity::{ Entity, Damageable };
 use crate::engine::entity::player::Player;
-use crate::engine::seams::{ VoxelQuery, ActorVisual };
+use crate::engine::world::seams::{ VoxelQuery };
+use crate::engine::entity::seams::{ ActorVisual };
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::engine::audio::sfx::AudioManager;
 use crate::configs::audio::{ Audio };

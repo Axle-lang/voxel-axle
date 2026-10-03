@@ -11,7 +11,7 @@
 use crate::engine::math::vec3::{ Vec3, vec3 };
 use crate::engine::entity::mob::{ Mob, Actor, Hostile, MobSpawner };
 use crate::engine::entity::player::Player;
-use crate::engine::seams::ActorVisual;
+use crate::engine::entity::seams::{ ActorVisual };
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::game::world::terrain::hash2;

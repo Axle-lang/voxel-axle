@@ -25,7 +25,7 @@ use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::shade::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::engine::shade::daymodel::{ DayState };
-use crate::engine::seams::{ CornerProbe, CornerSample };
+use crate::engine::world::seams::{ CornerProbe, CornerSample };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3, ivec3 };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
 use crate::engine::world::chunks::ChunkManager;

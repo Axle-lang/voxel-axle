@@ -17,7 +17,7 @@ use crate::engine::entity::player::{ GameMode, Player };
 use crate::engine::entity::mobs::MobManager;
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::engine::math::narrow::{ FLOAT_BYTES };
-use crate::engine::seams::{ LightMoment };
+use crate::engine::world::seams::{ LightMoment };
 use crate::engine::render::cpu::renderer::Renderer;
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::render::view::camera::{ Viewport, viewportFor };
