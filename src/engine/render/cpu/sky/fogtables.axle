@@ -10,7 +10,7 @@
 
 use smalt::Mem;
 use crate::engine::sky::viewray::{ ViewRay };
-use crate::engine::sky::atmosphere::{ SkyColour, SkyDome };
+use crate::engine::sky::atmosphere::{ SkyColour, SkyDome, shoulder };
 use crate::engine::render::cpu::sky::viewrays::{ ViewRays, ViewRow };
 use crate::engine::sky::clouddome::{ CloudDome, CloudSample };
 use crate::configs::render::{ Render };
@@ -215,10 +215,12 @@ class FogTables {
                         b: c.b * keep + cl.b,
                     };
                 }
+                // The sky as it is painted — rolled off at the shoulder — so a fogged
+                // silhouette meets the sky beside it without a seam, and never passes 255.
                 const i : i32 = gy * gw + gx;
-                Mem::putRealOf(self.r, i as i64, c.r);
-                Mem::putRealOf(self.g, i as i64, c.g);
-                Mem::putRealOf(self.b, i as i64, c.b);
+                Mem::putRealOf(self.r, i as i64, shoulder(c.r));
+                Mem::putRealOf(self.g, i as i64, shoulder(c.g));
+                Mem::putRealOf(self.b, i as i64, shoulder(c.b));
             }
         }
 
