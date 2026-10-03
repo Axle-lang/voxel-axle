@@ -1,15 +1,15 @@
 // mobview — the mob box-model renderer.
 //
 // Mobs (and torches) are drawn as little stacks of shaded, atlas-textured
-// cuboids sharing the world z-buffer. Each mob describes its own boxes through
-// `ActorVisual.buildModel` (entity::model); this file only knows how to draw an
-// oriented box — the corner math, the per-face project + backface-cull +
-// raster, the per-mob ambient light — so a new species never touches it.
+// cuboids sharing the world z-buffer. The frame hands over every creature's
+// boxes already placed and lit (`FrameDesc.boxes`); this file only knows how to
+// draw an oriented box — the per-face project + backface-cull + raster — so a
+// new species never touches it.
 //
 // Per frame the Renderer hands in a `MobScene` value (atlas + fog colour + the
-// day/night state); MobView never stores frame state beyond the per-mob
-// `mobLight`. The block torches reuse `drawQuad` directly, so it is the one
-// public quad primitive.
+// day/night state); MobView never stores frame state beyond the light of the
+// box being drawn. The block torches reuse `drawQuad` directly, so it is the
+// one public quad primitive.
 
 use smalt::Mem;
 use smalt::Color;
@@ -24,14 +24,12 @@ use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::shade::facelight::{ sunExposure };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::render::cpu::sky::fogtables::{ FogTable };
-use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
-use crate::engine::entity::mobs::MobManager;
-use crate::engine::world::chunks::ChunkManager;
-use crate::engine::world::seams::{ ChannelLevels };
-use crate::engine::entity::seams::{ ActorVisual };
-use crate::engine::entity::model::{ BoxModel, BoxPart };
+use crate::engine::math::vec3::{ Vec3, vec3 };
+use crate::engine::render::frame::framedesc::{ MobBox };
+use crate::engine::render::frame::boxpose::{
+    BoxPose, poseOf, boxCorner, rightNormal, upNormal, forwardNormal,
+};
 use crate::configs::atlas::{ Atlas };
-use crate::configs::light::{ Light };
 use crate::configs::screen::{ Screen };
 
 /**
@@ -70,8 +68,7 @@ class MobView {
     obx : i64,      // oriented-box world corners (8 per body part)
     oby : i64,
     obz : i64,
-    mobLight : LinRgb, // ambient light on the mob currently being drawn, per channel
-    model : BoxModel,  // the boxes the mob being drawn described
+    mobLight : LinRgb, // ambient light on the box currently being drawn, per channel
 
     /** Allocate the clipping scratch and the oriented-box corner buffers. */
     constructor() {
@@ -81,7 +78,6 @@ class MobView {
         self.oby = Mem::take(8 * 8);
         self.obz = Mem::take(8 * 8);
         self.mobLight = LinRgb { r: 1.0, g: 1.0, b: 1.0 };
-        self.model = new BoxModel();
     }
 
     /**
@@ -378,82 +374,38 @@ class MobView {
     }
 
     /**
-     * Draw one body part as an **oriented** box: the part is positioned in the
-     * mob's own frame (`part.ctr` = right / up-above-feet / forward,
-     * half-extents `part.half`), then the whole box is rotated by the
-     * mob's heading, so the head/body/legs turn together as a rigid model. The
-     * +forward face carries `part.faceTile` (the animal's face), the rest
-     * `part.skinTile`. Death collapses the box (sink + squash + topple along
-     * the heading).
+     * Draw one creature box as an **oriented** box: its eight corners placed by
+     * the creature's heading and topple (frame::boxpose), then its faces. The
+     * +forward face carries the box's face tile (the animal's face), the rest
+     * its skin tile.
      * @param cam    the frame's camera
-     * @param a      the actor whose frame the box is placed in (seam-typed)
      * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param part   the box: placement in the mob frame, colour and tiles
+     * @param b      the box, placed and lit
      * @param scene  the per-frame mob context
      */
-    fn drawObox(
-        mut self,
-        cam : Camera,
-        a : dyn ActorVisual,
-        fb : FrameBuf,
-        part : BoxPart,
-        scene : MobScene
-    ) : void {
-        const color : i32 = part.color;
-        // Read the seam once (dynamic dispatch) into locals for the corner loop.
-        const heading : f64 = a.heading();
-        const pos : Vec3 = a.pos();
-        const fwdx : f64 = heading.cos();
-        const fwdz : f64 = heading.sin();
-        const rgtx : f64 = heading.sin();
-        const rgtz : f64 = 0.0 - heading.cos();
-
-        // Death: topple onto one side like Minecraft — rotate the whole model
-        // up→right about the feet by up to ~90° as the collapse plays out. `lr`,
-        // `lu` are the same rotation applied to every part (so the box stays
-        // rigid); a small lift keeps the resting flank from dipping underground.
-        const pr : f64 = a.deathProgress();
-        const theta : f64 = pr * 1.5707963;
-        const ct : f64 = theta.cos();
-        const st : f64 = theta.sin();
-        const lift : f64 = 0.15 * st;
-
+    fn drawBox(mut self, cam : Camera, fb : FrameBuf, b : MobBox, scene : MobScene) : void {
+        const p : BoxPose = poseOf(b);
         for (ci of 0..8) {
-            const sr : f64 = (ci & 1) != 0 ? 1.0 : 0.0 - 1.0;
-            const su : f64 = (ci & 2) != 0 ? 1.0 : 0.0 - 1.0;
-            const sf : f64 = (ci & 4) != 0 ? 1.0 : 0.0 - 1.0;
-            const lr0 : f64 = part.ctr.x + sr * part.half.x;
-            const hun : f64 = part.ctr.y + su * part.half.y;
-            const lf : f64 = part.ctr.z + sf * part.half.z;
-            const lr : f64 = lr0 * ct + hun * st;
-            const lu : f64 = hun * ct - lr0 * st + lift;
-            Mem::putRealOf(self.obx, ci, pos.x + lr * rgtx + lf * fwdx);
-            Mem::putRealOf(self.oby, ci, pos.y + lu);
-            Mem::putRealOf(self.obz, ci, pos.z + lr * rgtz + lf * fwdz);
+            const c : Vec3 = boxCorner(b, p, ci);
+            Mem::putRealOf(self.obx, ci, c.x);
+            Mem::putRealOf(self.oby, ci, c.y);
+            Mem::putRealOf(self.obz, ci, c.z);
         }
 
-        const hurt : bool = a.hurtFlash() > 0;
-
-        // The right and up face normals rotate with the topple (forward is the
-        // rotation axis, so forward normals are unchanged), keeping backface
-        // culling correct while the body lies down.
-        const rnx : f64 = ct * rgtx;
-        const rny : f64 = 0.0 - st;
-        const rnz : f64 = ct * rgtz;
-        const unx : f64 = st * rgtx;
-        const uny : f64 = ct;
-        const unz : f64 = st * rgtz;
-
+        const rn : Vec3 = rightNormal(p);
+        const un : Vec3 = upNormal(p);
+        const fwd : Vec3 = forwardNormal(p);
         const skin : Material = Material {
-            color,
-            tile: part.skinTile,
-            hurt,
+            color: b.part.color,
+            tile: b.part.skinTile,
+            hurt: b.hurt,
         };
         const faceM : Material = Material {
-            color,
-            tile: part.faceTile,
-            hurt,
+            color: b.part.color,
+            tile: b.part.faceTile,
+            hurt: b.hurt,
         };
+
         self.oquad(
             cam,
             fb,
@@ -461,7 +413,7 @@ class MobView {
             5,
             7,
             3,
-            vec3(rnx, rny, rnz),
+            rn,
             skin,
             scene
         );
@@ -472,7 +424,7 @@ class MobView {
             0,
             2,
             6,
-            vec3(0.0 - rnx, 0.0 - rny, 0.0 - rnz),
+            vec3(0.0 - rn.x, 0.0 - rn.y, 0.0 - rn.z),
             skin,
             scene
         );
@@ -483,7 +435,7 @@ class MobView {
             3,
             7,
             6,
-            vec3(unx, uny, unz),
+            un,
             skin,
             scene
         );
@@ -494,7 +446,7 @@ class MobView {
             5,
             7,
             6,
-            vec3(fwdx, 0.0, fwdz),
+            fwd,
             faceM,
             scene
         );
@@ -505,13 +457,13 @@ class MobView {
             0,
             2,
             3,
-            vec3(0.0 - fwdx, 0.0, 0.0 - fwdz),
+            vec3(0.0 - fwd.x, 0.0, 0.0 - fwd.z),
             skin,
             scene
         );
 
         // Once tipping over, the underside comes into view, so draw it too.
-        if (pr > 0.0) {
+        if (b.topple > 0.0) {
             self.oquad(
                 cam,
                 fb,
@@ -519,7 +471,7 @@ class MobView {
                 1,
                 5,
                 4,
-                vec3(0.0 - unx, 0.0 - uny, 0.0 - unz),
+                vec3(0.0 - un.x, 0.0 - un.y, 0.0 - un.z),
                 skin,
                 scene
             );
@@ -527,81 +479,26 @@ class MobView {
     }
 
     /**
-     * Ambient light factor (0..1) for a mob at world position (mx,my,mz): the
-     * brighter of sky×daylight and block light at its cell, through the same
-     * exponential curve as terrain, so mobs darken at night / underground and
-     * are lit — in the torch's own colour — by nearby torches. Sky and block
-     * light ADD, as they do on terrain; taking the brighter of the two is what
-     * stops a torch from warming an animal the sky already reaches.
-     * @param man       the chunk manager (light maps)
-     * @param pos       the mob's feet position
-     * @param lcurve    the renderer's brightness lookup (lightFalloff^(15-level))
-     * @param daylight  the day factor that scales sky light
-     * @return ambient light factor in [`Light::MIN`, 1]
-     */
-    fn mobLightAt(self, man : ChunkManager, pos : Vec3, lcurve : i64, daylight : f64) : LinRgb {
-        const cell : IVec3 = ivec3(
-            pos.x.floorToInt() as i32,
-            (pos.y + 0.5).floorToInt() as i32,
-            pos.z.floorToInt() as i32
-        );
-        const skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
-        const blk : ChannelLevels = man.blGetW(cell);
-        const floor : f64 = Light::MIN;
-        const span : f64 = 1.0 - Light::MIN;
-
-        return LinRgb {
-            r: floor + span * (skyF + Mem::realOf(lcurve, blk.r)),
-            g: floor + span * (skyF + Mem::realOf(lcurve, blk.g)),
-            b: floor + span * (skyF + Mem::realOf(lcurve, blk.b)),
-        };
-    }
-
-    /**
-     * Draw every mob of every species, sharing the world's z-buffer (so terrain
-     * correctly occludes animals behind it). Each mob's ambient light factor is
-     * sampled once (mobLight) and applied by drawQuad.
-     * @param man     chunk manager (light maps, for per-mob ambient light)
-     * @param mm      mob manager holding the per-species arrays
-     * @param cam     the frame's camera
-     * @param fb      the render target (framebuffer + z-buffer + size)
-     * @param scene   the per-frame mob context (atlas, fog, day-state, hw)
-     * @param lcurve  the renderer's brightness lookup table
+     * Draw every creature box of the frame, sharing the world's z-buffer (so
+     * terrain correctly occludes animals behind it), each in its own light.
+     * @param cam    the frame's camera
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param scene  the per-frame mob context (atlas, fog, day-state)
+     * @param boxes  the frame's boxes
+     * @param n      how many of them there are
      */
     pub(crate) fn drawAll(
         mut self,
-        man : ChunkManager,
-        mm : MobManager,
         cam : Camera,
         fb : FrameBuf,
         scene : MobScene,
-        lcurve : i64
+        boxes : MobBox[],
+        n : i32
     ) : void {
-        const day : f64 = scene.ds.skyAmbient;
-
-        // Iterate the actors uniformly through the ActorVisual seam (RTTI
-        // dispatch), instead of the old five per-species while-loops.
-        const n : i32 = mm.actorCount();
         for (i of 0..n) {
-            const a : dyn ActorVisual = mm.actorAt(i);
-            self.mobLight = self.mobLightAt(man, a.pos(), lcurve, day);
-            self.drawActor(cam, a, fb, scene);
-        }
-    }
-
-    /**
-     * Draw one actor: ask it for this frame's boxes, then draw each as an
-     * oriented box in its frame. Which species it is never comes up.
-     * @param cam    the frame's camera
-     * @param a      the actor to draw (seam-typed)
-     * @param fb     the render target (framebuffer + z-buffer + size)
-     * @param scene  the per-frame mob context
-     */
-    fn drawActor(mut self, cam : Camera, a : dyn ActorVisual, fb : FrameBuf, scene : MobScene) : void {
-        self.model.clear();
-        a.buildModel(self.model);
-        for (i of 0..self.model.count()) {
-            self.drawObox(cam, a, fb, self.model.at(i), scene);
+            const b : MobBox = boxes[i];
+            self.mobLight = b.light;
+            self.drawBox(cam, fb, b, scene);
         }
     }
 }

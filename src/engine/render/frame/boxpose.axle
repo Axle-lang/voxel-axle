@@ -1,0 +1,93 @@
+// boxpose — where a creature's box stands in the world: its eight corners and
+// the normals of its faces, from the box, the creature's heading and how far
+// its death has toppled it.
+//
+// The one copy of that math, for every backend that draws a `MobBox`.
+
+use crate::engine::math::vec3::{ Vec3, vec3 };
+use crate::engine::render::frame::framedesc::{ MobBox };
+
+/**
+ * The creature's frame for one box: its forward and right axes on the ground,
+ * and the topple — a rotation about forward, up toward right, with a small
+ * lift so the resting flank does not dip underground.
+ */
+struct BoxPose {
+    pub(crate) fwdx : f64,
+    pub(crate) fwdz : f64,
+    pub(crate) rgtx : f64,
+    pub(crate) rgtz : f64,
+    pub(crate) ct : f64,      // cos of the topple angle
+    pub(crate) st : f64,      // sin of the topple angle
+    pub(crate) lift : f64,
+}
+
+/**
+ * The frame a box is placed by.
+ * @param b  the box
+ * @return its pose
+ */
+fn poseOf(b : MobBox) : BoxPose {
+    const theta : f64 = b.topple * 1.5707963;
+    const st : f64 = theta.sin();
+    return BoxPose {
+        fwdx: b.heading.cos(),
+        fwdz: b.heading.sin(),
+        rgtx: b.heading.sin(),
+        rgtz: 0.0 - b.heading.cos(),
+        ct: theta.cos(),
+        st,
+        lift: 0.15 * st,
+    };
+}
+
+/**
+ * One corner of a placed box. Bit 0 of `ci` picks the right side, bit 1 the
+ * top, bit 2 the front.
+ * @param b   the box
+ * @param p   its pose
+ * @param ci  the corner, 0..7
+ * @return the corner in world space
+ */
+fn boxCorner(b : MobBox, p : BoxPose, ci : i32) : Vec3 {
+    const sr : f64 = (ci & 1) != 0 ? 1.0 : 0.0 - 1.0;
+    const su : f64 = (ci & 2) != 0 ? 1.0 : 0.0 - 1.0;
+    const sf : f64 = (ci & 4) != 0 ? 1.0 : 0.0 - 1.0;
+    const lr0 : f64 = b.part.ctr.x + sr * b.part.half.x;
+    const hun : f64 = b.part.ctr.y + su * b.part.half.y;
+    const lf : f64 = b.part.ctr.z + sf * b.part.half.z;
+    const lr : f64 = lr0 * p.ct + hun * p.st;
+    const lu : f64 = hun * p.ct - lr0 * p.st + p.lift;
+    return vec3(
+        b.pos.x + lr * p.rgtx + lf * p.fwdx,
+        b.pos.y + lu,
+        b.pos.z + lr * p.rgtz + lf * p.fwdz
+    );
+}
+
+/**
+ * The normal of the box's right face, turned with the topple.
+ * @param p  the pose
+ * @return the unit normal
+ */
+fn rightNormal(p : BoxPose) : Vec3 {
+    return vec3(p.ct * p.rgtx, 0.0 - p.st, p.ct * p.rgtz);
+}
+
+/**
+ * The normal of the box's top face, turned with the topple.
+ * @param p  the pose
+ * @return the unit normal
+ */
+fn upNormal(p : BoxPose) : Vec3 {
+    return vec3(p.st * p.rgtx, p.ct, p.st * p.rgtz);
+}
+
+/**
+ * The normal of the box's front face; the topple turns about it.
+ * @param p  the pose
+ * @return the unit normal
+ */
+fn forwardNormal(p : BoxPose) : Vec3 {
+    return vec3(p.fwdx, 0.0, p.fwdz);
+}

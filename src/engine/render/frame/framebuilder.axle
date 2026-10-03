@@ -1,0 +1,193 @@
+// framebuilder — decides what one frame shows, once, for whichever backend
+// draws it.
+//
+// Everything a frame reads from the game is read here: the hour's light, the
+// camera, every creature's boxes and the light it stands in, the torches in
+// view, the aimed block's outline. A backend is handed the result and reads
+// nothing else of the game's, so what is on screen is the same decision
+// whichever backend paints it.
+
+use smalt::Mem;
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::shade::daymodel::{ DayLighting, DayState };
+use crate::engine::shade::gamma::{ LinRgb };
+use crate::engine::render::view::camera::{ Camera, Lens, View, lensFor, cameraOf };
+use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
+use crate::engine::render::frame::framedesc::{
+    FrameDesc, FrameClock, MobBox, AimBox,
+};
+use crate::engine::world::chunks::ChunkManager;
+use crate::engine::world::seams::{ ChannelLevels };
+use crate::engine::entity::mobs::MobManager;
+use crate::engine::entity::seams::{ ActorVisual };
+use crate::engine::entity::model::{ BoxModel, MODEL_MAX_PARTS };
+use crate::configs::light::{ Light };
+use crate::configs::mobs::{ Mobs };
+use crate::configs::screen::{ Screen };
+use crate::configs::world::{ World };
+
+/** What a frame is built from, lent for one `build`. */
+struct FrameSource {
+    pub(crate) man : ChunkManager,
+    pub(crate) mobs : MobManager,
+}
+
+/** The block the player aims at, when there is one. */
+struct Aim {
+    pub(crate) on : bool,
+    pub(crate) cell : IVec3,
+}
+
+class FrameBuilder {
+    day : DayLighting,  // the hour's light, and the brightness curve
+    lens : Lens,        // the target's projection; follows the viewport
+    model : BoxModel,   // scratch: the boxes the creature being read described
+    boxes : MobBox[],
+    boxCount : i32,
+    torches : IVec3[],
+    torchCount : i32,
+
+    /** A builder for the default render size, with room for every box and torch. */
+    constructor() {
+        self.day = new DayLighting();
+        self.lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
+        self.model = new BoxModel();
+        self.boxes = malloc<MobBox>(Mobs::CAP * MODEL_MAX_PARTS);
+        self.boxCount = 0;
+        self.torches = malloc<IVec3>(World::SPAN * World::SPAN * World::MAX_TORCHES_PER_CHUNK);
+        self.torchCount = 0;
+    }
+
+    /**
+     * Project for a target of this size.
+     * @param w  the target's width in pixels
+     * @param h  the target's height in pixels
+     */
+    pub(crate) fn setViewport(mut self, w : i32, h : i32) : void {
+        self.lens = lensFor(w, h);
+    }
+
+    /**
+     * Decide this frame.
+     * @param src    the world and the creatures in it
+     * @param view   where the frame is seen from
+     * @param clock  the hour, the seconds and the water's phase
+     * @param aim    the aimed block, if any
+     * @return the frame, valid until the next `build`
+     */
+    pub(crate) fn build(
+        mut self,
+        src : FrameSource,
+        view : View,
+        clock : FrameClock,
+        aim : Aim
+    ) : FrameDesc {
+        const ds : DayState = self.day.update(clock.dayTime);
+        const cam : Camera = cameraOf(view, self.lens);
+        self.readMobs(src, ds);
+        self.readTorches(src.man, cam);
+
+        let topH : f64 = 1.0;
+        if (aim.on) {
+            topH = src.man.blockBoxHeight(aim.cell);
+        }
+
+        return FrameDesc {
+            cam,
+            clock,
+            day: ds,
+            lcurve: self.day.curve(),
+            boxes: self.boxes,
+            boxCount: self.boxCount,
+            torches: self.torches,
+            torchCount: self.torchCount,
+            aim: AimBox {
+                on: aim.on,
+                cell: aim.cell,
+                topH,
+            },
+        };
+    }
+
+    /**
+     * Every creature's boxes, placed by its frame and lit by where it stands.
+     * @param src  the world and the creatures
+     * @param ds   the hour's light
+     */
+    fn readMobs(mut self, src : FrameSource, ds : DayState) : void {
+        self.boxCount = 0;
+        const n : i32 = src.mobs.actorCount();
+        for (i of 0..n) {
+            const a : dyn ActorVisual = src.mobs.actorAt(i);
+            const light : LinRgb = self.lightAt(src.man, a, ds.skyAmbient);
+            self.model.clear();
+            a.buildModel(self.model);
+            for (k of 0..self.model.count()) {
+                self.boxes[self.boxCount] = MobBox {
+                    part: self.model.at(k),
+                    pos: a.pos(),
+                    heading: a.heading(),
+                    topple: a.deathProgress(),
+                    hurt: a.hurtFlash() > 0,
+                    light,
+                };
+                self.boxCount++;
+            }
+        }
+    }
+
+    /**
+     * The light a creature stands in, per channel: sky × daylight plus block
+     * light at its cell, through the same brightness curve as terrain, so mobs
+     * darken at night and underground and take a torch's colour beside one.
+     * @param man       the world's light
+     * @param a         the creature
+     * @param daylight  the day factor that scales sky light
+     * @return the light, in [`Light::MIN`, 1] per channel
+     */
+    fn lightAt(self, man : ChunkManager, a : dyn ActorVisual, daylight : f64) : LinRgb {
+        const pos = a.pos();
+        const cell : IVec3 = ivec3(
+            pos.x.floorToInt() as i32,
+            (pos.y + 0.5).floorToInt() as i32,
+            pos.z.floorToInt() as i32
+        );
+        const lcurve : i64 = self.day.curve();
+        const skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
+        const blk : ChannelLevels = man.blGetW(cell);
+        const floor : f64 = Light::MIN;
+        const span : f64 = 1.0 - Light::MIN;
+
+        return LinRgb {
+            r: floor + span * (skyF + Mem::realOf(lcurve, blk.r)),
+            g: floor + span * (skyF + Mem::realOf(lcurve, blk.g)),
+            b: floor + span * (skyF + Mem::realOf(lcurve, blk.b)),
+        };
+    }
+
+    /**
+     * The torch cells of every loaded chunk the camera can see.
+     * @param man  the world, whose mesher collected the torches
+     * @param cam  this frame's camera
+     */
+    fn readTorches(mut self, man : ChunkManager, cam : Camera) : void {
+        self.torchCount = 0;
+        const cone : ViewCone = viewConeFor(cam);
+        for (slot of 0..World::SPAN * World::SPAN) {
+            if (man.cols.loaded[slot] == 1
+                && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
+                const base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
+                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
+                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
+                for (ti of 0..man.mesher.torches.tcount[slot]) {
+                    self.torches[self.torchCount] = ivec3(
+                        ox + (man.mesher.torches.tx[base + ti] as i32),
+                        man.mesher.torches.ty[base + ti] as i32,
+                        oz + (man.mesher.torches.tz[base + ti] as i32)
+                    );
+                    self.torchCount++;
+                }
+            }
+        }
+    }
+}

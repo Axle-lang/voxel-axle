@@ -65,15 +65,12 @@ fn loadAround(man : ChunkManager, x : f64, z : f64) : void {
 }
 
 /**
- * A renderer for a framebuffer of this size, with `atlas.raw` loaded into its
- * mip chain. Level 0 is a full copy, so the file's buffer is released at once.
- * @param w  the framebuffer's width
- * @param h  the framebuffer's height
+ * A renderer with `atlas.raw` loaded into its mip chain. Level 0 is a full
+ * copy, so the file's buffer is released at once.
  * @return the renderer, ready for its first frame
  */
-fn newRenderer(w : i32, h : i32) : Renderer {
+fn newRenderer() : Renderer {
     const renderer = new Renderer();
-    renderer.setViewport(w, h);
 
     const tile = Atlas::TILE_PX as i64;
     const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);

@@ -9,15 +9,15 @@
 //   `SkyEngine`      (cpu::sky::skyengine)      everything above the ground
 //   `TextureAtlas`   (cpu::atlas)               the mip chain
 //   `GammaTables`    (shade::gamma)             the sRGB <-> linear tables
-//   `DayLighting`    (shade::daymodel)          the sun / sky / brightness cache
 //   `ChunkRenderer`  (cpu::world::chunkview)    the world-face raster crew
 //   `MobView`        (cpu::mobs::mobview)       the mob box models
 //   `Selection`      (cpu::selection)           the targeted-block wireframe
 //   `Bloom`          (cpu::bloom)               the soft glow
 //   `GodRayFX` / `UnderwaterFX` (cpu::postfx)   the other two post passes
 //
-// It is handed a `View` once a frame and builds the frame's `Camera` from it;
-// nothing below it knows there is a player.
+// It is handed a `FrameDesc` once a frame (render::frame) — the camera, the
+// hour's light, the creatures' boxes, the torches, the aimed block — and draws
+// what it says; nothing below it knows there is a player or a mob.
 
 use smalt::Mem;
 use smalt::{ Job, WorkerPool };
@@ -29,25 +29,22 @@ use crate::engine::render::cpu::sky::clouddome::{ CloudSample };
 use crate::engine::render::cpu::sky::skyengine::{ SkyEngine };
 use crate::engine::render::cpu::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::engine::render::cpu::atlas::{ TextureAtlas };
-use crate::engine::shade::daymodel::{ DayLighting };
 use crate::engine::render::cpu::world::chunkview::{ ChunkRenderer, buildSlotsJob };
-use crate::engine::render::view::frustum::{ chunkVisible, viewConeFor, ViewCone };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene, Material };
 use crate::engine::render::cpu::selection::Selection;
 use crate::engine::render::cpu::raster::framebuf::{ clearFrame, clearDepth, FrameBuf };
-use crate::engine::render::view::camera::{ lensFor, cameraOf, Camera, Lens, Projected, View };
+use crate::engine::render::view::camera::{ lensFor, cameraOf, Camera, Projected, View };
+use crate::engine::render::frame::framedesc::{ FrameDesc };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::shade::gamma::{ Gamma, GammaTables, LinRgb };
-use crate::engine::math::vec3::{ vec3 };
+use crate::engine::math::vec3::{ IVec3, vec3 };
 use crate::engine::world::chunks::ChunkManager;
-use crate::engine::entity::mobs::MobManager;
 use crate::configs::atlas::{ Tile };
 use crate::configs::light::{ Light };
 use crate::configs::render::{ Render };
 use crate::configs::screen::{ Screen };
 use crate::configs::water::{ Water };
-use crate::configs::world::{ World };
 
 /**
  * Independent world-raster workers, each with its own triangle queue and
@@ -212,12 +209,9 @@ class BandFill : Job {
  * component it delegates to.
  */
 class Renderer {
-    lens : Lens,          // projection centre + focal length; rebuilt on resize so
-                          // the world keeps its scale and the FOV tracks the window
-    cam : Camera,         // this frame's camera: the view `render` was handed, through `lens`
+    cam : Camera,         // this frame's camera, as the frame describes it
     atlas : TextureAtlas, // owns the atlas mip chain (setAtlas / atlasBase)
     gamma : GammaTables,  // owns the sRGB ↔ linear tables every pass lights through
-    day : DayLighting,    // owns the day/night colour + brightness cache
     crew : Shared<RasterCrew>, // the world-face raster crew, co-owned with the banded fill
     fillUs : i64 = 0,          // microseconds spent in the banded fill, accumulated over the run
     sky : SkyEngine,  // everything above the ground: the atmosphere, the cloud
@@ -241,7 +235,6 @@ class Renderer {
      * render components (each owns its own scratch / buffers).
      */
     constructor() {
-        self.lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
         self.cam = cameraOf(
             View {
                 eye: vec3(0.0, 0.0, 0.0),
@@ -250,11 +243,10 @@ class Renderer {
                 cosp: 1.0,
                 sinp: 0.0,
             },
-            self.lens
+            lensFor(Screen::RENDER_W, Screen::RENDER_H)
         );
         self.atlas = new TextureAtlas();
         self.gamma = new GammaTables();
-        self.day = new DayLighting();
         self.crew = new shared RasterCrew();
         self.bloom = new Bloom();
         self.mobs = new MobView();
@@ -300,21 +292,6 @@ class Renderer {
      */
     pub(crate) fn atlasBase(self) : i64 {
         return self.atlas.base();
-    }
-
-    /**
-     * Match the projection to a framebuffer of this size.
-     *
-     * Both axes, because both move: the framebuffer follows the window's shape
-     * now, not just its ratio. The vertical field of view is what stays fixed
-     * (`Screen::FOV_V_DEG`), so more pixels mean a sharper image of the same
-     * world rather than a bigger one, and a wider window widens the horizontal
-     * angle instead of magnifying what was already there.
-     * @param renderW  framebuffer width in pixels
-     * @param renderH  framebuffer height in pixels
-     */
-    pub(crate) fn setViewport(mut self, renderW : i32, renderH : i32) : void {
-        self.lens = lensFor(renderW, renderH);
     }
 
     // ── World pass (clear → sky → world raster) ──
@@ -382,44 +359,23 @@ class Renderer {
     }
 
     /**
-     * Draw one full world frame: refresh the day/night state, clear to the
-     * sky/fog (or deep water when submerged), move the sky on a frame, then hand
-     * the world-face raster the visible chunks to project + light + clip + fill.
-     * Mobs, torches, the sky paint and post-fx are layered on by the caller
-     * after this returns.
-     * @param man        chunk manager holding the loaded chunks and baked faces
-     * @param view       where the frame is seen from (the eye and its look trig)
-     * @param fb         the render target (framebuffer + z-buffer + size)
-     * @param underwater true when the eye is submerged (clears to deep water,
-     *                   skips the sky/celestial pass)
-     * @param phase      animation time phase (scrolls flowing-water textures)
-     * @param dayTime    time of day in [0, 1) driving sun angle and sky colour
-     * @param worldTime  seconds since the run began, which drives the cloud wind
+     * Draw one full world frame: clear to the sky/fog (or deep water when
+     * submerged), move the sky on a frame, then hand the world-face raster the
+     * visible chunks to project + light + clip + fill. Mobs, torches, the sky
+     * paint and post-fx are layered on by the caller after this returns.
+     * @param man    chunk manager holding the loaded chunks and baked faces
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn render(
-        mut self,
-        man : ChunkManager,
-        view : View,
-        fb : FrameBuf,
-        underwater : bool,
-        phase : f64,
-        dayTime : f64,
-        worldTime : f64
-    ) : void {
-        // Refresh the sun direction, daylight factor and sky/fog colour, and keep
-        // the value snapshot to hand to the sky draws (and the gradient thread).
-        const ds : DayState = self.day.update(dayTime);
-
-        // One Camera carries the eye + look trig + projection width for every
-        // pass this frame, the sky's and the post chain's included.
-        self.cam = cameraOf(view, self.lens);
+    pub(crate) fn render(mut self, man : ChunkManager, frame : FrameDesc, fb : FrameBuf) : void {
+        self.cam = frame.cam;
 
         // Under water the cleared "void" is deep water, and nothing paints over
         // it — `drawSky` returns early down there, so the colour has to be laid
         // down here. Above water it must not be: the sky paint covers every
         // pixel the world left empty, so a colour clear is a whole frame
         // written and then thrown away.
-        if (underwater) {
+        if (frame.clock.underwater) {
             const deep : i32 = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
             clearFrame(fb, deep);
         } else {
@@ -429,18 +385,18 @@ class Renderer {
         // The sky moves on by a frame whether or not it is drawn: the fog reads
         // its colour field, and the world is fogged even from under water. It
         // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
-        self.sky.update(ds, self.cam, worldTime, fb);
+        self.sky.update(frame.day, self.cam, frame.clock.seconds, fb);
 
         self.drawWorld(
             man,
             fb,
             self.cam,
-            phase,
+            frame.clock.ripple,
             self.atlas.mip(),
             self.gamma.view(),
             self.sky.fog(),
-            ds,
-            self.day.curve()
+            frame.day,
+            frame.lcurve
         );
     }
 
@@ -448,15 +404,15 @@ class Renderer {
      * Paint the sky into every pixel the opaque passes left empty. Call after
      * the world, mobs and torches: it reads the z-buffer they wrote, and only
      * computes the pixels that are actually sky.
-     * @param fb          the render target (framebuffer + z-buffer + size)
-     * @param underwater  true when the eye is submerged — no sky is visible
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn drawSky(mut self, fb : FrameBuf, underwater : bool) : void {
-        if (underwater) {
+    pub(crate) fn drawSky(mut self, frame : FrameDesc, fb : FrameBuf) : void {
+        if (frame.clock.underwater) {
             self.sky.hidden();
             return;
         }
-        self.sky.draw(self.day.state(), self.cam, fb);
+        self.sky.draw(frame.day, self.cam, fb);
     }
 
     /**
@@ -484,10 +440,11 @@ class Renderer {
      * terrain silhouettes carve warm bright shafts out of the sky glow. Additive,
      * warm-tinted, scaled by daylight. Skipped with the sun below the horizon or
      * behind the camera. Call after the opaque world + mobs + torches are drawn.
-     * @param fb  the render target (framebuffer + z-buffer + size)
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn godRays(self, fb : FrameBuf) : void {
-        const ds : DayState = self.day.state();
+    pub(crate) fn godRays(self, frame : FrameDesc, fb : FrameBuf) : void {
+        const ds : DayState = frame.day;
         if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
             return;
         }
@@ -560,13 +517,13 @@ class Renderer {
     // ── Torches (thin upright posts, drawn via the mob quad path) ──
 
     /**
-     * Draw every loaded/visible chunk's torches as thin upright posts (4 side
-     * quads + a top), reusing the oriented-quad path. Torch voxels emit no cube
-     * faces in the mesh; they are collected per slot and drawn here.
-     * @param man  chunk manager holding the per-slot torch lists
-     * @param fb   the render target (framebuffer + z-buffer + size)
+     * Draw the frame's torches as thin upright posts (4 side quads + a top),
+     * reusing the oriented-quad path. Torch voxels emit no cube faces in the
+     * mesh; the frame lists the ones in view.
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn renderTorches(self, man : ChunkManager, fb : FrameBuf) : void {
+    pub(crate) fn renderTorches(self, frame : FrameDesc, fb : FrameBuf) : void {
         const hw : f64 = 0.09;
         const ht : f64 = 0.55;
         const mat : Material = Material {
@@ -574,7 +531,7 @@ class Renderer {
             tile: Tile::TORCH,
             hurt: false,
         };
-        const scene : MobScene = self.mobScene();
+        const scene : MobScene = self.mobScene(frame.day);
 
         // A torch is drawn in its own light, above white, so it reads as the
         // source of the pool around it and the bloom catches the flame.
@@ -584,92 +541,82 @@ class Renderer {
             b: Light::TORCH_GLOW * 0.62,
         });
 
-        const slots : i32 = World::SPAN * World::SPAN;
-        const cone : ViewCone = viewConeFor(self.cam);
-        for (slot of 0..slots) {
-            if (man.cols.loaded[slot] == 1
-                && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
-                const base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
-                const n : i32 = man.mesher.torches.tcount[slot];
-                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
-                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
-                for (ti of 0..n) {
-                    const cx : f64 = ((ox + (man.mesher.torches.tx[base + ti] as i32)) as f64) + 0.5;
-                    const cz : f64 = ((oz + (man.mesher.torches.tz[base + ti] as i32)) as f64) + 0.5;
-                    const x0 : f64 = cx - hw;
-                    const x1 : f64 = cx + hw;
-                    const z0 : f64 = cz - hw;
-                    const z1 : f64 = cz + hw;
-                    const y0 : f64 = man.mesher.torches.ty[base + ti] as f64;
-                    const y1 : f64 = y0 + ht;
-                    self.mobs.drawQuad(
-                        self.cam,
-                        fb,
-                        vec3(x1, y0, z1),
-                        vec3(x1, y0, z0),
-                        vec3(x1, y1, z0),
-                        vec3(x1, y1, z1),
-                        vec3(1.0, 0.0, 0.0),
-                        mat,
-                        scene
-                    );
-                    self.mobs.drawQuad(
-                        self.cam,
-                        fb,
-                        vec3(x0, y0, z0),
-                        vec3(x0, y0, z1),
-                        vec3(x0, y1, z1),
-                        vec3(x0, y1, z0),
-                        vec3(0.0 - 1.0, 0.0, 0.0),
-                        mat,
-                        scene
-                    );
-                    self.mobs.drawQuad(
-                        self.cam,
-                        fb,
-                        vec3(x0, y0, z1),
-                        vec3(x1, y0, z1),
-                        vec3(x1, y1, z1),
-                        vec3(x0, y1, z1),
-                        vec3(0.0, 0.0, 1.0),
-                        mat,
-                        scene
-                    );
-                    self.mobs.drawQuad(
-                        self.cam,
-                        fb,
-                        vec3(x1, y0, z0),
-                        vec3(x0, y0, z0),
-                        vec3(x0, y1, z0),
-                        vec3(x1, y1, z0),
-                        vec3(0.0, 0.0, 0.0 - 1.0),
-                        mat,
-                        scene
-                    );
-                    self.mobs.drawQuad(
-                        self.cam,
-                        fb,
-                        vec3(x0, y1, z0),
-                        vec3(x1, y1, z0),
-                        vec3(x1, y1, z1),
-                        vec3(x0, y1, z1),
-                        vec3(0.0, 1.0, 0.0),
-                        mat,
-                        scene
-                    );
-                }
-            }
+        for (ti of 0..frame.torchCount) {
+            const cell : IVec3 = frame.torches[ti];
+            const cx : f64 = (cell.x as f64) + 0.5;
+            const cz : f64 = (cell.z as f64) + 0.5;
+            const x0 : f64 = cx - hw;
+            const x1 : f64 = cx + hw;
+            const z0 : f64 = cz - hw;
+            const z1 : f64 = cz + hw;
+            const y0 : f64 = cell.y as f64;
+            const y1 : f64 = y0 + ht;
+            self.mobs.drawQuad(
+                self.cam,
+                fb,
+                vec3(x1, y0, z1),
+                vec3(x1, y0, z0),
+                vec3(x1, y1, z0),
+                vec3(x1, y1, z1),
+                vec3(1.0, 0.0, 0.0),
+                mat,
+                scene
+            );
+            self.mobs.drawQuad(
+                self.cam,
+                fb,
+                vec3(x0, y0, z0),
+                vec3(x0, y0, z1),
+                vec3(x0, y1, z1),
+                vec3(x0, y1, z0),
+                vec3(0.0 - 1.0, 0.0, 0.0),
+                mat,
+                scene
+            );
+            self.mobs.drawQuad(
+                self.cam,
+                fb,
+                vec3(x0, y0, z1),
+                vec3(x1, y0, z1),
+                vec3(x1, y1, z1),
+                vec3(x0, y1, z1),
+                vec3(0.0, 0.0, 1.0),
+                mat,
+                scene
+            );
+            self.mobs.drawQuad(
+                self.cam,
+                fb,
+                vec3(x1, y0, z0),
+                vec3(x0, y0, z0),
+                vec3(x0, y1, z0),
+                vec3(x1, y1, z0),
+                vec3(0.0, 0.0, 0.0 - 1.0),
+                mat,
+                scene
+            );
+            self.mobs.drawQuad(
+                self.cam,
+                fb,
+                vec3(x0, y1, z0),
+                vec3(x1, y1, z0),
+                vec3(x1, y1, z1),
+                vec3(x0, y1, z1),
+                vec3(0.0, 1.0, 0.0),
+                mat,
+                scene
+            );
         }
     }
 
     /**
      * Build this frame's mob/torch scene: the atlas mip chain, the colour space,
-     * the distance-fog colour and the day/night state (from the render
-     * components). Handed to the MobView draws each frame.
+     * the distance-fog colour and the day/night state. Handed to the MobView
+     * draws each frame.
+     * @param ds  the frame's day/night state
      * @return the per-frame mob scene context
      */
-    fn mobScene(mut self) : MobScene {
-        const ds : DayState = self.day.state();
+    fn mobScene(self, ds : DayState) : MobScene {
         return MobScene {
             atlas: self.atlas.mip(),
             gam: self.gamma.view(),
@@ -678,28 +625,21 @@ class Renderer {
         };
     }
 
-    // ── Mobs (oriented-box models, drawn by gfx/mobview.axle) ──
+    // ── Mobs (oriented-box models, drawn by cpu/mobs/mobview.axle) ──
 
     /**
-     * Draw every mob of every species through the MobView, sharing the world's
+     * Draw the frame's creature boxes through the MobView, sharing the world's
      * z-buffer (so terrain correctly occludes animals behind it).
-     * @param man  chunk manager (light maps, for per-mob ambient light)
-     * @param mm   mob manager holding the per-species arrays
-     * @param fb   the render target (framebuffer + z-buffer + size)
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn renderMobs(
-        self,
-        man : ChunkManager,
-        mm : MobManager,
-        fb : FrameBuf
-    ) : void {
+    pub(crate) fn renderMobs(self, frame : FrameDesc, fb : FrameBuf) : void {
         self.mobs.drawAll(
-            man,
-            mm,
             self.cam,
             fb,
-            self.mobScene(),
-            self.day.curve()
+            self.mobScene(frame.day),
+            frame.boxes,
+            frame.boxCount
         );
     }
 
@@ -723,30 +663,22 @@ class Renderer {
     // ── Selection wireframe (drawn by gfx/selection.axle) ──
 
     /**
-     * Draw the soft, depth-tested selection outline on the targeted block via
-     * the owned Selection helper.
-     * @param fb    the render target (framebuffer + z-buffer + size)
-     * @param bx    targeted block x
-     * @param by    targeted block y
-     * @param bz    targeted block z
-     * @param topH  the block's real box height (1.0 full, snowDepth for a thin
-     *              snow layer) so the outline hugs the true box, not a cube
+     * Draw the soft, depth-tested outline of the block the frame says is aimed
+     * at, hugging its real box height; nothing when none is.
+     * @param frame  what this frame shows
+     * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn drawSelection(
-        self,
-        fb : FrameBuf,
-        bx : i32,
-        by : i32,
-        bz : i32,
-        topH : f64
-    ) : void {
+    pub(crate) fn drawSelection(self, frame : FrameDesc, fb : FrameBuf) : void {
+        if (!frame.aim.on) {
+            return;
+        }
         self.sel.draw(
             self.cam,
             fb,
-            bx,
-            by,
-            bz,
-            topH
+            frame.aim.cell.x,
+            frame.aim.cell.y,
+            frame.aim.cell.z,
+            frame.aim.topH
         );
     }
 }

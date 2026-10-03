@@ -22,9 +22,11 @@ use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
 use crate::engine::math::mathx::{ fract };
 use crate::engine::render::cpu::renderer::Renderer;
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
+use crate::engine::render::frame::framedesc::{ FrameDesc, FrameClock };
+use crate::engine::render::frame::framebuilder::{ FrameBuilder, FrameSource, Aim };
 use crate::app::view::{ viewOf };
 use crate::app::session::display::{ Display };
-use crate::app::session::state::{ Edge, LookPin, ScriptedWalk, Scene, FrameTimes };
+use crate::app::session::state::{ Edge, LookPin, ScriptedWalk, FrameTimes };
 use crate::app::session::boot::{ newWorld, placePlayer, newRenderer, plantTorch, momentAt, chunkOf };
 use crate::engine::ui::hud::drawHud;
 use crate::engine::ui::menu::{ drawPauseMenu, menuHit };
@@ -72,6 +74,7 @@ class Game {
     sched : TickManager = new TickManager(),
     picker : Picker = new Picker(),
 
+    frames : FrameBuilder = new FrameBuilder(),
     renderer : Renderer,
     hudFont : BitmapFont = BitmapFont::baked(Face::Ui),
     sfx : AudioManager,
@@ -153,7 +156,8 @@ class Game {
 
         self.mobs = new MobManager();
         self.mobs.attachSpawner(new Fauna());
-        self.renderer = newRenderer(self.display.width(), self.display.height());
+        self.frames.setViewport(self.display.width(), self.display.height());
+        self.renderer = newRenderer();
 
         // The device is fed from its own thread, so a heavy frame cannot
         // starve the queue and stutter the sound.
@@ -233,7 +237,7 @@ class Game {
         if (!self.display.fit()) {
             return;
         }
-        self.renderer.setViewport(self.display.width(), self.display.height());
+        self.frames.setViewport(self.display.width(), self.display.height());
         self.lastHover = STALE_HOVER;
     }
 
@@ -305,18 +309,27 @@ class Game {
      * @param hover  the menu button to highlight, when paused
      */
     fn draw(mut self, hover : i32) : void {
-        const scene = self.scene();
+        const clock = self.frameClock();
         // The light thread bakes against the hour published here.
-        self.man.setMoment(momentAt(self.player, scene.dayTime, scene.seconds));
+        self.man.setMoment(momentAt(self.player, clock.dayTime, clock.seconds));
 
+        const frame = self.frames.build(
+            FrameSource {
+                man: self.man,
+                mobs: self.mobs,
+            },
+            viewOf(self.player),
+            clock,
+            self.aim()
+        );
         const fb = self.display.frameBuf();
-        self.drawWorld(fb, scene);
-        self.drawEffects(fb, scene);
+        self.drawWorld(fb, frame);
+        self.drawEffects(fb, frame);
 
         if (self.paused) {
             drawPauseMenu(self.display.overlay(), self.hudFont, hover);
         } else {
-            self.drawOverlay(fb);
+            self.drawOverlay(fb, frame);
         }
         self.present();
     }
@@ -585,11 +598,11 @@ class Game {
      * Every clock the frame renders by, read off the simulation tick.
      * @return this frame's hour, seconds, water phase and submersion
      */
-    fn scene(self) : Scene {
+    fn frameClock(self) : FrameClock {
         const ticks = self.sched.tick as f64;
         const days = ticks / (Daylight::LENGTH_TICKS as f64);
 
-        return Scene {
+        return FrameClock {
             dayTime: fract(self.dayStart + days),
             seconds: ticks / (World::TICK_HZ as f64),
             ripple: ticks * Water::RIPPLE_SPEED,
@@ -598,39 +611,42 @@ class Game {
     }
 
     /**
-     * The opaque passes: terrain, mobs, torches, then the sky into what they left empty.
-     * @param fb  the frame to draw into
-     * @param s   this frame's clocks
+     * The block the player aims at, for the frame's outline.
+     * @return the aim, off when the last cast found nothing in reach
      */
-    fn drawWorld(mut self, fb : FrameBuf, s : Scene) : void {
+    fn aim(self) : Aim {
+        return Aim {
+            on: self.aimsAtBlock(),
+            cell: self.aimedCell(),
+        };
+    }
+
+    /**
+     * The opaque passes: terrain, mobs, torches, then the sky into what they left empty.
+     * @param fb     the target to draw into
+     * @param frame  what this frame shows
+     */
+    fn drawWorld(mut self, fb : FrameBuf, frame : FrameDesc) : void {
         const start = self.clock.micros();
-        self.renderer.render(
-            self.man,
-            viewOf(self.player),
-            fb,
-            underwater: s.underwater,
-            phase: s.ripple,
-            dayTime: s.dayTime,
-            worldTime: s.seconds
-        );
+        self.renderer.render(self.man, frame, fb);
         self.times.world += self.clock.micros() - start;
 
-        self.renderer.renderMobs(self.man, self.mobs, fb);
-        self.renderer.renderTorches(self.man, fb);
-        self.renderer.drawSky(fb, s.underwater);
+        self.renderer.renderMobs(frame, fb);
+        self.renderer.renderTorches(frame, fb);
+        self.renderer.drawSky(frame, fb);
     }
 
     /**
      * God-rays above water or the underwater fog below it, then bloom.
-     * @param fb  the frame the world was drawn into
-     * @param s   this frame's clocks
+     * @param fb     the target the world was drawn into
+     * @param frame  what this frame shows
      */
-    fn drawEffects(mut self, fb : FrameBuf, s : Scene) : void {
+    fn drawEffects(mut self, fb : FrameBuf, frame : FrameDesc) : void {
         const start = self.clock.micros();
-        if (s.underwater) {
-            self.renderer.underwaterOverlay(fb, s.ripple);
+        if (frame.clock.underwater) {
+            self.renderer.underwaterOverlay(fb, frame.clock.ripple);
         } else {
-            self.renderer.godRays(fb);
+            self.renderer.godRays(frame, fb);
         }
 
         const rays = self.clock.micros();
@@ -643,19 +659,11 @@ class Game {
 
     /**
      * The running overlay: the aimed block's outline, the HUD, the crosshair.
-     * @param fb  the frame the world was drawn into
+     * @param fb     the target the world was drawn into
+     * @param frame  what this frame shows
      */
-    fn drawOverlay(mut self, fb : FrameBuf) : void {
-        if (self.aimsAtBlock()) {
-            const cell = self.aimedCell();
-            self.renderer.drawSelection(
-                fb,
-                cell.x,
-                cell.y,
-                cell.z,
-                topH: self.man.blockBoxHeight(cell)
-            );
-        }
+    fn drawOverlay(mut self, fb : FrameBuf, frame : FrameDesc) : void {
+        self.renderer.drawSelection(frame, fb);
 
         drawHud(
             self.display.overlay(),

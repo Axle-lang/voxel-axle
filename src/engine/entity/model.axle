@@ -11,7 +11,7 @@
 use crate::engine::math::vec3::{ Vec3 };
 
 /** Boxes one creature may be built from; more are dropped. */
-const MODEL_MAX_PARTS : i32 = 16;
+pub(crate) const MODEL_MAX_PARTS : i32 = 16;
 
 /**
  * One box of a creature, in the creature's own frame: `ctr` is the box centre
