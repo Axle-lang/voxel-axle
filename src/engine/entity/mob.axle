@@ -24,7 +24,7 @@ use crate::configs::audio::{ Audio };
 use crate::configs::mobs::{ MobKind, Mobs };
 use crate::configs::motion::{ Motion };
 use std::numeric::math;
-use crate::engine::math::mathx::{ clampF64, wrapAngle, TAU };
+use crate::engine::math::mathx::{ clampF64, wrapAngle, fract, TAU };
 use crate::engine::math::vec3::{ Vec3, vec3 };
 
 /**
@@ -414,10 +414,16 @@ class Mob : Entity, Actor, Wanders {
         }
         self.timers.turnTimer--;
         if (self.timers.turnTimer <= 0 && self.timers.fleeTimer <= 0) {
+            // Three decisions, three draws. Taken from the one value, the
+            // heading and the idle roll were the same number: every mob that
+            // kept walking had a heading in the top two thirds of the turn,
+            // so whole herds drifted the same way across the map.
+            const idleRoll : f64 = fract(rnd * 7919.0);
+            const timeRoll : f64 = fract(rnd * 104729.0);
             self.targetHeading = rnd * TAU;
-            const extraFrames : i32 = (rnd * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
+            const extraFrames : i32 = (timeRoll * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
             self.timers.turnTimer = Mobs::TURN_EVERY_MIN + extraFrames;
-            if (rnd < Mobs::IDLE_CHANCE) {
+            if (idleRoll < Mobs::IDLE_CHANCE) {
                 self.moving = false;
             } else {
                 self.moving = true;
