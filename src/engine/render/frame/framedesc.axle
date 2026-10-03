@@ -14,6 +14,7 @@ use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::shade::gamma::{ LinRgb };
 use crate::engine::render::view::camera::{ Camera };
 use crate::engine::entity::model::{ BoxPart };
+use crate::configs::blocks::{ Block };
 
 /** Where in its days and seconds the run is, as this frame shows it. */
 struct FrameClock {
@@ -43,6 +44,17 @@ struct AimBox {
     pub(crate) topH : f64,       // the block's box height, so the outline hugs it
 }
 
+/** What the overlay shows: the pause menu, or the player's health and hotbar. */
+struct HudState {
+    pub(crate) paused : bool,
+    pub(crate) hover : i32,       // the menu button under the pointer, -1 for none
+    pub(crate) hp : i32,
+    pub(crate) maxHp : i32,
+    pub(crate) hotbar : Block[],
+    pub(crate) selected : i32,
+    pub(crate) creative : bool,
+}
+
 /** One frame, as every backend receives it. */
 struct FrameDesc {
     pub(crate) cam : Camera,
@@ -54,4 +66,5 @@ struct FrameDesc {
     pub(crate) torches : IVec3[],     // the torch cells in visible chunks
     pub(crate) torchCount : i32,
     pub(crate) aim : AimBox,
+    pub(crate) hud : HudState,
 }

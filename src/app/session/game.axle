@@ -9,8 +9,7 @@
 // the loop and what it does each frame.
 
 use smalt::{
-    BitmapFont, Clock, Event, EventKind, Events, Face, FramePacer, mixerLoop, MouseButton,
-    PlatformError,
+    Clock, Event, EventKind, Events, FramePacer, mixerLoop, MouseButton, PlatformError,
 };
 use crate::engine::io::input::Keys;
 use crate::engine::audio::sfx::{ AudioManager };
@@ -20,16 +19,17 @@ use crate::engine::entity::player::{ GameMode, Player };
 use crate::engine::entity::mobs::MobManager;
 use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
 use crate::engine::math::mathx::{ fract };
-use crate::engine::render::cpu::renderer::Renderer;
-use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
-use crate::engine::render::frame::framedesc::{ FrameDesc, FrameClock };
-use crate::engine::render::frame::framebuilder::{ FrameBuilder, FrameSource, Aim };
+use crate::engine::render::backend::{ RenderBackend };
+use crate::engine::render::cpu::cpubackend::{ CpuBackend };
+use crate::engine::render::frame::framedesc::{ FrameClock, HudState };
+use crate::engine::render::frame::framebuilder::{
+    FrameBuilder, FrameSource, FrameRequest, Aim,
+};
 use crate::app::view::{ viewOf };
 use crate::app::session::display::{ Display };
-use crate::app::session::state::{ Edge, LookPin, ScriptedWalk, FrameTimes };
-use crate::app::session::boot::{ newWorld, placePlayer, newRenderer, plantTorch, momentAt, chunkOf };
-use crate::engine::ui::hud::drawHud;
-use crate::engine::ui::menu::{ drawPauseMenu, menuHit };
+use crate::app::session::state::{ Edge, LookPin, ScriptedWalk };
+use crate::app::session::boot::{ newWorld, placePlayer, plantTorch, momentAt, chunkOf };
+use crate::engine::ui::menu::{ menuHit };
 use crate::game::entities::fauna::Fauna;
 use crate::app::controls::{
     applyLook, Intent, readGameMode, readHotbar, readIntent,
@@ -75,10 +75,9 @@ class Game {
     picker : Picker = new Picker(),
 
     frames : FrameBuilder = new FrameBuilder(),
-    renderer : Renderer,
-    hudFont : BitmapFont = BitmapFont::baked(Face::Ui),
+    backend : dyn RenderBackend[], // one slot: what draws the frames, CPU or GPU — the
+                                   // game calls `draw` and never asks which
     sfx : AudioManager,
-    times : FrameTimes = FrameTimes { },
 
     audioTask : Task<i32>,
     lightTask : Task<i32>,
@@ -157,7 +156,9 @@ class Game {
         self.mobs = new MobManager();
         self.mobs.attachSpawner(new Fauna());
         self.frames.setViewport(self.display.width(), self.display.height());
-        self.renderer = newRenderer();
+        self.backend = malloc<dyn RenderBackend>(1);
+        self.backend[0] = new CpuBackend(self.display.width(), self.display.height());
+        Console::println("renderer: ${self.backend[0].name()}");
 
         // The device is fed from its own thread, so a heavy frame cannot
         // starve the queue and stutter the sound.
@@ -210,7 +211,7 @@ class Game {
         self.lightTask.join();
 
         self.sfx.close();
-        self.renderer.close();
+        self.backend[0].close();
         self.events.close();
         self.display.close();
         self.clock.close();
@@ -237,6 +238,7 @@ class Game {
         if (!self.display.fit()) {
             return;
         }
+        self.backend[0].resize(self.display.width(), self.display.height());
         self.frames.setViewport(self.display.width(), self.display.height());
         self.lastHover = STALE_HOVER;
     }
@@ -305,7 +307,7 @@ class Game {
     }
 
     /**
-     * Renders the world, its effects and the overlay — or the pause menu — and presents.
+     * Decides the frame and has the backend draw and show it.
      * @param hover  the menu button to highlight, when paused
      */
     fn draw(mut self, hover : i32) : void {
@@ -318,20 +320,14 @@ class Game {
                 man: self.man,
                 mobs: self.mobs,
             },
-            viewOf(self.player),
-            clock,
-            self.aim()
+            FrameRequest {
+                view: viewOf(self.player),
+                clock,
+                aim: self.aim(),
+                hud: self.hud(hover),
+            }
         );
-        const fb = self.display.frameBuf();
-        self.drawWorld(fb, frame);
-        self.drawEffects(fb, frame);
-
-        if (self.paused) {
-            drawPauseMenu(self.display.overlay(), self.hudFont, hover);
-        } else {
-            self.drawOverlay(fb, frame);
-        }
-        self.present();
+        self.backend[0].draw(frame, self.man, self.display.win);
     }
 
     /** `--snap`: once its deadline passes, writes the capture, reports, and quits. */
@@ -342,7 +338,7 @@ class Game {
         }
 
         self.running = false;
-        if (!self.display.capture(SNAP_PATH)) {
+        if (!self.backend[0].capture(SNAP_PATH)) {
             Console::println("could not write ${SNAP_PATH}");
             return;
         }
@@ -352,7 +348,7 @@ class Game {
         const w = self.display.width();
         const h = self.display.height();
         Console::println("wrote ${SNAP_PATH}  (${w}x${h} render, ${fps} fps)");
-        self.times.report(self.renderer);
+        self.backend[0].report();
     }
 
 
@@ -622,67 +618,19 @@ class Game {
     }
 
     /**
-     * The opaque passes: terrain, mobs, torches, then the sky into what they left empty.
-     * @param fb     the target to draw into
-     * @param frame  what this frame shows
+     * What the overlay shows this frame.
+     * @param hover  the menu button under the pointer, when paused
+     * @return the HUD state
      */
-    fn drawWorld(mut self, fb : FrameBuf, frame : FrameDesc) : void {
-        const start = self.clock.micros();
-        self.renderer.render(self.man, frame, fb);
-        self.times.world += self.clock.micros() - start;
-
-        self.renderer.renderMobs(frame, fb);
-        self.renderer.renderTorches(frame, fb);
-        self.renderer.drawSky(frame, fb);
-    }
-
-    /**
-     * God-rays above water or the underwater fog below it, then bloom.
-     * @param fb     the target the world was drawn into
-     * @param frame  what this frame shows
-     */
-    fn drawEffects(mut self, fb : FrameBuf, frame : FrameDesc) : void {
-        const start = self.clock.micros();
-        if (frame.clock.underwater) {
-            self.renderer.underwaterOverlay(fb, frame.clock.ripple);
-        } else {
-            self.renderer.godRays(frame, fb);
-        }
-
-        const rays = self.clock.micros();
-        self.renderer.bloomPass(fb);
-        const bloom = self.clock.micros();
-
-        self.times.rays += rays - start;
-        self.times.bloom += bloom - rays;
-    }
-
-    /**
-     * The running overlay: the aimed block's outline, the HUD, the crosshair.
-     * @param fb     the target the world was drawn into
-     * @param frame  what this frame shows
-     */
-    fn drawOverlay(mut self, fb : FrameBuf, frame : FrameDesc) : void {
-        self.renderer.drawSelection(frame, fb);
-
-        drawHud(
-            self.display.overlay(),
-            self.hudFont,
-            self.renderer.atlasBase(),
+    fn hud(self, hover : i32) : HudState {
+        return HudState {
+            paused: self.paused,
+            hover,
             hp: self.player.hp,
             maxHp: self.player.maxHp,
             hotbar: self.player.hotbar,
             selected: self.player.selected,
-            creative: self.player.mode == GameMode::Creative
-        );
-        self.renderer.crosshair(fb);
-    }
-
-    /** Presents the frame, and counts it. */
-    fn present(mut self) : void {
-        const start = self.clock.micros();
-        self.display.present();
-        self.times.blit += self.clock.micros() - start;
-        self.times.frames++;
+            creative: self.player.mode == GameMode::Creative,
+        };
     }
 }

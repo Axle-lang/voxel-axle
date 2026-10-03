@@ -1,17 +1,12 @@
 // boot — putting a run together: the world with the game's terrain attached,
-// the player stood on it, the renderer with its atlas, and the values the light
-// thread is handed.
+// the player stood on it, and the values the light thread is handed.
 
-use smalt::Mem;
-use crate::engine::io::assets::Assets;
 use crate::engine::world::chunks::{ ChunkManager };
 use crate::engine::world::seams::{ LightMoment };
 use crate::engine::entity::player::{ Player };
 use crate::engine::math::vec3::{ ivec3 };
-use crate::engine::render::cpu::renderer::Renderer;
 use crate::game::world::terraingen::TerrainGen;
 use crate::game::rules::start::{ Spawn, openYaw };
-use crate::configs::atlas::{ Atlas };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -62,27 +57,6 @@ fn placePlayer(man : ChunkManager, x : i32, z : i32) : Player {
 fn loadAround(man : ChunkManager, x : f64, z : f64) : void {
     while (man.ensureLoaded(chunkOf(x), chunkOf(z)) > 0) {
     }
-}
-
-/**
- * A renderer with `atlas.raw` loaded into its mip chain. Level 0 is a full
- * copy, so the file's buffer is released at once.
- * @return the renderer, ready for its first frame
- */
-fn newRenderer() : Renderer {
-    const renderer = new Renderer();
-
-    const tile = Atlas::TILE_PX as i64;
-    const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
-    const atlas = Mem::take(bytes);
-    if (Assets::loadAtlas(atlas, bytes) != bytes) {
-        Console::println("warning: atlas.raw not found next to the binary"
-            + " — textures will be blank");
-    }
-
-    renderer.setAtlas(atlas);
-    Mem::release(atlas);
-    return renderer;
 }
 
 /**

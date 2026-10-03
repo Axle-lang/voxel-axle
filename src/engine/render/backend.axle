@@ -1,0 +1,48 @@
+// backend — the one call the game makes to put a frame on screen.
+//
+// A backend is handed the frame the game decided (render::frame), the world's
+// baked mesh and light to draw it from (`TerrainView`, read-only) and the
+// window to show it in. It translates; it decides nothing the game reads back,
+// so the software rasteriser and a GPU backend fed the same frame show the
+// same thing, and game code changes without touching either.
+
+use smalt::Window;
+use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::world::seams::{ TerrainView };
+
+trait RenderBackend {
+    /**
+     * Draw the frame — the world, its creatures, the sky, the effects, the
+     * overlay — and show it.
+     * @param frame  what this frame shows
+     * @param world  the baked mesh and the light it is lit by
+     * @param win    the window to show it in
+     */
+    fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void;
+
+    /**
+     * Render at this size from the next frame on.
+     * @param w  the target's width in pixels
+     * @param h  the target's height in pixels
+     */
+    fn resize(mut self, w : i32, h : i32) : void;
+
+    /**
+     * Write the last frame shown to a BMP file.
+     * @param path  the file to write
+     * @return whether the file was written
+     */
+    fn capture(mut self, path : string) : bool;
+
+    /**
+     * What is drawing, for the start-up line.
+     * @return the backend's name
+     */
+    fn name(self) : string;
+
+    /** Print what the frames cost, averaged over the run. */
+    fn report(self) : void;
+
+    /** Stop any worker and release the target, before the window goes. */
+    fn close(mut self) : void;
+}

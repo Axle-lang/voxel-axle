@@ -1,8 +1,7 @@
 // state — the small values one run of the game keeps between frames: input
-// edges, the scripted view and walk, and the per-pass timings `--snap` reports.
+// edges, and the scripted view and walk.
 
 use crate::engine::entity::player::{ Player };
-use crate::engine::render::cpu::renderer::Renderer;
 
 /** One input's level last frame, so a press is seen once, on its way down. */
 struct Edge {
@@ -45,42 +44,5 @@ struct ScriptedWalk {
         const dx = p.pos.x - self.x0;
         const dz = p.pos.z - self.z0;
         return dx * dx + dz * dz < self.reach * self.reach;
-    }
-}
-
-/** Microseconds spent in each render pass, summed over the run for `--snap`. */
-struct FrameTimes {
-    pub(crate) world : i64 = 0;
-    pub(crate) rays : i64 = 0;
-    pub(crate) bloom : i64 = 0;
-    pub(crate) blit : i64 = 0;
-    pub(crate) frames : i64 = 0;
-
-    /**
-     * Prints the per-frame averages. The world pass is split in two, because
-     * its queue build runs on six workers and its fill on twelve bands.
-     * @param r  the renderer, which times the fill and the sky itself
-     */
-    pub(crate) fn report(self, r : Renderer) : void {
-        const n = self.frames;
-        if (n == 0) {
-            return;
-        }
-
-        const world = self.world / n;
-        const fill = r.fillMicros() / n;
-        const build = world - fill;
-        const skyMarch = r.skyMarchMicros() / n;
-        const skyDraw = r.skyDrawMicros() / n;
-
-        Console::println("  world = build ${build}us (6 workers)"
-            + " + fill ${fill}us (12 bands)"
-            + " over ${r.triCount()} tris");
-        Console::println("  per frame (us): world=${world}"
-            + " sky=${skyMarch}+${skyDraw}"
-            + " rays=${self.rays / n}"
-            + " bloom=${self.bloom / n}"
-            + " blit=${self.blit / n}"
-            + "  over ${n} frames");
     }
 }

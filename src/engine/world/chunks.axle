@@ -26,12 +26,12 @@ use crate::engine::block::blocks::{ isSolid, isCollidable };
 use crate::engine::block::box::{ boxOf, BlockBox };
 use crate::engine::world::voxstore::{ VoxStore, VoxData };
 use crate::engine::world::ring::{ RingView };
-use crate::engine::world::mesh::meshbuf::{ ColumnRing };
+use crate::engine::world::mesh::meshbuf::{ ColumnRing, FaceMesh };
 use crate::engine::world::light::engine::{ LightEngine };
 use crate::engine::world::mesh::mesher::{ ChunkMesher, MeshSource };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::engine::world::seams::{
-    VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels,
+    VoxelQuery, VoxelEdit, TerrainView, CornerProbe, CornerSample, ChannelLevels, SlotChunk,
 };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
@@ -70,9 +70,9 @@ trait Generator {
 // ChunkManager provides three of the inter-kernel seams (seams):
 //   * VoxelQuery  — read-only voxel + collision surface (entities, picker, render)
 //   * VoxelEdit   — the voxel write path + world/light lifecycle (interaction)
-//   * LightSample — baked per-voxel light reads the renderer samples per corner
+//   * TerrainView — the baked mesh, and the light a renderer samples per corner
 // It composes the components and delegates; the seam signatures are verbatim.
-class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
+class ChunkManager : VoxelQuery, VoxelEdit, TerrainView {
     pub(crate) cols : Shared<ColumnRing>, // per-slot chunk ownership
     pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
     ring : RingView,                 // world cell → slot addressing over the same field
@@ -525,6 +525,38 @@ class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
      */
     fn cornerSample(self, probe : CornerProbe) : CornerSample {
         return self.leng.cornerSample(probe);
+    }
+
+    // ── The mesh a renderer reads (ChunkMeshes) ─────────────────────
+
+    /**
+     * Every slot's baked faces.
+     * @return the mesher's face arrays
+     */
+    fn faces(self) : FaceMesh {
+        return self.mesher.faces;
+    }
+
+    /**
+     * Which chunk a ring slot holds.
+     * @param slot  the ring slot
+     * @return whether one is loaded, and its chunk coordinates
+     */
+    fn slotChunk(self, slot : i32) : SlotChunk {
+        return SlotChunk {
+            loaded: self.cols.loaded[slot] == 1,
+            cx: self.cols.cxs[slot],
+            cz: self.cols.czs[slot],
+        };
+    }
+
+    /**
+     * How many times a slot has been meshed.
+     * @param slot  the ring slot
+     * @return the slot's mesh generation
+     */
+    fn meshGen(self, slot : i32) : i32 {
+        return self.mesher.meshGen[slot];
     }
 
     /** One pass of the whole lighting system (sun shadows + sky-AO / bounce). */

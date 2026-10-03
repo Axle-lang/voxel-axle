@@ -1,0 +1,227 @@
+// cpubackend — the software rasteriser as a `RenderBackend`.
+//
+// It owns its render target — the framebuffer, sized to the window's pixel
+// budget, and the depth buffer beside it — and the order a frame is drawn in:
+// the world, the creatures and torches, the sky into what they left empty, the
+// post chain, then the overlay, all from the one `FrameDesc`.
+
+use smalt::{ BitmapFont, Bmp, Face, Mem, Surface, Window };
+use std::time::monotonicNanos;
+use crate::engine::io::assets::Assets;
+use crate::engine::math::narrow::{ FLOAT_BYTES };
+use crate::engine::render::backend::{ RenderBackend };
+use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::render::cpu::renderer::Renderer;
+use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
+use crate::engine::world::seams::{ TerrainView };
+use crate::engine::ui::hud::drawHud;
+use crate::engine::ui::menu::{ drawPauseMenu };
+use crate::configs::atlas::{ Atlas };
+
+/** Microseconds spent in each pass, summed over the run for `report`. */
+struct PassTimes {
+    world : i64 = 0,
+    rays : i64 = 0,
+    bloom : i64 = 0,
+    blit : i64 = 0,
+    frames : i64 = 0,
+}
+
+class CpuBackend : RenderBackend {
+    renderer : Renderer,
+    screen : Surface,  // the framebuffer the passes fill and the window shows
+    zbuf : i64,        // its depth buffer, one f32 per pixel
+    font : BitmapFont = BitmapFont::baked(Face::Ui),
+    times : PassTimes = PassTimes { },
+
+    /**
+     * A target of this size, and the renderer with `atlas.raw` loaded into its
+     * mip chain.
+     * @param w  the target's width in pixels
+     * @param h  the target's height in pixels
+     */
+    constructor(w : i32, h : i32) {
+        self.screen = new Surface(w, h);
+        self.zbuf = takeDepth(w, h);
+        self.renderer = new Renderer();
+
+        // Level 0 of the mip chain is a full copy, so the file's buffer goes at once.
+        const tile = Atlas::TILE_PX as i64;
+        const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
+        const atlas = Mem::take(bytes);
+        if (Assets::loadAtlas(atlas, bytes) != bytes) {
+            Console::println("warning: atlas.raw not found next to the binary"
+                + " — textures will be blank");
+        }
+        self.renderer.setAtlas(atlas);
+        Mem::release(atlas);
+    }
+
+    /**
+     * This frame's render target. Read each frame and never kept: a resize
+     * moves both buffers.
+     * @return the pixels, depth buffer and shape
+     */
+    fn frameBuf(self) : FrameBuf {
+        return FrameBuf {
+            pixels: self.screen.base(),
+            zbuf: self.zbuf,
+            w: self.screen.width(),
+            h: self.screen.height(),
+        };
+    }
+
+    /**
+     * Draw the frame and show it.
+     * @param frame  what this frame shows
+     * @param world  the baked mesh and the light it is lit by
+     * @param win    the window to show it in
+     */
+    pub(crate) fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void {
+        const fb : FrameBuf = self.frameBuf();
+        self.drawWorld(frame, world, fb);
+        self.drawEffects(frame, fb);
+        self.drawOverlay(frame, fb);
+
+        const start : i64 = monotonicNanos();
+        self.screen.present(win);
+        self.times.blit += (monotonicNanos() - start) / 1000;
+        self.times.frames++;
+    }
+
+    /**
+     * The opaque passes: terrain, creatures, torches, then the sky into what
+     * they left empty.
+     * @param frame  what this frame shows
+     * @param world  the baked mesh and its light
+     * @param fb     the target
+     */
+    fn drawWorld(mut self, frame : FrameDesc, world : dyn TerrainView, fb : FrameBuf) : void {
+        const start : i64 = monotonicNanos();
+        self.renderer.render(world, frame, fb);
+        self.times.world += (monotonicNanos() - start) / 1000;
+
+        self.renderer.renderMobs(frame, fb);
+        self.renderer.renderTorches(frame, fb);
+        self.renderer.drawSky(frame, fb);
+    }
+
+    /**
+     * God-rays above water or the underwater fog below it, then bloom.
+     * @param frame  what this frame shows
+     * @param fb     the target the world was drawn into
+     */
+    fn drawEffects(mut self, frame : FrameDesc, fb : FrameBuf) : void {
+        const start : i64 = monotonicNanos();
+        if (frame.clock.underwater) {
+            self.renderer.underwaterOverlay(fb, frame.clock.ripple);
+        } else {
+            self.renderer.godRays(frame, fb);
+        }
+
+        const rays : i64 = monotonicNanos();
+        self.renderer.bloomPass(fb);
+        const bloom : i64 = monotonicNanos();
+
+        self.times.rays += (rays - start) / 1000;
+        self.times.bloom += (bloom - rays) / 1000;
+    }
+
+    /**
+     * The overlay: the pause menu, or the aimed block's outline, the HUD and
+     * the crosshair.
+     * @param frame  what this frame shows
+     * @param fb     the target the world was drawn into
+     */
+    fn drawOverlay(mut self, frame : FrameDesc, fb : FrameBuf) : void {
+        if (frame.hud.paused) {
+            drawPauseMenu(self.screen.frame(), self.font, frame.hud.hover);
+            return;
+        }
+
+        self.renderer.drawSelection(frame, fb);
+        drawHud(
+            self.screen.frame(),
+            self.font,
+            self.renderer.atlasBase(),
+            hp: frame.hud.hp,
+            maxHp: frame.hud.maxHp,
+            hotbar: frame.hud.hotbar,
+            selected: frame.hud.selected,
+            creative: frame.hud.creative
+        );
+        self.renderer.crosshair(fb);
+    }
+
+    /**
+     * Render at this size from the next frame on.
+     * @param w  the target's width in pixels
+     * @param h  the target's height in pixels
+     */
+    pub(crate) fn resize(mut self, w : i32, h : i32) : void {
+        self.screen.resize(w, h);
+        Mem::release(self.zbuf);
+        self.zbuf = takeDepth(w, h);
+    }
+
+    /**
+     * Write the last frame shown to a BMP file.
+     * @param path  the file to write
+     * @return whether the file was written
+     */
+    pub(crate) fn capture(mut self, path : string) : bool {
+        return Bmp::write(path, self.screen.frame());
+    }
+
+    /**
+     * What is drawing.
+     * @return the backend's name
+     */
+    pub(crate) fn name(self) : string {
+        return "software";
+    }
+
+    /**
+     * Print the per-frame averages. The world pass is split in two, because
+     * its queue build runs on six workers and its fill on twelve bands.
+     */
+    pub(crate) fn report(self) : void {
+        const n = self.times.frames;
+        if (n == 0) {
+            return;
+        }
+
+        const world = self.times.world / n;
+        const fill = self.renderer.fillMicros() / n;
+        const build = world - fill;
+        const skyMarch = self.renderer.skyMarchMicros() / n;
+        const skyDraw = self.renderer.skyDrawMicros() / n;
+
+        Console::println("  world = build ${build}us (6 workers)"
+            + " + fill ${fill}us (12 bands)"
+            + " over ${self.renderer.triCount()} tris");
+        Console::println("  per frame (us): world=${world}"
+            + " sky=${skyMarch}+${skyDraw}"
+            + " rays=${self.times.rays / n}"
+            + " bloom=${self.times.bloom / n}"
+            + " blit=${self.times.blit / n}"
+            + "  over ${n} frames");
+    }
+
+    /** Stop the render crew, then release the target it filled. */
+    pub(crate) fn close(mut self) : void {
+        self.renderer.close();
+        Mem::release(self.zbuf);
+        self.screen.close();
+    }
+}
+
+/**
+ * A depth buffer for a target of this size.
+ * @param w  the target's width in pixels
+ * @param h  the target's height in pixels
+ * @return the buffer's address, released with `Mem::release`
+ */
+fn takeDepth(w : i32, h : i32) : i64 {
+    return Mem::take((w as i64) * (h as i64) * FLOAT_BYTES);
+}

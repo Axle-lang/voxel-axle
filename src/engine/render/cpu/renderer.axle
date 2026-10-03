@@ -39,7 +39,7 @@ use crate::engine::render::frame::framedesc::{ FrameDesc };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
 use crate::engine::shade::gamma::{ Gamma, GammaTables, LinRgb };
 use crate::engine::math::vec3::{ IVec3, vec3 };
-use crate::engine::world::chunks::ChunkManager;
+use crate::engine::world::seams::{ TerrainView };
 use crate::configs::atlas::{ Tile };
 use crate::configs::light::{ Light };
 use crate::configs::render::{ Render };
@@ -108,15 +108,15 @@ class RasterCrew {
     /**
      * Fill every member's triangle queue, the slots dealt round-robin: member 0
      * on this thread, the rest on their own.
-     * @param man    chunk manager holding the loaded chunks and baked faces
+     * @param world  the loaded chunks, their baked faces and their light
      * @param cam    the camera (eye + orientation + projection width)
      * @param phase  animation time phase (scrolls flowing-water textures)
      */
-    pub(crate) fn build(mut self, man : ChunkManager, cam : Camera, phase : f64) : void {
+    pub(crate) fn build(mut self, world : dyn TerrainView, cam : Camera, phase : f64) : void {
         for (i of 0..BUILD_WORKERS - 1) {
             self.builders[i] = spawn buildSlotsJob(
                 self.members[(i + 1) as i64],
-                man,
+                world,
                 cam,
                 phase,
                 i + 1,
@@ -125,7 +125,7 @@ class RasterCrew {
         }
 
         self.members[0].buildSlots(
-            man,
+            world,
             cam,
             phase,
             0,
@@ -305,7 +305,7 @@ class Renderer {
      * so nothing is shared. The FILL splits by screen column — every band
      * owns its pixels, so no two threads touch the same z-buffer word,
      * and each band walks every worker's queue.
-     * @param man     chunk manager holding the loaded chunks and baked faces
+     * @param world   the loaded chunks, their baked faces and their light
      * @param fb      the render target (framebuffer + z-buffer + size)
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
@@ -317,7 +317,7 @@ class Renderer {
      */
     pub(file) fn drawWorld(
         mut self,
-        man : ChunkManager,
+        world : dyn TerrainView,
         fb : FrameBuf,
         cam : Camera,
         phase : f64,
@@ -334,7 +334,7 @@ class Renderer {
             day,
             lcurve
         );
-        self.crew.build(man, cam, phase);
+        self.crew.build(world, cam, phase);
 
         const tFill : i64 = monotonicNanos();
         self.frame[0] = fb;
@@ -363,11 +363,11 @@ class Renderer {
      * submerged), move the sky on a frame, then hand the world-face raster the
      * visible chunks to project + light + clip + fill. Mobs, torches, the sky
      * paint and post-fx are layered on by the caller after this returns.
-     * @param man    chunk manager holding the loaded chunks and baked faces
+     * @param world  the loaded chunks, their baked faces and their light
      * @param frame  what this frame shows
      * @param fb     the render target (framebuffer + z-buffer + size)
      */
-    pub(crate) fn render(mut self, man : ChunkManager, frame : FrameDesc, fb : FrameBuf) : void {
+    pub(crate) fn render(mut self, world : dyn TerrainView, frame : FrameDesc, fb : FrameBuf) : void {
         self.cam = frame.cam;
 
         // Under water the cleared "void" is deep water, and nothing paints over
@@ -388,7 +388,7 @@ class Renderer {
         self.sky.update(frame.day, self.cam, frame.clock.seconds, fb);
 
         self.drawWorld(
-            man,
+            world,
             fb,
             self.cam,
             frame.clock.ripple,

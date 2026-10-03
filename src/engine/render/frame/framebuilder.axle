@@ -14,7 +14,7 @@ use crate::engine::shade::gamma::{ LinRgb };
 use crate::engine::render::view::camera::{ Camera, Lens, View, lensFor, cameraOf };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
 use crate::engine::render::frame::framedesc::{
-    FrameDesc, FrameClock, MobBox, AimBox,
+    FrameDesc, FrameClock, MobBox, AimBox, HudState,
 };
 use crate::engine::world::chunks::ChunkManager;
 use crate::engine::world::seams::{ ChannelLevels };
@@ -36,6 +36,14 @@ struct FrameSource {
 struct Aim {
     pub(crate) on : bool,
     pub(crate) cell : IVec3,
+}
+
+/** What the game asks of a frame: where it is seen from, when, and the overlay. */
+struct FrameRequest {
+    pub(crate) view : View,
+    pub(crate) clock : FrameClock,
+    pub(crate) aim : Aim,
+    pub(crate) hud : HudState,
 }
 
 class FrameBuilder {
@@ -69,32 +77,24 @@ class FrameBuilder {
 
     /**
      * Decide this frame.
-     * @param src    the world and the creatures in it
-     * @param view   where the frame is seen from
-     * @param clock  the hour, the seconds and the water's phase
-     * @param aim    the aimed block, if any
+     * @param src  the world and the creatures in it
+     * @param req  where it is seen from, when, what is aimed at, the overlay
      * @return the frame, valid until the next `build`
      */
-    pub(crate) fn build(
-        mut self,
-        src : FrameSource,
-        view : View,
-        clock : FrameClock,
-        aim : Aim
-    ) : FrameDesc {
-        const ds : DayState = self.day.update(clock.dayTime);
-        const cam : Camera = cameraOf(view, self.lens);
+    pub(crate) fn build(mut self, src : FrameSource, req : FrameRequest) : FrameDesc {
+        const ds : DayState = self.day.update(req.clock.dayTime);
+        const cam : Camera = cameraOf(req.view, self.lens);
         self.readMobs(src, ds);
         self.readTorches(src.man, cam);
 
         let topH : f64 = 1.0;
-        if (aim.on) {
-            topH = src.man.blockBoxHeight(aim.cell);
+        if (req.aim.on) {
+            topH = src.man.blockBoxHeight(req.aim.cell);
         }
 
         return FrameDesc {
             cam,
-            clock,
+            clock: req.clock,
             day: ds,
             lcurve: self.day.curve(),
             boxes: self.boxes,
@@ -102,10 +102,11 @@ class FrameBuilder {
             torches: self.torches,
             torchCount: self.torchCount,
             aim: AimBox {
-                on: aim.on,
-                cell: aim.cell,
+                on: req.aim.on,
+                cell: req.aim.cell,
                 topH,
             },
+            hud: req.hud,
         };
     }
 

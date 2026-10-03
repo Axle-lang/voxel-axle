@@ -13,6 +13,7 @@
 //                                          + LightPrime + LightThread
 //                            LightSample : BlockLightField + SkyLightField
 //                                          + SunLightField + BounceLightField
+//                            TerrainView : ChunkMeshes + LightSample
 //
 // The app→engine injection seam the world consumes, `Generator`, lives with
 // the ChunkManager that holds it (world::chunks).
@@ -20,6 +21,7 @@
 use crate::engine::math::vec3::{ IVec3 };
 use crate::configs::blocks::{ Block };
 use crate::engine::block::box::{ BlockBox };
+use crate::engine::world::mesh::meshbuf::{ FaceMesh };
 
 // ─── Voxel read capabilities ────────────────────────────────────────────────
 
@@ -308,4 +310,42 @@ trait LightSample :
      * @return the three averaged terms
      */
     fn cornerSample(self, probe : CornerProbe) : CornerSample;
+}
+
+// ─── What a renderer reads ──────────────────────────────────────────────────
+
+/** Which chunk a ring slot holds, if any. */
+struct SlotChunk {
+    pub(crate) loaded : bool,
+    pub(crate) cx : i32,
+    pub(crate) cz : i32,
+}
+
+/** The baked mesh, read-only, for whoever draws the world. */
+trait ChunkMeshes {
+    /**
+     * Every slot's baked faces (world::mesh::meshbuf). The buffers live as
+     * long as the world; their contents change when a slot is re-meshed.
+     * @return the face arrays
+     */
+    fn faces(self) : FaceMesh;
+
+    /**
+     * Which chunk a ring slot holds.
+     * @param slot  the ring slot
+     * @return whether one is loaded, and its chunk coordinates
+     */
+    fn slotChunk(self, slot : i32) : SlotChunk;
+
+    /**
+     * How many times a slot has been meshed: a copy of its faces taken at
+     * another count is stale.
+     * @param slot  the ring slot
+     * @return the slot's mesh generation
+     */
+    fn meshGen(self, slot : i32) : i32;
+}
+
+/** Bundle: everything a world renderer reads — the mesh, and the light at its corners. */
+trait TerrainView : ChunkMeshes, LightSample {
 }

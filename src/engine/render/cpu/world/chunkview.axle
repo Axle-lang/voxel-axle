@@ -25,10 +25,10 @@ use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::shade::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::engine::shade::daymodel::{ DayState };
-use crate::engine::world::seams::{ CornerProbe, CornerSample };
+use crate::engine::world::seams::{ CornerProbe, CornerSample, TerrainView, SlotChunk };
+use crate::engine::world::mesh::meshbuf::{ FaceMesh };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3, ivec3 };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
-use crate::engine::world::chunks::ChunkManager;
 use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topHeight };
 use crate::configs::face::{ FaceDir };
 use crate::configs::light::{ Light };
@@ -65,7 +65,8 @@ fn faceDirFrom(d : i32) : FaceDir {
  * eight quads from the same face, and every one of them wants all of this.
  */
 struct FaceShade {
-    idx : i32,          // index into the baked face arrays (light / AO)
+    mesh : FaceMesh,    // the baked face arrays the face is read from
+    idx : i32,          // index into them (light / AO / corner heights)
     tile : i32,         // atlas tile
     dir : FaceDir,
     naxis : i32,        // normal axis: 0 = X, 1 = Y, 2 = Z
@@ -75,6 +76,16 @@ struct FaceShade {
     wrap : bool,        // the texture repeats over this face (merged or water)
     flowU : f64,        // flowing-water texture scroll
     flowV : f64,
+}
+
+/**
+ * One loaded chunk as a worker reads it: the baked faces, and the world origin
+ * its chunk-local cells are offset by.
+ */
+struct SlotView {
+    faces : FaceMesh,
+    ox : i32,
+    oz : i32,
 }
 
 /**
@@ -94,10 +105,10 @@ struct FaceSpan {
  * builds six of these over disjoint strides of the chunk ring, then fills every
  * queue in disjoint parallel column bands.
  *
- * The per-corner light is read through the `LightSample` seam — one
- * `cornerSample` per corner, carrying sun, sky access and bounce — while the
- * baked mesh FIELDS (position, tile, run, light, AO and the corner heights the
- * mesher fixed for water and partial blocks) come off the concrete ChunkManager.
+ * Everything it reads of the world comes through the `TerrainView` seam: the
+ * baked mesh (position, tile, run, light, AO and the corner heights the mesher
+ * fixed for water and partial blocks), and one `cornerSample` per corner,
+ * carrying sun, sky access and bounce.
  */
 class ChunkRenderer {
     geom : FaceTable,     // face corner offsets + texture u/v (world::mesh::facegeom)
@@ -462,31 +473,29 @@ class ChunkRenderer {
     /**
      * Project, cull, shade and rasterize one baked world face into the triangle
      * queue.
-     * @param man     chunk manager holding the baked face arrays
-     * @param idx     index of the face to draw
-     * @param cam     the camera (eye + orientation + projection width)
-     * @param phase   animation time phase (scrolls flowing-water textures)
-     * @param ox      the slot's world x origin — the faces store chunk-local x
-     * @param oz      …and z
+     * @param world  the light the corners sample
+     * @param sv     the chunk the face belongs to
+     * @param idx    index of the face to draw
+     * @param cam    the camera (eye + orientation + projection width)
+     * @param phase  animation time phase (scrolls flowing-water textures)
      */
     fn renderFace(
         mut self,
-        man : ChunkManager,
+        world : dyn TerrainView,
+        sv : SlotView,
         idx : i32,
         cam : Camera,
-        phase : f64,
-        ox : i32,
-        oz : i32
+        phase : f64
     ) : void {
-        const x : i32 = ox + (man.mesher.faces.fx[idx] as i32);
-        const y : i32 = man.mesher.faces.fy[idx] as i32;
-        const z : i32 = oz + (man.mesher.faces.fz[idx] as i32);
+        const x : i32 = sv.ox + (sv.faces.fx[idx] as i32);
+        const y : i32 = sv.faces.fy[idx] as i32;
+        const z : i32 = sv.oz + (sv.faces.fz[idx] as i32);
 
         // Unpack the direction and atlas tile from the packed ftile slot, and
         // what the face's corners stand on.
-        const packed : i32 = man.mesher.faces.ftile[idx] as i32;
+        const packed : i32 = sv.faces.ftile[idx] as i32;
         const dir : FaceDir = faceDirFrom(packed / 256);
-        const kind : i32 = man.mesher.faces.fkind[idx] as i32;
+        const kind : i32 = sv.faces.fkind[idx] as i32;
         const isWaterFace : bool = kind == (FaceKind::Water as i32);
         const isPartialFace : bool = kind == (FaceKind::Partial as i32);
 
@@ -499,7 +508,7 @@ class ChunkRenderer {
         // The extent is wanted whole HERE, for the culling centre and the
         // distance cut, which measure the surface that is actually there; the
         // span loop below is what decides how many quads it is drawn as.
-        const run : i32 = man.mesher.faces.frun[idx] as i32;
+        const run : i32 = sv.faces.frun[idx] as i32;
         const runF : f64 = run as f64;
         let runX : f64 = 1.0;
         let runZ : f64 = 1.0;
@@ -558,8 +567,8 @@ class ChunkRenderer {
         // Flow animation: flowing water scrolls its texture along the flow the
         // mesher recorded (toward the lower level). Still lakes have none.
         const tscroll : f64 = phase * Water::FLOW_SPEED;
-        const flowU : f64 = (man.mesher.faces.fflow[idx * 2] as f64) * tscroll;
-        const flowV : f64 = (man.mesher.faces.fflow[idx * 2 + 1] as f64) * tscroll;
+        const flowU : f64 = (sv.faces.fflow[idx * 2] as f64) * tscroll;
+        const flowV : f64 = (sv.faces.fflow[idx * 2 + 1] as f64) * tscroll;
 
         // Face-direction (Lambert) shading + the directional sun shadow, shared
         // by all 4 corners (computed once before the per-corner light below).
@@ -596,6 +605,7 @@ class ChunkRenderer {
         // is applied PER CORNER below (smooth, face-independent), not flattened
         // over the whole face here — that's what removes the block staircase.
         const shade : FaceShade = FaceShade {
+            mesh: sv.faces,
             idx,
             tile: packed % 256,
             dir,
@@ -617,7 +627,7 @@ class ChunkRenderer {
         // So the run is cut where the shadow is NOT flat along it, and only
         // there: most of the world is evenly lit or evenly shaded, and those runs
         // still go out whole, which is what the merge was for.
-        const step : i32 = self.shadowStep(man, shade, shadowCell, run);
+        const step : i32 = self.shadowStep(world, shade, shadowCell, run);
         let start : i32 = 0;
         while (start < run) {
             let len : i32 = step;
@@ -634,7 +644,7 @@ class ChunkRenderer {
             }
 
             self.emitSpan(
-                man,
+                world,
                 cam,
                 shade,
                 FaceSpan {
@@ -659,17 +669,17 @@ class ChunkRenderer {
      * for a shadow to take away. What is left to walk is the
      * sunward, sky-facing surface — and of that, only the runs a shadow edge
      * actually crosses come back split.
-     * @param man   chunk manager holding the baked face arrays
-     * @param fs    the face's per-quad constants
-     * @param cell  the face's air probe cell (the run's near end)
-     * @param run   cells the merged face spans
+     * @param world  the sun visibility the run is walked through
+     * @param fs     the face's per-quad constants
+     * @param cell   the face's air probe cell (the run's near end)
+     * @param run    cells the merged face spans
      * @return the cells one emitted quad may cover
      */
-    fn shadowStep(self, man : ChunkManager, fs : FaceShade, cell : IVec3, run : i32) : i32 {
+    fn shadowStep(self, world : dyn TerrainView, fs : FaceShade, cell : IVec3, run : i32) : i32 {
         if (run < 2 || fs.light.direct <= 0.0) {
             return run;
         }
-        if ((Mem::byteAt(man.mesher.faces.flight, (fs.idx * 4 * 2) as i64) >> 4) == 0) {
+        if ((Mem::byteAt(fs.mesh.flight, (fs.idx * 4 * 2) as i64) >> 4) == 0) {
             return run;
         }
 
@@ -683,7 +693,7 @@ class ChunkRenderer {
         let lo : i32 = 255;
         let hi : i32 = 0;
         for (i of 0..run) {
-            const v : i32 = man.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
+            const v : i32 = world.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
             if (v < lo) {
                 lo = v;
             }
@@ -705,12 +715,12 @@ class ChunkRenderer {
      * Everything a span does not change is in `fs`; what it does change is where
      * it starts along the run, how far it reaches, and the texture offset that
      * keeps the tiling continuous across a cut.
-     * @param man  chunk manager holding the baked face arrays
-     * @param cam  the camera (eye + orientation + projection width)
-     * @param fs   the face's per-quad constants
-     * @param sp   this span's origin, length and texture offset
+     * @param world  the light the corners sample
+     * @param cam    the camera (eye + orientation + projection width)
+     * @param fs     the face's per-quad constants
+     * @param sp     this span's origin, length and texture offset
      */
-    fn emitSpan(mut self, man : ChunkManager, cam : Camera, fs : FaceShade, sp : FaceSpan) : void {
+    fn emitSpan(mut self, world : dyn TerrainView, cam : Camera, fs : FaceShade, sp : FaceSpan) : void {
         const x : i32 = sp.cell.x;
         const y : i32 = sp.cell.y;
         const z : i32 = sp.cell.z;
@@ -748,7 +758,7 @@ class ChunkRenderer {
             // sits over, not the span's origin.
             const cwx : i32 = x + oxv * runXi;
             const cwz : i32 = z + ozv * runZi;
-            const top : i32 = man.mesher.faces.ftop[fs.idx * 4 + k] as i32;
+            const top : i32 = fs.mesh.ftop[fs.idx * 4 + k] as i32;
             const cornerY : f64 = (y as f64) + topHeight(top);
             self.toCam(cam, vec3(cwx as f64, cornerY, cwz as f64), k);
             Mem::putRealOf(self.ca.u, k, (self.geom.uvu[q + k] as f64) * runF + sp.uOff + fs.flowU);
@@ -766,7 +776,7 @@ class ChunkRenderer {
                 runXi - 1,
                 runZi - 1
             );
-            const smp : CornerSample = man.cornerSample(probe);
+            const smp : CornerSample = world.cornerSample(probe);
 
             const visK : f64 = (smp.sun as f64) * 0.00392157;
             const keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
@@ -777,9 +787,9 @@ class ChunkRenderer {
             // curve (sky dimmed by daylight), with the corner's shaded
             // brightness and its ambient occlusion.
             const lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
-            const lb0 : i32 = Mem::byteAt(man.mesher.faces.flight, lo);
-            const lb1 : i32 = Mem::byteAt(man.mesher.faces.flight, lo + 1);
-            const aok : i32 = (Mem::byteAt(man.mesher.faces.fao, fs.idx as i64) >> (2 * k)) & 3;
+            const lb0 : i32 = Mem::byteAt(fs.mesh.flight, lo);
+            const lb1 : i32 = Mem::byteAt(fs.mesh.flight, lo + 1);
+            const aok : i32 = (Mem::byteAt(fs.mesh.fao, fs.idx as i64) >> (2 * k)) & 3;
             const aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
             const lit : CornerLight = CornerLight {
                 sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.skyAOFactor(smp),
@@ -979,7 +989,7 @@ class ChunkRenderer {
      *
      * Each worker owns its own queue and its own clipping scratch, so
      * nothing here is shared and nothing needs a lock.
-     * @param man     chunk manager holding the loaded chunks and baked faces
+     * @param world   the loaded chunks, their baked faces and their light
      * @param cam     the camera (eye + orientation + projection width)
      * @param phase   animation time phase (scrolls flowing-water textures)
      * @param first   the first slot this worker takes
@@ -987,7 +997,7 @@ class ChunkRenderer {
      */
     pub(crate) fn buildSlots(
         mut self,
-        man : ChunkManager,
+        world : dyn TerrainView,
         cam : Camera,
         phase : f64,
         first : i32,
@@ -995,16 +1005,19 @@ class ChunkRenderer {
     ) : void {
         const slots : i32 = World::SPAN * World::SPAN;
         const cone : ViewCone = viewConeFor(cam);
+        const faces : FaceMesh = world.faces();
         let slot : i32 = first;
         while (slot < slots) {
-            if (man.cols.loaded[slot] == 1
-                && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
+            const sc : SlotChunk = world.slotChunk(slot);
+            if (sc.loaded && chunkVisible(cone, sc.cx, sc.cz)) {
+                const sv : SlotView = SlotView {
+                    faces,
+                    ox: sc.cx * World::CHUNK_SIZE,
+                    oz: sc.cz * World::CHUNK_SIZE,
+                };
                 const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
-                const n : i32 = man.mesher.faces.fcount[slot];
-                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
-                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
-                for (fi of 0..n) {
-                    self.renderFace(man, base + fi, cam, phase, ox, oz);
+                for (fi of 0..faces.fcount[slot]) {
+                    self.renderFace(world, sv, base + fi, cam, phase);
                 }
             }
             slot += stride;
@@ -1037,7 +1050,7 @@ class ChunkRenderer {
 /**
  * Worker job: project / clip / light one worker's share of the chunks.
  * @param r       the worker whose triangle queue the share is built into
- * @param man     chunk manager holding the loaded chunks and baked faces
+ * @param world   the loaded chunks, their baked faces and their light
  * @param cam     the camera (eye + orientation + projection width)
  * @param phase   animation time phase (scrolls flowing-water textures)
  * @param first   the first slot this worker takes
@@ -1046,12 +1059,12 @@ class ChunkRenderer {
  */
 fn buildSlotsJob(
     r : ChunkRenderer,
-    man : ChunkManager,
+    world : dyn TerrainView,
     cam : Camera,
     phase : f64,
     first : i32,
     stride : i32
 ) : i32 {
-    r.buildSlots(man, cam, phase, first, stride);
+    r.buildSlots(world, cam, phase, first, stride);
     return 0;
 }
