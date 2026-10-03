@@ -457,7 +457,7 @@ class Game {
         }
 
         self.attackCd = Gameplay::EDIT_COOLDOWN;
-        const struck = self.mobs.attackNearest(self.player, self.sfx) >= 0;
+        const struck = self.mobs.attackNearest(self.player, self.sfx, self.aimReach());
         if (struck || !self.aimsAtBlock()) {
             return;
         }
@@ -534,6 +534,23 @@ class Game {
      */
     fn aimsAtBlock(self) : bool {
         return self.picker.hit == 1;
+    }
+
+    /**
+     * How far a strike may reach along the look ray: to the aimed block's
+     * centre when there is one, so a mob behind a wall or under the floor is
+     * out of reach; a wide-open value otherwise, left to the mob range.
+     * @return the reach, in blocks
+     */
+    fn aimReach(self) : f64 {
+        if (!self.aimsAtBlock()) {
+            return 1000.0;
+        }
+        const cell = self.aimedCell();
+        const dx = (cell.x as f64) + 0.5 - self.player.eye.x;
+        const dy = (cell.y as f64) + 0.5 - self.player.eye.y;
+        const dz = (cell.z as f64) + 0.5 - self.player.eye.z;
+        return (dx * dx + dy * dy + dz * dz).sqrt();
     }
 
     /**

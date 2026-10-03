@@ -59,7 +59,9 @@ class Mobs {
     static CHICKEN_GRAVITY_SCALE : f64 = 0.42; // chickens flutter down slowly
     static DEATH_FRAMES : i32 = 38;            // collapse animation length before removal
 
-    static ATTACK_RANGE : f64 = 3.4;
+    static ATTACK_RANGE : f64 = 3.4;            // furthest a strike reaches along the look ray
+    static ATTACK_AIM_HEIGHT : f64 = 0.5;       // where the aim is tested: this far above the feet
+    static ATTACK_AIM_RADIUS : f64 = 0.6;       // how close the look ray must pass to that point
     static ATTACK_DAMAGE : i32 = 4;
     static HURT_FLASH_FRAMES : i32 = 10;       // frames a struck mob glows red
 }

@@ -236,70 +236,71 @@ class MobManager {
 
     // ── Combat (melee) ──
     /**
-     * Consider one mob as a melee candidate; returns whether it beats the
-     * current best (closer, in front, alive).
+     * How far along the player's look ray a living mob sits, if the ray
+     * passes through it: the ray, pitch and all, against a ball of
+     * `Mobs::ATTACK_AIM_RADIUS` around the middle of the body.
      * @param a       the candidate actor
      * @param player  the attacking player
-     * @param fwdx    x component of the player's forward direction
-     * @param fwdz    z component of the player's forward direction
-     * @param bestD   the current best squared distance to beat
-     * @return true if this mob is a closer, in-front, living candidate
+     * @return the distance along the ray, or a negative value on a miss
      */
-    fn better(
-        self,
-        a : dyn Actor,
-        player : Player,
-        fwdx : f64,
-        fwdz : f64,
-        bestD : f64
-    ) : bool {
+    fn aimedAt(self, a : dyn Actor, player : Player) : f64 {
         if (a.isDying()) {
-            return false;
+            return -1.0;
         }
-        const dx : f64 = a.pos().x - player.pos.x;
-        const dz : f64 = a.pos().z - player.pos.z;
-        const d2 : f64 = dx * dx + dz * dz;
-        if (d2 > bestD) {
-            return false;
+        const fx : f64 = (0.0 - player.siny) * player.cosp;
+        const fy : f64 = player.sinp;
+        const fz : f64 = player.cosy * player.cosp;
+        const vx : f64 = a.pos().x - player.eye.x;
+        const vy : f64 = a.pos().y + Mobs::ATTACK_AIM_HEIGHT - player.eye.y;
+        const vz : f64 = a.pos().z - player.eye.z;
+        const along : f64 = vx * fx + vy * fy + vz * fz;
+        if (along <= 0.0) {
+            return -1.0;
         }
-        return (dx * fwdx + dz * fwdz) > 0.0;
+        const off2 : f64 = vx * vx + vy * vy + vz * vz - along * along;
+        if (off2 > Mobs::ATTACK_AIM_RADIUS * Mobs::ATTACK_AIM_RADIUS) {
+            return -1.0;
+        }
+        return along;
     }
 
     /**
-     * Melee the nearest living mob in front of the player within range.
-     * Returns the struck mob's kind, or -1 if nothing was hit.
+     * Melee the nearest living mob the player is aiming at, no further than
+     * `reach` along the look ray.
+     *
+     * A ray, not a half-plane: the old test took any mob within range on the
+     * player's side of a vertical plane, so a sheep below the floor or off to
+     * one side absorbed the digging. The caller passes the distance to the
+     * block it is aiming at as the reach, so a wall in front shields what is
+     * behind it.
      * @param player  the attacking player
      * @param sfx     the audio manager for the hurt sound
-     * @return the struck mob's kind, or -1 if nothing was hit
+     * @param reach   the furthest a struck mob may be along the ray
+     * @return whether a mob was struck
      */
-    pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager) : i32 {
-        const fwdx : f64 = 0.0 - player.siny;
-        const fwdz : f64 = player.cosy;
-        let bestD : f64 = Mobs::ATTACK_RANGE * Mobs::ATTACK_RANGE;
+    pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager, reach : f64) : bool {
+        let best : f64 = reach.min(Mobs::ATTACK_RANGE);
         let bestIdx : i32 = -1;
         for (i of 0..self.n) {
-            const a : dyn Actor = self.actors[i];
-            if (self.better(a, player, fwdx, fwdz, bestD)) {
-                const dx : f64 = a.pos().x - player.pos.x;
-                const dz : f64 = a.pos().z - player.pos.z;
-                bestD = dx * dx + dz * dz;
+            const along : f64 = self.aimedAt(self.actors[i], player);
+            if (along >= 0.0 && along <= best) {
+                best = along;
                 bestIdx = i;
             }
         }
 
         if (bestIdx < 0) {
-            return -1;
+            return false;
         }
         let target : dyn Actor = self.actors[bestIdx];
         target.damage(Mobs::ATTACK_DAMAGE);
         target.flashHurt();
         sfx.mobHurt(target.kind(), target.pos(), self.rand());
-        const kind : i32 = target.kind() as i32;
         if (target.isAlive()) {
             target.panicFrom(player.pos.x, player.pos.z);
         } else {
             target.startDying();
         }
-        return kind;
+        return true;
     }
 }
