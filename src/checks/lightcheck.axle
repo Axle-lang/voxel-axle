@@ -509,9 +509,9 @@ fn checkCloudCoherence() : i32 {
 
     // A: one full march. B: the same, a little later, higher, with the sun lower.
     let a : CloudSky = new CloudSky();
-    a.march(fA, dsA, 70.0, FULL_SKY);
+    a.march(fA, dsA, vec3(0.0, 70.0, 0.0), FULL_SKY);
     let b : CloudSky = new CloudSky();
-    b.march(fB, dsB, 76.0, FULL_SKY);
+    b.march(fB, dsB, vec3(0.0, 76.0, 0.0), FULL_SKY);
     const n : i64 = a.dome().cells();
     const snapA : i64 = Mem::take(n * 8);   // the check's own copy, at full width
     for (i of 0..n) {
@@ -521,7 +521,7 @@ fn checkCloudCoherence() : i32 {
     // A whole cycle at B, during which nothing visible may change.
     let moved : i32 = 0;
     for (f of 0..a.cycleFrames()) {
-        a.march(fB, dsB, 76.0, FULL_SKY);
+        a.march(fB, dsB, vec3(0.0, 76.0, 0.0), FULL_SKY);
         const d : CloudDome = a.dome();
         let diff : i32 = 0;
         for (j of 0..n) {
@@ -537,7 +537,7 @@ fn checkCloudCoherence() : i32 {
     // Then the fade: every cell the same fraction of the way, every frame.
     let worstSpread : f64 = 0.0;
     for (frame of 0..60) {
-        a.march(fB, dsB, 76.0, FULL_SKY);
+        a.march(fB, dsB, vec3(0.0, 76.0, 0.0), FULL_SKY);
         const d : CloudDome = a.dome();
         const bd : CloudDome = b.dome();
         let lo : f64 = 2.0;

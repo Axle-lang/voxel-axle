@@ -34,9 +34,13 @@
 // rim blaze when you look toward the sun through it - is applied when the table
 // is READ, from this frame's day state, so it is always this frame's.
 //
-// The march ignores the eye's horizontal position, deliberately: a deck a
-// quarter of a kilometre up barely parallaxes when you walk, and letting it
-// would make the table depend on where you stood.
+// The deck is marched above where the eye stood when the cycle began, frozen
+// with the rest of the cycle's inputs. It used to be marched above the world
+// origin — a deck a quarter of a kilometre up barely parallaxes over a walk —
+// but the ground's cloud shadows (sky::cloudlight) are cast from the field at
+// real world columns, so away from the origin the clouds overhead and the
+// shadows under them were two different decks. A walk moves the anchor a few
+// blocks a cycle; the chase fades that in like any other change of input.
 
 use smalt::Mem;
 use crate::engine::math::narrow::{ halfOf, HALF_BYTES };
@@ -119,7 +123,9 @@ class CloudSky {
     filled : i32,         // 0 until the first pass, which is not amortised
     skipped : i32,        // frames the deck has stood still for while nothing could
                           // see it, counting up to Cloud::HIDDEN_SLICE_EVERY
-    refY : f64,           // the eye altitude THIS CYCLE is being marched at
+    refX : f64,           // where the eye stood when THIS CYCLE's march began:
+    refY : f64,           // the deck is marched above that column, at that altitude
+    refZ : f64,
     refSx : f64,          // ...the body direction
     refSy : f64,
     refSz : f64,
@@ -136,7 +142,9 @@ class CloudSky {
         self.slice = 0;
         self.filled = 0;
         self.skipped = 0;
+        self.refX = 0.0;
         self.refY = 0.0;
+        self.refZ = 0.0;
         self.refSx = 0.0;
         self.refSy = 1.0;
         self.refSz = 0.0;
@@ -179,19 +187,20 @@ class CloudSky {
      * looking at the floor of a hole was paying all of it.
      * @param field    the cloud field, already drifted
      * @param ds       the day/night state (which body, how strong, what colour)
-     * @param eyeY     the camera's altitude, which decides where the band is crossed
+     * @param eye      the camera's position: its altitude decides where the band is
+     *                 crossed, and the deck is marched above where it stands
      * @param skyPixels  how much sky the last frame's paint found
      */
     pub(crate) fn march(
         mut self,
         field : CloudField,
         ds : DayState,
-        eyeY : f64,
+        eye : Vec3,
         skyPixels : i32
     ) : void {
         self.takeLight(ds);
         if (self.filled == 0) {
-            self.fill(field, ds, eyeY);
+            self.fill(field, ds, eye);
             return;
         }
         if (skyPixels < Cloud::HIDDEN_SKY_PIXELS) {
@@ -208,7 +217,7 @@ class CloudSky {
             const done : CloudTable = self.work;
             self.work = self.target;
             self.target = done;
-            self.freezeView(field, ds, eyeY);
+            self.freezeView(field, ds, eye);
         }
 
         for (i of 0..SKY_CREW - 1) {
@@ -246,10 +255,10 @@ class CloudSky {
      * The first frame: march everything, and start with all three tables agreeing.
      * @param field  the cloud field, already drifted
      * @param ds     the day/night state
-     * @param eyeY   the camera's altitude
+     * @param eye    the camera's position
      */
-    fn fill(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
-        self.freezeView(field, ds, eyeY);
+    fn fill(mut self, field : CloudField, ds : DayState, eye : Vec3) : void {
+        self.freezeView(field, ds, eye);
         for (i of 0..SKY_CREW - 1) {
             self.crew[i] = spawn cloudFillJob(self, i);
         }
@@ -324,10 +333,12 @@ class CloudSky {
      * cycle is what makes `work` describe one moment rather than thirty-two.
      * @param field  the cloud field, drifted to now
      * @param ds     the day/night state
-     * @param eyeY   the camera's altitude
+     * @param eye    the camera's position
      */
-    fn freezeView(mut self, field : CloudField, ds : DayState, eyeY : f64) : void {
-        self.refY = eyeY;
+    fn freezeView(mut self, field : CloudField, ds : DayState, eye : Vec3) : void {
+        self.refX = eye.x;
+        self.refY = eye.y;
+        self.refZ = eye.z;
         self.refSx = ds.dirX;
         self.refSy = ds.dirY;
         self.refSz = ds.dirZ;
@@ -491,8 +502,10 @@ class CloudSky {
         // The weather at the two ends of the marched part, interpolated between:
         // it varies over hundreds of blocks, so across one crossing it is very
         // nearly linear, and it is the cheap 2-D half of the field.
-        const cA : f64 = field.coverAt(dx * t0, dz * t0, lod);
-        const cB : f64 = field.coverAt(dx * (t0 + cut), dz * (t0 + cut), lod);
+        const ox : f64 = self.refX;
+        const oz : f64 = self.refZ;
+        const cA : f64 = field.coverAt(ox + dx * t0, oz + dz * t0, lod);
+        const cB : f64 = field.coverAt(ox + dx * (t0 + cut), oz + dz * (t0 + cut), lod);
         if (cA <= 0.0 && cB <= 0.0) {
             return CloudCell {
                 cov: 0.0,
@@ -527,7 +540,7 @@ class CloudSky {
             const t : f64 = t0 + f * cut;
             const py : f64 = eyeY + dy * t;
             const cov : f64 = cA + (cB - cA) * f;
-            const here : Vec3 = vec3(dx * t, py, dz * t);
+            const here : Vec3 = vec3(ox + dx * t, py, oz + dz * t);
             const d : f64 = field.densityAtCover(cov, here, lod, Cloud::VIEW_OCTAVES);
             if (d > 0.0001) {
                 // How much of THIS step the eye sees...

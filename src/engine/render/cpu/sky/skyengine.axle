@@ -153,7 +153,7 @@ class SkyEngine {
         };
 
         const field : CloudField = cloudFieldAt(worldTime);
-        self.cloudSky.march(field, ds, cam.eye.y, self.skyPixels);
+        self.cloudSky.march(field, ds, cam.eye, self.skyPixels);
         self.lastFog = self.fogT.build(
             self.dome,
             self.rays,
