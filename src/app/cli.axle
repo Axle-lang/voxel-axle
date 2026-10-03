@@ -19,10 +19,12 @@
 //   --light-check          run the headless coloured-light assertions and exit
 //   --biome-scan           count the biome of a wide grid of columns and exit
 //   --cull-check           run the headless chunk-visibility assertions and exit
+//   --model-check          check every species describes a body, and exit
 //
-// A reader per flag, each answering with a value rather than setting
-// state, so `main` reads the command line once at the top and never
-// consults it again.
+// A reader per flag, each answering with a value rather than setting state.
+// A flag given without the values it needs says so and is ignored — never
+// silently, because a scripted run that thinks it is pinned and is not
+// compares two different worlds.
 
 use std::sys::process::{argc, argAt};
 use std::lang::{IndexOutOfBoundsException, ParseException};
@@ -75,7 +77,7 @@ fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
     const toRad : f64 = 3.14159265358979 / 180.0;
     for (i of 1..argc()) {
         try {
-            if (argAt(i) == "--look" && i + 2 < argc()) {
+            if (flagWith(i, "--look", 2, "two angles in degrees")) {
                 const yaw : f64 = argAt(i + 1).toF64() * toRad;
                 const pitch : f64 = argAt(i + 2).toF64() * toRad;
                 return (true, yaw, pitch);
@@ -102,7 +104,7 @@ fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
 fn dayTimeArg() : f64 {
     for (i of 1..argc()) {
         try {
-            if (argAt(i) == "--daytime" && i + 1 < argc()) {
+            if (flagWith(i, "--daytime", 1, "a number in 0..1")) {
                 return argAt(i + 1).toF64();
             }
         } catch e : IndexOutOfBoundsException {
@@ -129,7 +131,7 @@ fn dayTimeArg() : f64 {
 fn startColumn(clock : Clock) : (x: i32, z: i32) {
     for (i of 1..argc()) {
         try {
-            if (argAt(i) == "--at" && i + 2 < argc()) {
+            if (flagWith(i, "--at", 2, "two whole numbers")) {
                 const x : i32 = argAt(i + 1).toI64() as i32;
                 const z : i32 = argAt(i + 2).toI64() as i32;
                 return (x, z);
@@ -156,7 +158,7 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
 fn windowSize() : (w: i32, h: i32) {
     for (i of 1..argc()) {
         try {
-            if (argAt(i) == "--size" && i + 2 < argc()) {
+            if (flagWith(i, "--size", 2, "two whole numbers")) {
                 const w : i32 = argAt(i + 1).toI64() as i32;
                 const h : i32 = argAt(i + 2).toI64() as i32;
                 if (w >= 320 && h >= 240) {
@@ -188,7 +190,7 @@ fn windowSize() : (w: i32, h: i32) {
 fn walkBlocks() : f64 {
     for (i of 1..argc()) {
         try {
-            if (argAt(i) == "--walk" && i + 1 < argc()) {
+            if (flagWith(i, "--walk", 1, "a number of blocks")) {
                 return argAt(i + 1).toF64();
             }
         } catch e : IndexOutOfBoundsException {
@@ -207,6 +209,29 @@ fn walkBlocks() : f64 {
  */
 fn wantsPhysicsCheck() : bool {
     return hasFlag("--physics-check");
+}
+
+/**
+ * Whether argument `i` is `flag` followed by all `n` of its values.
+ *
+ * A flag found without them is reported and treated as absent, rather than
+ * dropped in silence: `--at 5` used to start a random world, and the capture
+ * it was meant to pin looked fine and compared nothing.
+ * @param i     the argument index to test
+ * @param flag  the flag, leading dashes included
+ * @param n     how many values must follow it
+ * @param what  what the values are, for the report
+ * @return true when the flag is here with its values
+ */
+fn flagWith(i : i32, flag : string, n : i32, what : string) : bool ! IndexOutOfBoundsException {
+    if (argAt(i) != flag) {
+        return false;
+    }
+    if (i + n < argc()) {
+        return true;
+    }
+    Console::println("${flag} wants ${what}; ignoring it");
+    return false;
 }
 
 /**

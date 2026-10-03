@@ -70,6 +70,20 @@ class Picker : RayCaster {
         let y : i32 = oy.floorToInt() as i32;
         let z : i32 = oz.floorToInt() as i32;
 
+        // The eye's own cell first. The walk below steps before it tests, so a
+        // block that ended up in the player's head — sand that fell on them —
+        // was the one block in reach that could not be aimed at, and dug out.
+        if (man.solidTarget(ivec3(x, y, z))) {
+            self.hit = 1;
+            self.bx = x;
+            self.by = y;
+            self.bz = z;
+            self.px = x;
+            self.py = y;
+            self.pz = z;
+            return;
+        }
+
         let stepX : i32 = 0;
         let tMaxX : f64 = big;
         let tDeltaX : f64 = big;
@@ -304,8 +318,8 @@ fn rayCellBoxFace(
 
 /**
  * True if the unit cube at `cell` overlaps the player's body
- * (a `Motion::PLAYER_RADIUS` disc, ~1.8 blocks tall) — used to refuse placing a
- * block inside yourself.
+ * (a `Motion::PLAYER_RADIUS` disc, `Motion::PLAYER_HEIGHT` tall) — used to
+ * refuse placing a block inside yourself.
  * @param p     the player to test against
  * @param cell  the world voxel
  * @return true if the cell overlaps the player's body box
@@ -317,7 +331,7 @@ fn cellInPlayer(p : Player, cell : IVec3) : bool {
     const minZ : f64 = p.pos.z - r;
     const maxZ : f64 = p.pos.z + r;
     const minY : f64 = p.pos.y;
-    const maxY : f64 = p.pos.y + 1.8;
+    const maxY : f64 = p.pos.y + Motion::PLAYER_HEIGHT;
     const fx : f64 = cell.x as f64;
     const fy : f64 = cell.y as f64;
     const fz : f64 = cell.z as f64;

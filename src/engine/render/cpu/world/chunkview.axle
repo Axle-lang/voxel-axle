@@ -118,18 +118,9 @@ class ChunkRenderer {
     fogT : FogTable,      // the sky behind each pixel, and how much of it stands between
     day : DayState,       // sun / daylight snapshot (per-corner light + glint)
     lcurve : i64,         // brightness curve (owned by DayLighting)
-    /**
-     * Triangles queued in the last frame, and the microseconds the banded
-     * FILL took of the world pass.
-     *
-     * Two numbers because the world pass is two very different jobs, and
-     * which of them costs is not guessable: the queue build projects,
-     * near-clips and lights every face on ONE thread, then the fill
-     * spreads over twelve. Measured, the build is roughly two thirds —
-     * which is the opposite of where a "the software rasteriser is slow"
-     * intuition sends you.
-     */
+    /** Triangles this worker queued in the last frame, for the `--snap` report. */
     pub(crate) queuedTris : i32 = 0,
+    overflowed : bool = false, // the queue has filled once and said so
 
     /**
      * Allocate the triangle queue, the projection / clipping scratch buffers and
@@ -1130,6 +1121,13 @@ class ChunkRenderer {
                     maxx: colHi,
                 };
                 self.triN++;
+            } else if (!self.overflowed) {
+                // A full queue drops the rest of the frame's terrain from this
+                // worker — holes, with nothing on screen to say why. Once is
+                // enough to say so.
+                self.overflowed = true;
+                Console::println("world raster: a worker's triangle queue is full"
+                    + " (Render::TRI_QUEUE_CAP = ${Render::TRI_QUEUE_CAP}); faces dropped");
             }
         }
     }
@@ -1210,8 +1208,8 @@ class ChunkRenderer {
     /**
      * Rasterise the queued world triangles whose pixels fall in the column band
      * [bx0, bx1). Each band is disjoint, so threads never touch the same z-buffer
-     * pixel. Called by the main thread and by `fillBandJob`. Reads this
-     * frame's atlas + fog off the component (set in drawWorld).
+     * pixel. Called by the renderer's `BandFill` pass, one band per worker.
+     * Reads this frame's atlas + fog off the component (set in drawWorld).
      * @param fb   the render target (framebuffer + z-buffer + size)
      * @param bx0  inclusive left screen column of this band
      * @param bx1  exclusive right screen column of this band
