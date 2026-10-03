@@ -1,0 +1,347 @@
+// gpubackend — voxel drawn on a GPU, through smalt's `Renderer`.
+//
+// The frame the software rasteriser is handed, translated into one smalt scene:
+//
+//   background  the sky: the dome, the cloud deck, the sun and the moon
+//   draws       the terrain, two meshes a chunk (`terrainmeshes`), then what moves
+//               — creatures, torches, the aimed block's outline (`entitymesh`)
+//   passes      the fog toward the sky behind each surface; the sun's shafts, or the
+//               water seen from inside; the bloom; the veil behind the pause menu
+//
+// and the overlay — the HUD, the crosshair, the menu — drawn into the renderer's 2-D
+// layer by the same `engine/ui` code as on the CPU. The light is the software
+// renderer's arithmetic, in `shaders/`; a pinned `--snap` on each backend is how the
+// two are compared.
+//
+// Coordinates on the GPU are measured from a render origin, the corner of the eye's
+// chunk at height 0, so a 32-bit float keeps its precision hundreds of thousands of
+// blocks out. A chunk's mesh is chunk-local and placed by whole blocks, so moving the
+// origin costs no rebuild.
+
+use smalt::{
+    Backend, BitmapFont, Bmp, Face, FramePixels, Image, Mat4, Material, MeshHandle, PlatformError,
+    Renderer, RendererDesc, SamplerDesc, Scene, ShaderHandle, TextureHandle, Vec4, Window,
+};
+use std::time::monotonicNanos;
+use crate::engine::io::assets::Assets;
+use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
+use crate::engine::render::backend::{ RenderBackend };
+use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::render::view::camera::{ Camera, DepthRange, Viewport, clipMatrix };
+use crate::engine::render::gpu::clouddeck::{ CloudDeckImage };
+use crate::engine::render::gpu::entitymesh::{ EntityMesh };
+use crate::engine::render::gpu::terrainmeshes::{ TerrainMeshes };
+use crate::engine::render::gpu::uniforms::{ setFrameVectors };
+use crate::engine::render::gpu::voxelshaders::{ VoxelShaders, uploadShaders };
+use crate::engine::world::seams::{ TerrainView };
+use crate::engine::ui::hud::{ drawHud, drawCrosshair };
+use crate::engine::ui::menu::{ drawPauseMenu, veilKeep };
+use crate::configs::atlas::{ Atlas };
+use crate::configs::render::{ Render };
+use crate::configs::screen::{ Screen };
+use crate::configs::world::{ World };
+
+/** The far plane: past the farthest corner of the chunk ring. */
+const FAR_PLANE : f64 = 512.0;
+
+/** Draws a scene holds: two a chunk, and the entities. */
+const SCENE_DRAWS : i32 = 1024;
+
+/** Microseconds a frame spent, summed over the run for `report`. */
+struct GpuTimes {
+    meshes : i64 = 0,   // keeping the chunk meshes in step with the world
+    scene : i64 = 0,    // the entities, the deck, the scene
+    submit : i64 = 0,   // recording and presenting
+    frames : i64 = 0,
+}
+
+class GpuBackend : RenderBackend {
+    gfx : Renderer,
+    scene : Scene,
+    shaders : VoxelShaders,
+    atlasImage : Image,          // the atlas as loaded: the HUD draws its icons from it
+    atlas : TextureHandle,
+    deck : CloudDeckImage,
+    deckTex : TextureHandle,
+    terrain : TerrainMeshes,
+    entities : EntityMesh,
+    entityMesh : MeshHandle,
+    font : BitmapFont = BitmapFont::baked(Face::Ui),
+    times : GpuTimes = GpuTimes { },
+    capturePath : string = "",   // the file the next frame is written to; empty for none
+    written : bool = false,
+
+    /**
+     * Open a GPU on the window, and give it the shaders, the atlas and the deck.
+     * @param win  the window to draw in
+     * @throws PlatformError when there is no GPU to draw with, or it refuses a shader
+     */
+    constructor(win : Window) ! PlatformError {
+        self.gfx = new Renderer(win, RendererDesc {
+            backend: Backend::Gpu,
+            vsync: false,
+            maxMeshes: 2 * World::SPAN * World::SPAN + 16,
+            appName: "voxel",
+        })?;
+        self.scene = new Scene(SCENE_DRAWS);
+        self.shaders = uploadShaders(self.gfx)?;
+
+        self.atlasImage = new Image(Atlas::TILE_PX, Atlas::TILE_PX, Atlas::TILE_COUNT);
+        if (Assets::loadAtlas(self.atlasImage.base(), self.atlasImage.byteCount()) != self.atlasImage.byteCount()) {
+            Console::println("warning: atlas.raw not found next to the binary"
+                + " — textures will be blank");
+        }
+        self.atlas = self.gfx.uploadTexture(self.atlasImage, SamplerDesc {
+            anisotropy: Atlas::MAX_ANISO,
+            srgb: true,
+        });
+
+        self.deck = new CloudDeckImage();
+        self.deckTex = self.gfx.uploadTexture(self.deck.image, SamplerDesc {
+            nearest: true,
+            mipmaps: false,
+            repeat: false,
+        });
+
+        self.terrain = new TerrainMeshes();
+        self.entities = new EntityMesh();
+        self.entityMesh = self.gfx.uploadMesh(self.entities.mesh);
+    }
+
+    /**
+     * Draw the frame and show it.
+     * @param frame  what this frame shows
+     * @param world  the baked mesh and the light it is lit by
+     * @param win    the window to show it in
+     */
+    pub(crate) fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void {
+        const eyeChunk : IVec3 = eyeChunkOf(frame.cam);
+        const origin : IVec3 = ivec3(eyeChunk.x * World::CHUNK_SIZE, 0, eyeChunk.z * World::CHUNK_SIZE);
+
+        const start : i64 = monotonicNanos();
+        self.terrain.refresh(self.gfx, world, eyeChunk, frame.lcurve);
+        const meshed : i64 = monotonicNanos();
+
+        self.entities.rebuild(frame, origin);
+        self.gfx.updateMesh(self.entityMesh, self.entities.mesh);
+        if (frame.clouds.on) {
+            self.gfx.updateTexture(self.deckTex, self.deck.fill(frame.clouds));
+        }
+        self.describe(frame, world, origin);
+        self.drawOverlay(frame);
+        const described : i64 = monotonicNanos();
+
+        if (self.capturePath.byteLength != 0) {
+            self.gfx.captureNext();
+        }
+        self.gfx.render(self.scene, win);
+        self.keepCapture();
+
+        const shown : i64 = monotonicNanos();
+        self.times.meshes += (meshed - start) / 1000;
+        self.times.scene += (described - meshed) / 1000;
+        self.times.submit += (shown - described) / 1000;
+        self.times.frames++;
+    }
+
+    /**
+     * This frame's scene: the camera and the frame's vectors, the sky, the terrain and
+     * the entities, the passes.
+     * @param frame   what this frame shows
+     * @param world   which chunks are loaded
+     * @param origin  the render origin
+     */
+    fn describe(mut self, frame : FrameDesc, world : dyn TerrainView, origin : IVec3) : void {
+        const cam : Camera = frame.cam;
+        self.scene.reset();
+        self.scene.setViewProjection(
+            clipMatrix(
+                cam,
+                vec3(origin.x as f64, origin.y as f64, origin.z as f64),
+                DepthRange {
+                    near: Screen::NEAR_PLANE,
+                    far: FAR_PLANE,
+                }
+            ),
+            Vec4::make(
+                cam.eye.x - (origin.x as f64),
+                cam.eye.y - (origin.y as f64),
+                cam.eye.z - (origin.z as f64),
+                1.0
+            ).xyz()
+        );
+        setFrameVectors(self.scene, frame);
+        self.scene.setBackground(self.shaders.sky, self.deckTex);
+
+        self.scene.useShader(self.shaders.terrain);
+        self.terrain.addTo(self.scene, world, self.atlas, origin);
+
+        if (!self.entities.mesh.isEmpty()) {
+            let bothSides : Material = Material::baked();
+            bothSides.cullBackface = false;
+            self.scene.useShader(self.shaders.entity);
+            self.scene.add(self.entityMesh, self.atlas, bothSides, Mat4::identity());
+        }
+
+        self.addPasses(frame);
+    }
+
+    /**
+     * The passes after the draws, in the software renderer's order: fog; then the
+     * water's haze from beneath it, or the sun's shafts above; then the bloom over the
+     * result; then, paused, the veil.
+     * @param frame  what this frame shows
+     */
+    fn addPasses(mut self, frame : FrameDesc) : void {
+        const none : TextureHandle = TextureHandle::none();
+        let haze : ShaderHandle = ShaderHandle::none();
+        if (frame.clock.underwater) {
+            haze = self.shaders.underwater;
+        } else if (frame.shafts.on) {
+            haze = self.shaders.godRays;
+        }
+        const bloom : bool = Render::BLOOM_ON;
+
+        // The bloom adds its glow to the frame it was taken from: the last pass before
+        // it is kept for that.
+        self.scene.addPass(self.shaders.fog, self.deckTex, bloom && haze.isNone());
+        if (!haze.isNone()) {
+            self.scene.addPass(haze, none, bloom);
+        }
+
+        if (bloom) {
+            self.scene.addPass(self.shaders.bright, none, false);
+            for (i of 0..Render::BLOOM_ITERS) {
+                self.scene.setDrawUser(Vec4::make(1.0, 0.0, 0.0, 0.0));
+                self.scene.addPass(self.shaders.blur, none, false);
+                self.scene.setDrawUser(Vec4::make(0.0, 1.0, 0.0, 0.0));
+                self.scene.addPass(self.shaders.blur, none, false);
+            }
+            self.scene.setDrawUser(Vec4::zero());
+            self.scene.addPass(self.shaders.composite, none, false);
+        }
+
+        if (frame.hud.paused) {
+            self.scene.setDrawUser(Vec4::make(veilKeep(), 0.0, 0.0, 0.0));
+            self.scene.addPass(self.shaders.dim, none, false);
+        }
+    }
+
+    /**
+     * The overlay: the pause menu, or the HUD and the crosshair. The aimed block's
+     * outline is in the scene, with the entities.
+     * @param frame  what this frame shows
+     */
+    fn drawOverlay(mut self, frame : FrameDesc) : void {
+        if (frame.hud.paused) {
+            drawPauseMenu(self.gfx.overlay(), self.font, frame.hud.hover);
+            return;
+        }
+        drawHud(
+            self.gfx.overlay(),
+            self.font,
+            self.atlasImage.base(),
+            hp: frame.hud.hp,
+            maxHp: frame.hud.maxHp,
+            hotbar: frame.hud.hotbar,
+            selected: frame.hud.selected,
+            creative: frame.hud.creative
+        );
+        drawCrosshair(self.gfx.overlay());
+    }
+
+    /** Write the capture asked for, once the frame it was asked of has been read back. */
+    fn keepCapture(mut self) : void {
+        if (self.capturePath.byteLength == 0) {
+            return;
+        }
+        const px : FramePixels = self.gfx.captured();
+        if (!px.isEmpty()) {
+            self.written = Bmp::write(self.capturePath, px.frame());
+            self.capturePath = "";
+        }
+    }
+
+    /**
+     * The window's own size: a GPU has no pixel budget to keep to.
+     * @param winW  the window's width in pixels
+     * @param winH  the window's height in pixels
+     * @return the render size
+     */
+    pub(crate) fn viewportFor(self, winW : i32, winH : i32) : Viewport {
+        return Viewport {
+            w: winW,
+            h: winH,
+        };
+    }
+
+    /**
+     * Nothing to do: the renderer follows the window by itself.
+     * @param w  the target's width in pixels
+     * @param h  the target's height in pixels
+     */
+    pub(crate) fn resize(mut self, w : i32, h : i32) : void {
+    }
+
+    /**
+     * Write the next frame drawn to a BMP file.
+     * @param path  the file to write
+     */
+    pub(crate) fn captureNext(mut self, path : string) : void {
+        self.capturePath = path;
+        self.written = false;
+    }
+
+    /**
+     * Whether the capture asked for has been written.
+     * @return true once it is
+     */
+    pub(crate) fn captured(self) : bool {
+        return self.written;
+    }
+
+    /**
+     * Whether the GPU has gone.
+     * @return true for good once it has
+     */
+    pub(crate) fn isLost(self) : bool {
+        return self.gfx.isLost();
+    }
+
+    /**
+     * What is drawing.
+     * @return the backend's name
+     */
+    pub(crate) fn name(self) : string {
+        return "gpu (${self.gfx.backendName()})";
+    }
+
+    /** Print the per-frame averages. */
+    pub(crate) fn report(self) : void {
+        const n : i64 = self.times.frames;
+        if (n == 0) {
+            return;
+        }
+        Console::println("  per frame (us): meshes=${self.times.meshes / n}"
+            + " scene=${self.times.scene / n}"
+            + " submit=${self.times.submit / n}"
+            + "  over ${n} frames");
+        Console::println("  terrain meshes: ${self.terrain.vertexCount()} vertices");
+    }
+
+    /** Close the renderer, and every mesh, texture and shader it holds with it. */
+    pub(crate) fn close(mut self) : void {
+        self.gfx.close();
+    }
+}
+
+/**
+ * The chunk the eye is in. Its corner, at height 0, is the render origin: the world point
+ * the frame's GPU coordinates are measured from.
+ * @param cam  the frame's camera
+ * @return the chunk's coordinates, y 0
+ */
+fn eyeChunkOf(cam : Camera) : IVec3 {
+    const size : f64 = World::CHUNK_SIZE as f64;
+    return ivec3((cam.eye.x / size).floorToInt() as i32, 0, (cam.eye.z / size).floorToInt() as i32);
+}

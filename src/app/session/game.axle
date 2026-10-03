@@ -28,7 +28,9 @@ use crate::engine::render::frame::framebuilder::{
 use crate::app::view::{ viewOf };
 use crate::app::session::display::{ Display };
 use crate::app::session::state::{ Edge, LookPin, ScriptedWalk };
-use crate::app::session::boot::{ newWorld, placePlayer, plantTorch, momentAt, chunkOf };
+use crate::app::session::boot::{
+    newWorld, placePlayer, plantTorch, momentAt, chunkOf, openBackend,
+};
 use crate::engine::ui::menu::{ menuHit };
 use crate::game::entities::fauna::Fauna;
 use crate::app::controls::{
@@ -37,6 +39,7 @@ use crate::app::controls::{
 use crate::game::rules::stepaudio::{ StepTimers, stepAudio };
 use crate::app::cli::{
     dayTimeArg, hasFlag, lookPin, snapDeadline, startColumn, walkBlocks, windowSize,
+    rendererChoice,
 };
 use crate::game::rules::picker::{ Picker, cellInPlayer };
 use crate::game::rules::tick::TickManager;
@@ -158,7 +161,7 @@ class Game {
         self.mobs.attachSpawner(new Fauna());
         self.frames.setViewport(self.display.width(), self.display.height());
         self.backend = malloc<dyn RenderBackend>(1);
-        self.backend[0] = new CpuBackend(self.display.width(), self.display.height());
+        self.backend[0] = openBackend(self.display, rendererChoice())?;
         Console::println("renderer: ${self.backend[0].name()}");
 
         // The device is fed from its own thread, so a heavy frame cannot

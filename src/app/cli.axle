@@ -15,11 +15,13 @@
 //   --daytime <0..1>       start the day clock at a named hour
 //   --walk <blocks>        hold forward for that many blocks, then stop
 //   --torch                stand a torch on the ground ahead of the spawn
+//   --cpu / --gpu          draw with the software renderer / with the GPU and nothing else
 //   --physics-check        run the headless physics assertions and exit
 //   --light-check          run the headless coloured-light assertions and exit
 //   --biome-scan           count the biome of a wide grid of columns and exit
 //   --cull-check           run the headless chunk-visibility assertions and exit
 //   --model-check          check every species describes a body, and exit
+//   --frame-check          print what a swept set of frames contains, and exit
 //   --surface-check        print digests of the baked sun, sky access and bounce, and exit
 //
 // A reader per flag, each answering with a value rather than setting state.
@@ -251,4 +253,25 @@ fn hasFlag(flag : string) : bool {
         }
     }
     return false;
+}
+
+/** Which renderer the command line asks for. */
+enum RendererChoice {
+    Auto,   // the GPU when there is one, the software renderer when not
+    Cpu,    // --cpu: the software renderer
+    Gpu,    // --gpu: the GPU, and an error when there is none
+}
+
+/**
+ * `--cpu` or `--gpu`, or neither.
+ * @return the renderer asked for
+ */
+fn rendererChoice() : RendererChoice {
+    if (hasFlag("--cpu")) {
+        return RendererChoice::Cpu;
+    }
+    if (hasFlag("--gpu")) {
+        return RendererChoice::Gpu;
+    }
+    return RendererChoice::Auto;
 }

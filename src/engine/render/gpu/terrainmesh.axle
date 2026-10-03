@@ -1,0 +1,368 @@
+// terrainmesh — one chunk's baked faces as the vertices `shaders/terrain.vert` reads.
+//
+// The software rasteriser reads the baked surface light at every face corner, every frame
+// (render/cpu/world/chunkview). A shader cannot reach them, so what a corner reads of
+// them is copied into its vertex here, when the chunk is meshed or its light rebaked,
+// and the shader does the per-frame rest. The vertex layout is that shader's header.
+//
+// A face is cut into the same spans as on the CPU — whole where the sun's visibility
+// is flat along its run, a cell at a time where a shadow edge crosses it — so a shadow
+// glides instead of stepping a run at a time. Positions are chunk-local: the draw's
+// model matrix places the chunk, which keeps every coordinate small.
+
+use smalt::{ Mem, MeshBuilder, RawVertex, Vec2, Vec4 };
+use crate::engine::math::vec3::{ Vec3, IVec3, vec3, ivec3 };
+use crate::engine::world::seams::{ CornerSample, TerrainView };
+use crate::engine::world::mesh::meshbuf::{ FaceMesh, faceX, faceZ, faceKind, faceRun };
+use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topHeight, cornerProbe };
+use crate::configs::light::{ Light };
+use crate::configs::world::{ World };
+
+/** Where the layer word's fields above the tile (bits 0-7) start, as `terrain.vert` unpacks them. */
+const WORD_SKY : i32 = 8;
+const WORD_RED : i32 = 12;
+const WORD_GREEN : i32 = 16;
+const WORD_BLUE : i32 = 20;
+const WORD_AO : i32 = 24;
+const WORD_WATER : i32 = 26;
+const WORD_WRAP : i32 = 27;
+
+/** One face as every span of it reads it. */
+struct FaceRef {
+    faces : FaceMesh,
+    idx : i32,
+    dir : i32,
+    tile : i32,
+    naxis : i32,      // 0 = X, 1 = Y, 2 = Z
+    step : IVec3,     // the normal, as the step to the cell the face looks into
+    water : bool,
+    wrap : bool,      // the texture tiles across it: merged, or water
+    origin : IVec3,   // the chunk's world origin: a cell minus it is chunk-local
+}
+
+/** One span of a merged face: its first cell, its air probe, its length, where its texture starts. */
+struct Span {
+    cell : IVec3,
+    probe : IVec3,
+    run : i32,
+    uOff : f64,
+}
+
+/** A chunk's faces, built into the two meshes it is drawn as. */
+class ChunkMeshBuild {
+    pub(crate) solid : MeshBuilder,     // drawn from the front only
+    pub(crate) twoSided : MeshBuilder,  // water, and the tops of partial blocks
+    geom : FaceTable,
+    reversed : bool[],                  // by direction: the table's corners wind backward
+    lcurve : i64,                       // the brightness curve of the build under way
+    lum : f64[],                        // the span being added: its corners' brightness
+
+    /** Empty builders, grown to a chunk's size by the first one built. */
+    constructor() {
+        self.solid = new MeshBuilder(4096, 6144);
+        self.twoSided = new MeshBuilder(256, 384);
+        self.geom = FaceTable {};
+        self.reversed = malloc<bool>(6);
+        for (dir of 0..6) {
+            self.reversed[dir] = windsBackward(self.geom, dir);
+        }
+        self.lcurve = 0;
+        self.lum = malloc<f64>(4);
+    }
+
+    /**
+     * Build one slot's faces, as they and the light around them stand now.
+     * @param world   the baked faces and their light
+     * @param slot    the ring slot
+     * @param origin  the chunk's world origin
+     * @param lcurve  the brightness curve, 16 f64s by light level (`FrameDesc.lcurve`)
+     */
+    pub(crate) fn build(mut self, world : dyn TerrainView, slot : i32, origin : IVec3, lcurve : i64) : void {
+        self.solid.clear();
+        self.twoSided.clear();
+        self.lcurve = lcurve;
+        const faces : FaceMesh = world.faces();
+        const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        for (i of 0..faces.fcount[slot]) {
+            self.addFace(world, faceRefOf(faces, base + i, origin));
+        }
+    }
+
+    /**
+     * One face, cut into spans where a shadow edge crosses its run.
+     * @param world  the baked light
+     * @param f      the face
+     */
+    fn addFace(mut self, world : dyn TerrainView, f : FaceRef) : void {
+        const cell : IVec3 = ivec3(
+            faceX(f.faces, f.idx) + f.origin.x,
+            f.faces.fy[f.idx] as i32,
+            faceZ(f.faces, f.idx) + f.origin.z
+        );
+        const probe : IVec3 = ivec3(cell.x + f.step.x, cell.y + f.step.y, cell.z + f.step.z);
+        const run : i32 = faceRun(f.faces, f.idx);
+        const step : i32 = self.shadowStep(world, f, probe, run);
+
+        let start : i32 = 0;
+        while (start < run) {
+            const len : i32 = (run - start).min(step);
+            let advX : i32 = 0;
+            let advZ : i32 = 0;
+            if (f.naxis == 0) {
+                advZ = start;
+            } else {
+                advX = start;
+            }
+            self.addSpan(world, f, Span {
+                cell: ivec3(cell.x + advX, cell.y, cell.z + advZ),
+                probe: ivec3(probe.x + advX, probe.y, probe.z + advZ),
+                run: len,
+                uOff: start as f64,
+            });
+            start += len;
+        }
+    }
+
+    /**
+     * The cells one span may cover: the whole run where the sun's visibility along it
+     * is flat (or the face sees no sky), one where it is not — `chunkview.shadowStep`,
+     * less its test of the hour's sun, which a mesh kept across hours cannot make.
+     * @param world  the sun's visibility
+     * @param f      the face
+     * @param probe  the air cell at the run's near end
+     * @param run    the cells the face spans
+     * @return the cells one span may cover
+     */
+    fn shadowStep(self, world : dyn TerrainView, f : FaceRef, probe : IVec3, run : i32) : i32 {
+        if (run < 2 || (Mem::byteAt(f.faces.flight, (f.idx * 8) as i64) >> 4) == 0) {
+            return run;
+        }
+        let dx : i32 = 1;
+        let dz : i32 = 0;
+        if (f.naxis == 0) {
+            dx = 0;
+            dz = 1;
+        }
+        let lo : i32 = 255;
+        let hi : i32 = 0;
+        for (i of 0..run) {
+            const v : i32 = world.sunlitGet(ivec3(probe.x + dx * i, probe.y, probe.z + dz * i));
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        return hi - lo > Light::SHADOW_SPLIT ? 1 : run;
+    }
+
+    /**
+     * One span's four corners and its two triangles, into the mesh its face is drawn in.
+     * @param world  the baked light
+     * @param f      the face
+     * @param sp     the span
+     */
+    fn addSpan(mut self, world : dyn TerrainView, f : FaceRef, sp : Span) : void {
+        let runX : i32 = 1;
+        let runZ : i32 = 1;
+        if (f.naxis == 0) {
+            runZ = sp.run;
+        } else {
+            runX = sp.run;
+        }
+
+        const into : MeshBuilder = drawsBothSides(f) ? self.twoSided : self.solid;
+        const first : i32 = into.vertices();
+        for (k of 0..4) {
+            const b : i32 = (f.dir * 4 + k) * 3;
+            const off : IVec3 = ivec3(self.geom.coff[b], self.geom.coff[b + 1], self.geom.coff[b + 2]);
+            const smp : CornerSample = world.cornerSample(cornerProbe(sp.probe, off, f.naxis, runX - 1, runZ - 1));
+            const word : i32 = cornerWord(f, k);
+            self.lum[k] = self.cornerLum(word, smp);
+            // The crate's `Vec3` shadows smalt's, which is reached through `Vec4`.
+            into.vertexRaw(RawVertex {
+                pos: Vec4::make(
+                    (sp.cell.x - f.origin.x + off.x * runX) as f64,
+                    (sp.cell.y as f64) + topHeight(f.faces.ftop[f.idx * 4 + k] as i32),
+                    (sp.cell.z - f.origin.z + off.z * runZ) as f64,
+                    1.0
+                ).xyz(),
+                normal: Vec4::make(
+                    f.step.x as f64,
+                    f.step.y as f64,
+                    f.step.z as f64,
+                    (smp.sun as f64) * (2.0 / 255.0) - 1.0
+                ),
+                uv: Vec2::make(
+                    (self.geom.uvu[f.dir * 4 + k] as f64) * (sp.run as f64) + sp.uOff,
+                    self.geom.uvv[f.dir * 4 + k] as f64
+                ),
+                color: cornerColor(f, smp),
+                word,
+            });
+        }
+
+        // The quad's seam goes on the diagonal joining its darker pair of corners, so a
+        // dark corner wraps the edge it sits on instead of smearing across the face; and
+        // its triangles turn counter-clockwise seen from the front, which is the side the
+        // pipeline keeps.
+        const seam13 : bool = self.lum[0] + self.lum[2] > self.lum[1] + self.lum[3];
+        if (self.reversed[f.dir]) {
+            if (seam13) {
+                into.quad(first + 1, first, first + 3, first + 2);
+            } else {
+                into.quad(first, first + 3, first + 2, first + 1);
+            }
+        } else if (seam13) {
+            into.quad(first + 1, first + 2, first + 3, first);
+        } else {
+            into.quad(first, first + 1, first + 2, first + 3);
+        }
+    }
+
+    /**
+     * How bright a corner is, for choosing the quad's diagonal: the CPU's corner light
+     * (`CornerLight.colour`) summed over its channels, with what a mesh kept across hours
+     * cannot know — the sun's angle and strength — left out. Only the order of two sums
+     * of these matters.
+     * @param word  the corner's layer word
+     * @param smp   what it read of the baked light
+     * @return its brightness
+     */
+    fn cornerLum(self, word : i32, smp : CornerSample) : f64 {
+        const keep : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * (smp.sun as f64) / 255.0;
+        const skyAO : f64 = Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * (smp.sky as f64) / 255.0;
+        const sky : f64 = self.levelLight(word >> WORD_SKY) * skyAO * keep;
+        const block : f64 = self.levelLight(word >> WORD_RED)
+            + self.levelLight(word >> WORD_GREEN)
+            + self.levelLight(word >> WORD_BLUE);
+        const ao : f64 = 1.0 - Light::AO_STRENGTH * ((3 - ((word >> WORD_AO) & 3)) as f64) / 3.0;
+        return ao * (3.0 * sky + block);
+    }
+
+    /**
+     * A light level through the brightness curve.
+     * @param nibble  a word whose low four bits are the level
+     * @return the light
+     */
+    fn levelLight(self, nibble : i32) : f64 {
+        return Mem::realOf(self.lcurve, (nibble & 15) as i64);
+    }
+}
+
+/**
+ * Whether a direction's corners, in the table's order, wind the other way from what the
+ * pipeline keeps. It keeps a triangle that turns counter-clockwise on screen; the camera
+ * maps x, y and z to right, up and forward, so seen from in front of a face that is a
+ * turn whose cross product points into the face, against its normal.
+ * @param geom  the face table
+ * @param dir   the direction, 0..5
+ * @return true when the table's order must be reversed
+ */
+fn windsBackward(geom : FaceTable, dir : i32) : bool {
+    const c0 : Vec3 = cornerOffset(geom, dir, 0);
+    const c1 : Vec3 = cornerOffset(geom, dir, 1);
+    const c2 : Vec3 = cornerOffset(geom, dir, 2);
+    const s : IVec3 = stepOf(dir);
+    return c1.sub(c0).cross(c2.sub(c0)).dot(vec3(s.x as f64, s.y as f64, s.z as f64)) > 0.0;
+}
+
+/**
+ * One corner's offset in a face table.
+ * @param geom  the table
+ * @param dir   the direction
+ * @param k     the corner
+ * @return the offset
+ */
+fn cornerOffset(geom : FaceTable, dir : i32, k : i32) : Vec3 {
+    const b : i32 = (dir * 4 + k) * 3;
+    return vec3(geom.coff[b] as f64, geom.coff[b + 1] as f64, geom.coff[b + 2] as f64);
+}
+
+/**
+ * A baked face, unpacked.
+ * @param faces   the baked face arrays
+ * @param idx     the face's index in them
+ * @param origin  its chunk's world origin
+ * @return the face
+ */
+fn faceRefOf(faces : FaceMesh, idx : i32, origin : IVec3) : FaceRef {
+    const packed : i32 = faces.ftile[idx] as i32;
+    const dir : i32 = packed / 256;
+    const water : bool = faceKind(faces, idx) == (FaceKind::Water as i32);
+    return FaceRef {
+        faces,
+        idx,
+        dir,
+        tile: packed % 256,
+        naxis: dir / 2,
+        step: stepOf(dir),
+        water,
+        wrap: water || faceRun(faces, idx) > 1,
+        origin,
+    };
+}
+
+/**
+ * A face direction's normal, as a step between cells.
+ * @param dir  the `FaceDir` discriminant, 0..5
+ * @return the step
+ */
+fn stepOf(dir : i32) : IVec3 {
+    const sign : i32 = (dir % 2) == 0 ? 1 : 0 - 1;
+    return match dir / 2 {
+        0 => ivec3(sign, 0, 0),
+        1 => ivec3(0, sign, 0),
+        _ => ivec3(0, 0, sign),
+    };
+}
+
+/**
+ * Whether a face is seen from behind as well: water, and the top of a partial block,
+ * which the eye can drop below.
+ * @param f  the face
+ * @return true when it is drawn from both sides
+ */
+fn drawsBothSides(f : FaceRef) : bool {
+    const partial : bool = faceKind(f.faces, f.idx) == (FaceKind::Partial as i32);
+    return f.water || (partial && f.dir == 2);
+}
+
+/**
+ * A corner's layer word: the tile, the four light levels the mesher averaged there,
+ * its ambient occlusion, whether it is water and whether its texture tiles.
+ * @param f  the face
+ * @param k  the corner, 0..3
+ * @return the word
+ */
+fn cornerWord(f : FaceRef, k : i32) : i32 {
+    const at : i64 = ((f.idx * 4 + k) * 2) as i64;
+    const skyRed : i32 = Mem::byteAt(f.faces.flight, at);
+    const greenBlue : i32 = Mem::byteAt(f.faces.flight, at + 1);
+    const ao : i32 = (Mem::byteAt(f.faces.fao, f.idx as i64) >> (2 * k)) & 3;
+    return f.tile
+        | (((skyRed >> 4) & 15) << WORD_SKY)
+        | ((skyRed & 15) << WORD_RED)
+        | (((greenBlue >> 4) & 15) << WORD_GREEN)
+        | ((greenBlue & 15) << WORD_BLUE)
+        | (ao << WORD_AO)
+        | ((f.water ? 1 : 0) << WORD_WATER)
+        | ((f.wrap ? 1 : 0) << WORD_WRAP);
+}
+
+/**
+ * A corner's colour: the one-bounce tint and the sky access — or, on water, the flow
+ * along x and z in place of the tint. A flow is the level difference across the face,
+ * two levels of 0..8, so -8..8: `(flow + 8) * 15` fits a byte.
+ * @param f    the face
+ * @param smp  what the corner read of the baked light
+ * @return the packed colour
+ */
+fn cornerColor(f : FaceRef, smp : CornerSample) : i32 {
+    if (f.water) {
+        return MeshBuilder::rgba(
+            ((f.faces.fflow[f.idx * 2] as i32) + 8) * 15,
+            ((f.faces.fflow[f.idx * 2 + 1] as i32) + 8) * 15,
+            0,
+            smp.sky
+        );
+    }
+    return MeshBuilder::rgba((smp.bounce >> 16) & 0xFF, (smp.bounce >> 8) & 0xFF, smp.bounce & 0xFF, smp.sky);
+}

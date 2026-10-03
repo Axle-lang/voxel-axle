@@ -1,0 +1,238 @@
+// terrainmeshes — the chunk ring as meshes on the GPU, kept in step with the world.
+//
+// Each ring slot has two meshes (`terrainmesh`: one-sided, two-sided) and remembers
+// the chunk, the mesh generation and the light generation it was built from. A slot
+// whose world has moved on from that is rebuilt, nearest to the eye first, a few a
+// frame — except before the first frame, when every loaded slot is built at once so
+// the world does not pop in around the player.
+
+use smalt::{ Aabb, Mat4, Material, MeshBuilder, MeshHandle, Renderer, Scene, TextureHandle, Vec4 };
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::world::seams::{ SlotChunk, TerrainView };
+use crate::engine::render::gpu::terrainmesh::{ ChunkMeshBuild };
+use crate::configs::world::{ World };
+
+/** Slots rebuilt per frame once the world is up. */
+const REBUILDS_PER_FRAME : i32 = 6;
+
+/** What a slot's meshes were built from; `built` false until they first are. */
+struct SlotState {
+    built : bool = false,
+    cx : i32 = 0,
+    cz : i32 = 0,
+    meshGen : i32 = 0,
+    lightGen : i32 = 0,
+}
+
+/** One slot's mesh of one kind: its handle, its chunk-local box, and its size. */
+struct SlotMesh {
+    handle : MeshHandle,
+    box : Aabb,
+    vertices : i32,
+}
+
+/** One slot's two meshes. */
+struct SlotMeshes {
+    solid : SlotMesh,
+    twoSided : SlotMesh,
+}
+
+class TerrainMeshes {
+    build : ChunkMeshBuild,
+    states : SlotState[],
+    meshes : SlotMeshes[],
+    rings : i32[],      // per slot this frame: how far its chunk is from the eye's, -1 when current
+    primed : bool = false,
+
+    /** No slot built yet. */
+    constructor() {
+        const slots : i32 = World::SPAN * World::SPAN;
+        self.build = new ChunkMeshBuild();
+        self.states = malloc<SlotState>(slots);
+        self.meshes = malloc<SlotMeshes>(slots);
+        self.rings = malloc<i32>(slots);
+        for (i of 0..slots) {
+            self.states[i] = SlotState { };
+        }
+    }
+
+    /**
+     * Rebuild the slots the world has moved on from, nearest the eye's chunk first.
+     * @param gfx     the renderer the meshes live in
+     * @param world   the baked faces and their light
+     * @param eye     the chunk the eye is in
+     * @param lcurve  the brightness curve (`FrameDesc.lcurve`)
+     */
+    pub(crate) fn refresh(mut self, gfx : Renderer, world : dyn TerrainView, eye : IVec3, lcurve : i64) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        let budget : i32 = self.primed ? REBUILDS_PER_FRAME : slots;
+        self.primed = true;
+
+        for (slot of 0..slots) {
+            const sc : SlotChunk = world.slotChunk(slot);
+            self.rings[slot] = sc.loaded && self.isStale(world, slot, sc) ? chunkDistance(sc, eye) : 0 - 1;
+        }
+        // Ring by ring outward, so the budget goes to what is in front of the player
+        // before what is on the horizon.
+        for (ring of 0..World::SPAN) {
+            for (slot of 0..slots) {
+                if (budget == 0) {
+                    return;
+                }
+                if (self.rings[slot] == ring) {
+                    self.rebuild(gfx, world, slot, lcurve);
+                    budget--;
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether a slot's meshes are of another chunk, mesh or light than the world's.
+     * @param world  the world
+     * @param slot   the ring slot
+     * @param sc     the chunk it holds
+     * @return true when it needs rebuilding
+     */
+    fn isStale(self, world : dyn TerrainView, slot : i32, sc : SlotChunk) : bool {
+        const s : SlotState = self.states[slot];
+        return !s.built
+            || s.cx != sc.cx
+            || s.cz != sc.cz
+            || s.meshGen != world.meshGen(slot)
+            || s.lightGen != world.lightGen(slot);
+    }
+
+    /**
+     * Build a slot's meshes again and hand them to the GPU. When the GPU has no room for
+     * them, the slot keeps what it had and is tried again next frame.
+     * @param gfx     the renderer
+     * @param world   the world
+     * @param slot    the ring slot
+     * @param lcurve  the brightness curve
+     */
+    fn rebuild(mut self, gfx : Renderer, world : dyn TerrainView, slot : i32, lcurve : i64) : void {
+        const sc : SlotChunk = world.slotChunk(slot);
+        const state : SlotState = SlotState {
+            built: true,
+            cx: sc.cx,
+            cz: sc.cz,
+            meshGen: world.meshGen(slot),
+            lightGen: world.lightGen(slot),
+        };
+        const origin : IVec3 = ivec3(sc.cx * World::CHUNK_SIZE, 0, sc.cz * World::CHUNK_SIZE);
+        self.build.build(world, slot, origin, lcurve);
+
+        if (!self.states[slot].built) {
+            const solid : MeshHandle = gfx.uploadMesh(self.build.solid);
+            const twoSided : MeshHandle = gfx.uploadMesh(self.build.twoSided);
+            if (solid.isNone() || twoSided.isNone()) {
+                gfx.releaseMesh(solid);
+                gfx.releaseMesh(twoSided);
+                return;
+            }
+            self.meshes[slot] = SlotMeshes {
+                solid: meshOf(solid, self.build.solid),
+                twoSided: meshOf(twoSided, self.build.twoSided),
+            };
+        } else {
+            const m : SlotMeshes = self.meshes[slot];
+            const solidOk : bool = gfx.updateMesh(m.solid.handle, self.build.solid);
+            const twoSidedOk : bool = gfx.updateMesh(m.twoSided.handle, self.build.twoSided);
+            if (!solidOk || !twoSidedOk) {
+                return;
+            }
+            self.meshes[slot] = SlotMeshes {
+                solid: meshOf(m.solid.handle, self.build.solid),
+                twoSided: meshOf(m.twoSided.handle, self.build.twoSided),
+            };
+        }
+        self.states[slot] = state;
+    }
+
+    /**
+     * Add every built, loaded slot to the scene, placed relative to the render origin
+     * and culled against the frame's camera. The caller has chosen the terrain shader.
+     * @param scene   the frame
+     * @param world   which slots are loaded
+     * @param atlas   the block atlas
+     * @param origin  the world point the frame's coordinates are measured from
+     */
+    pub(crate) fn addTo(mut self, scene : Scene, world : dyn TerrainView, atlas : TextureHandle, origin : IVec3) : void {
+        const oneSided : Material = Material::baked();
+        let bothSides : Material = Material::baked();
+        bothSides.cullBackface = false;
+
+        for (slot of 0..World::SPAN * World::SPAN) {
+            const sc : SlotChunk = world.slotChunk(slot);
+            const s : SlotState = self.states[slot];
+            if (sc.loaded && s.built && s.cx == sc.cx && s.cz == sc.cz) {
+                const m : SlotMeshes = self.meshes[slot];
+                // The crate's `Vec3` shadows smalt's, which is reached through `Vec4`.
+                const at : Vec4 = Vec4::make(
+                    (sc.cx * World::CHUNK_SIZE - origin.x) as f64,
+                    (0 - origin.y) as f64,
+                    (sc.cz * World::CHUNK_SIZE - origin.z) as f64,
+                    0.0
+                );
+                const model : Mat4 = Mat4::translation(at.xyz());
+                if (m.solid.vertices > 0) {
+                    scene.addBounded(m.solid.handle, atlas, oneSided, model, moved(m.solid.box, at));
+                }
+                if (m.twoSided.vertices > 0) {
+                    scene.addBounded(m.twoSided.handle, atlas, bothSides, model, moved(m.twoSided.box, at));
+                }
+            }
+        }
+    }
+
+    /**
+     * The vertices the built meshes hold, for the report.
+     * @return the count
+     */
+    pub(crate) fn vertexCount(self) : i64 {
+        let total : i64 = 0;
+        for (slot of 0..World::SPAN * World::SPAN) {
+            if (self.states[slot].built) {
+                total += (self.meshes[slot].solid.vertices + self.meshes[slot].twoSided.vertices) as i64;
+            }
+        }
+        return total;
+    }
+}
+
+/**
+ * A slot's record of a mesh it has on the GPU.
+ * @param handle  the mesh
+ * @param built   what it was built from
+ * @return the record
+ */
+fn meshOf(handle : MeshHandle, built : MeshBuilder) : SlotMesh {
+    return SlotMesh {
+        handle,
+        box: built.bounds(),
+        vertices: built.vertices(),
+    };
+}
+
+/**
+ * How many chunks a slot's chunk is from the eye's, the larger of the two axes.
+ * @param sc   the slot's chunk
+ * @param eye  the eye's chunk
+ * @return the distance in chunks
+ */
+fn chunkDistance(sc : SlotChunk, eye : IVec3) : i32 {
+    const dx : i32 = sc.cx - eye.x;
+    const dz : i32 = sc.cz - eye.z;
+    return dx.max(0 - dx).max(dz.max(0 - dz));
+}
+
+/**
+ * A box moved by an offset.
+ * @param b   the box
+ * @param by  the offset, in xyz
+ * @return the moved box
+ */
+fn moved(b : Aabb, by : Vec4) : Aabb {
+    return Aabb::make(b.min.plus(by.xyz()), b.max.plus(by.xyz()));
+}

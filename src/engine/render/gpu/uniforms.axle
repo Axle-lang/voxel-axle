@@ -1,0 +1,134 @@
+// uniforms — the frame's `user` vectors, in the order `shaders/voxel.glsl` names them
+// (`U_DIR` is vector 0, `U_BLOOM` vector 29). The two lists are one contract: a vector
+// added, moved or reread here is added, moved or reread there.
+
+use smalt::{ Scene, Vec4 };
+use crate::engine::math::vec3::{ vec3 };
+use crate::engine::render::frame::framedesc::{ FrameDesc };
+use crate::engine::render::view::camera::{ Camera, Projected };
+use crate::engine::shade::daymodel::{ DayState };
+use crate::engine::shade::gamma::{ LinRgb };
+use crate::engine::sky::atmosphere::{ SkyDome, skyDomeFor };
+use crate::engine::sky::clouddome::{ DeckLight };
+use crate::configs::cloud::{ Cloud };
+use crate::configs::light::{ Light };
+use crate::configs::render::{ Render };
+use crate::configs::water::{ Water };
+
+/** The sun's and the moon's disc radii, as fractions of the target's height. */
+const SUN_RADIUS : f64 = 0.085;
+const MOON_RADIUS : f64 = 0.072;
+
+/**
+ * Write the frame's vectors.
+ * @param scene  the frame being described
+ * @param frame  what it shows
+ */
+fn setFrameVectors(scene : Scene, frame : FrameDesc) : void {
+    const ds : DayState = frame.day;
+    const cam : Camera = frame.cam;
+    const dome : SkyDome = skyDomeFor(ds);
+    const deck : DeckLight = frame.clouds.light;
+
+    // The light a face is lit by, and the constants of its arithmetic.
+    scene.setUser(0, Vec4::make(ds.dirX, ds.dirY, ds.dirZ, ds.dirStrength));
+    scene.setUser(1, Vec4::make(ds.dirTintR, ds.dirTintG, ds.dirTintB, ds.skyAmbient));
+    scene.setUser(2, Vec4::make(ds.sunX, ds.sunY, ds.sunZ, frame.clock.ripple * Water::FLOW_SPEED));
+    scene.setUser(3, Vec4::make(Light::AMBIENT, Light::SKY_VIEW_MIN, Light::SUN_STRENGTH, Light::SHADOW_KEEP));
+    scene.setUser(4, Vec4::make(Light::MIN, Light::FALLOFF, Light::AO_STRENGTH, Light::AO_SKY_MIN));
+    scene.setUser(5, Vec4::make(Light::SHADE_TINT_R, Light::SHADE_TINT_G, Light::SHADE_TINT_B, Light::SHEEN_STRENGTH));
+    scene.setUser(6, Vec4::make(
+        Light::SHEEN_EXP as f64,
+        Light::SHEEN_GRAZE,
+        Light::SHEEN_ON ? 1.0 : 0.0,
+        Light::TONE_KNEE
+    ));
+    scene.setUser(7, Vec4::make(Water::SPEC_STRENGTH, Water::F0, Water::FRESNEL_STRENGTH, Light::TONE_MAX));
+
+    // The sky.
+    scene.setUser(8, Vec4::make(dome.zenR, dome.zenG, dome.zenB, dome.haloFade));
+    scene.setUser(9, Vec4::make(dome.horR, dome.horG, dome.horB, frame.clock.underwater ? 1.0 : 0.0));
+    scene.setUser(10, Vec4::make(
+        Render::SKY_HALO_R as f64,
+        Render::SKY_HALO_G as f64,
+        Render::SKY_HALO_B as f64,
+        Render::SKY_HALO_STRENGTH
+    ));
+    scene.setUser(11, Vec4::make(
+        Render::SKY_CORE_THRESH,
+        Render::SKY_CORE_STRENGTH,
+        Render::SKY_SHOULDER,
+        frame.clouds.on ? 1.0 : 0.0
+    ));
+    scene.setUser(12, Vec4::make(cam.cosy, cam.siny, cam.cosp, cam.sinp));
+    scene.setUser(13, Vec4::make(cam.lens.hw / cam.lens.focal, cam.lens.hh / cam.lens.focal, 0.0, 0.0));
+    scene.setUser(14, discOf(cam, ds.sunX, ds.sunY, ds.sunZ, SUN_RADIUS));
+    scene.setUser(15, discOf(cam, 0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ, MOON_RADIUS));
+
+    // The cloud deck's light.
+    scene.setUser(16, Vec4::make(deck.dir.x, deck.dir.y, deck.dir.z, 0.0));
+    scene.setUser(17, rgbOf(deck.body));
+    scene.setUser(18, rgbOf(deck.sky));
+    scene.setUser(19, rgbOf(deck.ground));
+    scene.setUser(20, Vec4::make(Cloud::PHASE_G, Cloud::PHASE_BACK, Cloud::PHASE_FWD_W, Cloud::PHASE_MAX));
+
+    // The fog, the water seen from inside, the shafts and the bloom.
+    scene.setUser(21, Vec4::make(Render::FOG_SCALE, Render::DRAW_DIST, 0.0, 0.0));
+    scene.setUser(22, Vec4::make(0.0 - cam.siny * cam.cosp, cam.sinp, cam.cosy * cam.cosp, 0.0));
+    scene.setUser(23, Vec4::make(Water::DEEP_R as f64, Water::DEEP_G as f64, Water::DEEP_B as f64, 0.0));
+    scene.setUser(24, Vec4::make(Water::FOG_R as f64, Water::FOG_G as f64, Water::FOG_B as f64, Water::FOG_FAR));
+    scene.setUser(25, Vec4::make(Water::FOG_MAX, Water::CAUSTIC_FREQ, Water::CAUSTIC_AMP, frame.clock.ripple));
+    scene.setUser(26, Vec4::make(Water::BUBBLE_COUNT as f64, Water::BUBBLE_SPEED, 0.0, 0.0));
+    scene.setUser(27, Vec4::make(
+        frame.shafts.sx / (2.0 * cam.lens.hw),
+        frame.shafts.sy / (2.0 * cam.lens.hh),
+        frame.shafts.expo,
+        Render::GOD_RAY_SAMPLES as f64
+    ));
+    scene.setUser(28, Vec4::make(Render::GOD_RAY_DECAY, Render::GOD_RAY_DENSITY, 0.0, 0.0));
+    scene.setUser(29, Vec4::make(
+        Render::BLOOM_THRESHOLD,
+        Render::BLOOM_STRENGTH,
+        bloomRadius() as f64,
+        0.0
+    ));
+}
+
+/**
+ * The bloom blur's radius at full resolution: the software renderer blurs at half.
+ * @return the radius in pixels
+ */
+fn bloomRadius() : i32 {
+    return Render::BLOOM_RADIUS * 2;
+}
+
+/**
+ * Where a body's disc stands on the target, as the sky shader reads it: its centre as
+ * fractions of the target, its radius as a fraction of the height, and whether it shows
+ * — not when it is well below the horizon or behind the eye.
+ * @param cam     the frame's camera
+ * @param x       the body's direction, x
+ * @param y       ... y
+ * @param z       ... z
+ * @param radius  its radius, a fraction of the height
+ * @return the disc
+ */
+fn discOf(cam : Camera, x : f64, y : f64, z : f64, radius : f64) : Vec4 {
+    const pr : Projected = cam.projectDir(vec3(x, y, z));
+    const shown : bool = y > 0.0 - 0.04 && pr.cz >= 0.05;
+    return Vec4::make(
+        pr.sx / (2.0 * cam.lens.hw),
+        pr.sy / (2.0 * cam.lens.hh),
+        radius,
+        shown ? 1.0 : 0.0
+    );
+}
+
+/**
+ * A colour as a vector.
+ * @param c  the colour
+ * @return (r, g, b, 0)
+ */
+fn rgbOf(c : LinRgb) : Vec4 {
+    return Vec4::make(c.r, c.g, c.b, 0.0);
+}

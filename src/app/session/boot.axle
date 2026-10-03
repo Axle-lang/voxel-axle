@@ -7,6 +7,12 @@ use crate::engine::entity::player::{ Player };
 use crate::engine::math::vec3::{ ivec3 };
 use crate::game::world::terraingen::TerrainGen;
 use crate::game::rules::start::{ Spawn, openYaw };
+use smalt::{ PlatformError };
+use crate::engine::render::backend::{ RenderBackend };
+use crate::engine::render::cpu::cpubackend::{ CpuBackend };
+use crate::engine::render::gpu::gpubackend::{ GpuBackend };
+use crate::app::cli::{ RendererChoice };
+use crate::app::session::display::{ Display };
 use crate::configs::blocks::{ Block };
 use crate::configs::world::{ World };
 
@@ -102,4 +108,26 @@ fn momentAt(p : Player, dayTime : f64, seconds : f64) : LightMoment {
  */
 fn chunkOf(p : f64) : i32 {
     return (p / (World::CHUNK_SIZE as f64)).floorToInt() as i32;
+}
+
+/**
+ * The renderer this run draws with: the GPU when one answers (and `--cpu` was not
+ * given), the software rasteriser otherwise — saying why, when it had to fall back.
+ * `--gpu` makes a missing GPU an error rather than a fallback.
+ * @param display  the window and its render size
+ * @param choice   what the command line asked for
+ * @return the backend, ready for its first frame
+ */
+fn openBackend(display : Display, choice : RendererChoice) : dyn RenderBackend ! PlatformError {
+    if (choice != RendererChoice::Cpu) {
+        try {
+            return new GpuBackend(display.win)?;
+        } catch e : PlatformError {
+            if (choice == RendererChoice::Gpu) {
+                throw PlatformError(e.message);
+            }
+            Console::println("no GPU (${e.message}); drawing with the software renderer");
+        }
+    }
+    return new CpuBackend(display.width(), display.height());
 }

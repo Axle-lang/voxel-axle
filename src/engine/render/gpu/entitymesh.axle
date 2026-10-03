@@ -1,0 +1,261 @@
+// entitymesh — what moves, as one mesh a frame: the creatures' boxes, the torches and the
+// outline of the aimed block, in the vertex `shaders/entity.vert` reads.
+//
+// Built from the frame every frame, in coordinates relative to the render origin. Which
+// faces of a box show is decided here against the eye, as the software renderer decides
+// it, so the mesh is drawn from both sides.
+
+use smalt::{ Color, MeshBuilder, RawVertex, Vec2, Vec4 };
+use crate::engine::math::vec3::{ Vec3, IVec3, vec3 };
+use crate::engine::render::frame::framedesc::{ FrameDesc, MobBox, AimBox };
+use crate::engine::render::frame::boxpose::{
+    BoxPose, BoxFace, BoxFaceLight, poseOf, boxCorner, boxFaceCount, boxFaceOf, boxFaceLight, torchBox,
+};
+use crate::engine::shade::daymodel::{ DayState };
+use crate::engine::ui::widget::{ tintIf };
+use crate::configs::atlas::{ Atlas };
+
+/** The layer word of a face with no texture: its colour sits in bits 8-31. */
+const FLAT_TILE : i32 = 255;
+
+/** Half the width of the outline's strokes, in pixels. */
+const OUTLINE_HALF_PX : f64 = 1.0;
+
+/** How far the outline stands off the block, so the faces it lies on do not hide it. */
+const OUTLINE_LIFT : f64 = 0.004;
+
+/** A quad's four corners, bottom-left, bottom-right, top-right, top-left. */
+struct Quad {
+    a : Vec3,
+    b : Vec3,
+    c : Vec3,
+    d : Vec3,
+}
+
+/** What a face looks like: its layer word, and the light it is drawn in. */
+struct FaceLook {
+    word : i32,
+    light : Vec3,
+}
+
+class EntityMesh {
+    pub(crate) mesh : MeshBuilder,
+    corners : Vec3[],   // the box being added, placed
+    origin : Vec3,      // the frame's render origin, in the world
+    eye : Vec3,         // the eye, relative to the origin
+
+    /** An empty mesh. */
+    constructor() {
+        self.mesh = new MeshBuilder(1024, 1536);
+        self.corners = malloc<Vec3>(8);
+        self.origin = vec3(0.0, 0.0, 0.0);
+        self.eye = vec3(0.0, 0.0, 0.0);
+    }
+
+    /**
+     * Rebuild the mesh from a frame.
+     * @param frame   what the frame shows
+     * @param origin  the world point the frame's coordinates are measured from
+     */
+    pub(crate) fn rebuild(mut self, frame : FrameDesc, origin : IVec3) : void {
+        self.mesh.clear();
+        self.origin = vec3(origin.x as f64, origin.y as f64, origin.z as f64);
+        self.eye = self.local(frame.cam.eye.x, frame.cam.eye.y, frame.cam.eye.z);
+
+        for (i of 0..frame.boxCount) {
+            self.addBox(frame.boxes[i], frame.day);
+        }
+        for (i of 0..frame.torchCount) {
+            self.addBox(torchBox(frame.torches[i]), frame.day);
+        }
+        // No outline behind the pause menu.
+        if (frame.aim.on && !frame.hud.paused) {
+            self.addOutline(frame.aim, frame.cam.lens.focal);
+        }
+    }
+
+    /**
+     * A world point relative to the origin.
+     * @param x  world x
+     * @param y  world y
+     * @param z  world z
+     * @return the point
+     */
+    fn local(self, x : f64, y : f64, z : f64) : Vec3 {
+        return vec3(x - self.origin.x, y - self.origin.y, z - self.origin.z);
+    }
+
+    /**
+     * One box's faces that face the eye.
+     * @param b   the box, placed and lit
+     * @param ds  the hour's light
+     */
+    fn addBox(mut self, b : MobBox, ds : DayState) : void {
+        const p : BoxPose = poseOf(b);
+        for (ci of 0..8) {
+            const c : Vec3 = boxCorner(b, p, ci);
+            self.corners[ci] = self.local(c.x, c.y, c.z);
+        }
+        for (i of 0..boxFaceCount(b)) {
+            const f : BoxFace = boxFaceOf(p, i);
+            const lit : BoxFaceLight = boxFaceLight(f.normal, b.light, b.hurt, ds);
+            self.addQuad(
+                Quad {
+                    a: self.corners[f.a],
+                    b: self.corners[f.b],
+                    c: self.corners[f.c],
+                    d: self.corners[f.d],
+                },
+                f.normal,
+                lookOf(lit, b, f.front ? b.part.faceTile : b.part.skinTile)
+            );
+        }
+    }
+
+    /**
+     * A box face, if its front is toward the eye.
+     * @param q     its corners
+     * @param n     its normal
+     * @param look  its word and light
+     */
+    fn addQuad(mut self, q : Quad, n : Vec3, look : FaceLook) : void {
+        const mid : Vec3 = q.a.add(q.b).add(q.c).add(q.d).scale(0.25);
+        if (self.eye.sub(mid).dot(n) <= 0.0) {
+            return;
+        }
+        const color : i32 = lightColor(look.light);
+        const first : i32 = self.corner(q.a, n, Vec2::make(0.0, 1.0), color, look.word);
+        self.corner(q.b, n, Vec2::make(1.0, 1.0), color, look.word);
+        self.corner(q.c, n, Vec2::make(1.0, 0.0), color, look.word);
+        self.corner(q.d, n, Vec2::make(0.0, 0.0), color, look.word);
+        self.mesh.quad(first, first + 1, first + 2, first + 3);
+    }
+
+    /**
+     * One corner.
+     * @param p      where it is
+     * @param n      its face's normal
+     * @param uv     its texture coordinate
+     * @param color  its face's light
+     * @param word   its face's layer word
+     * @return its index
+     */
+    fn corner(mut self, p : Vec3, n : Vec3, uv : Vec2, color : i32, word : i32) : i32 {
+        // The crate's `Vec3` shadows smalt's, which is reached through `Vec4`.
+        return self.mesh.vertexRaw(RawVertex {
+            pos: Vec4::make(p.x, p.y, p.z, 1.0).xyz(),
+            normal: Vec4::make(n.x, n.y, n.z, 0.0),
+            uv,
+            color,
+            word,
+        });
+    }
+
+    /**
+     * The outline of the aimed block: its twelve edges, each a ribbon turned to the eye
+     * and as wide as the software renderer's two-pixel stroke wherever it stands.
+     * @param aim    the aimed block
+     * @param focal  the lens's pixels per unit at unit depth
+     */
+    fn addOutline(mut self, aim : AimBox, focal : f64) : void {
+        const lo : f64 = 0.0 - OUTLINE_LIFT;
+        const hi : f64 = 1.0 + OUTLINE_LIFT;
+        const top : f64 = aim.topH + OUTLINE_LIFT;
+        for (k of 0..8) {
+            self.corners[k] = self.local(
+                (aim.cell.x as f64) + ((k & 1) != 0 ? hi : lo),
+                (aim.cell.y as f64) + ((k & 2) != 0 ? top : lo),
+                (aim.cell.z as f64) + ((k & 4) != 0 ? hi : lo)
+            );
+        }
+        const look : FaceLook = FaceLook {
+            word: flatWord(Color::packBytes(36, 38, 44)),
+            light: vec3(1.0, 1.0, 1.0),
+        };
+        // Corner k has bit 0 for x, bit 1 for y and bit 2 for z: an edge joins two
+        // corners that differ in one bit.
+        for (k of 0..8) {
+            for (bit of 0..3) {
+                const other : i32 = k | (1 << bit);
+                if (other != k) {
+                    self.addStroke(self.corners[k], self.corners[other], focal, look);
+                }
+            }
+        }
+    }
+
+    /**
+     * One edge of the outline: a quad along it, its width across the line of sight.
+     * @param a      one end
+     * @param b      the other
+     * @param focal  the lens's pixels per unit at unit depth
+     * @param look   the outline's word and light
+     */
+    fn addStroke(mut self, a : Vec3, b : Vec3, focal : f64, look : FaceLook) : void {
+        const mid : Vec3 = a.add(b).scale(0.5);
+        const toEye : Vec3 = self.eye.sub(mid);
+        const across : Vec3 = b.sub(a).cross(toEye);
+        const len : f64 = across.length();
+        if (len < 0.000001) {
+            return;
+        }
+        const half : f64 = OUTLINE_HALF_PX * toEye.length() / focal;
+        const side : Vec3 = across.scale(half / len);
+        const n : Vec3 = toEye.normalize();
+        const color : i32 = lightColor(look.light);
+        const first : i32 = self.corner(a.sub(side), n, Vec2::zero(), color, look.word);
+        self.corner(b.sub(side), n, Vec2::zero(), color, look.word);
+        self.corner(b.add(side), n, Vec2::zero(), color, look.word);
+        self.corner(a.add(side), n, Vec2::zero(), color, look.word);
+        self.mesh.quad(first, first + 1, first + 2, first + 3);
+    }
+}
+
+/**
+ * How a box face looks: its tile in its per-channel light, or — with no tile, or mob
+ * textures off — its flat colour in its brightness, reddened while it is struck.
+ * @param lit   the face's light
+ * @param b     the box
+ * @param tile  the face's tile, negative for none
+ * @return its word and light
+ */
+fn lookOf(lit : BoxFaceLight, b : MobBox, tile : i32) : FaceLook {
+    if (Atlas::USE_MOB_TEXTURES && tile >= 0) {
+        return FaceLook {
+            word: tile,
+            light: vec3(lit.tint.r, lit.tint.g, lit.tint.b),
+        };
+    }
+    return FaceLook {
+        word: flatWord(tintIf(b.hurt, b.part.color)),
+        light: vec3(lit.bright, lit.bright, lit.bright),
+    };
+}
+
+/**
+ * The layer word of a flat face.
+ * @param rgb  its colour, 0xRRGGBB
+ * @return the word
+ */
+fn flatWord(rgb : i32) : i32 {
+    return FLAT_TILE | ((rgb & 0xFFFFFF) << 8);
+}
+
+/**
+ * A face's light as the vertex colour that carries it (`entity.vert`: byte / 127).
+ * @param light  the light, per channel
+ * @return the packed colour
+ */
+fn lightColor(light : Vec3) : i32 {
+    return MeshBuilder::rgba(lightByte(light.x), lightByte(light.y), lightByte(light.z), 255);
+}
+
+/**
+ * One channel of a light as the byte that carries it: 1.0 is 127 exactly, and a light
+ * past 255 / 127 — a struck creature beside a torch at noon — is clipped there.
+ * @param light  the light
+ * @return the byte
+ */
+fn lightByte(light : f64) : i32 {
+    return (light * 127.0 + 0.5).floorToInt().max(0).min(255) as i32;
+}

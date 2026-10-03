@@ -1,0 +1,47 @@
+// clouddeck — the frame's cloud deck as a texture the sky and fog shaders read.
+//
+// The deck is three tables of sixteen-bit quantities (sky::clouddome); a texture
+// holds bytes. So each quantity is split across two channels — layer 0 carries
+// coverage and the lit share, layer 1 the ambient share — and the shaders put the
+// halves back together (`shaders/voxel.glsl`, `cloudCell`). The texture is rewritten
+// every frame: the deck it shows chases its march a little every frame.
+
+use smalt::{ Image, Mem };
+use crate::engine::sky::clouddome::{ CloudDome, CloudRaw, SKY_N };
+
+/** The deck's two-layer image, refilled each frame. */
+class CloudDeckImage {
+    pub(crate) image : Image,
+
+    /** An empty deck. */
+    constructor() {
+        self.image = new Image(SKY_N, SKY_N, 2);
+    }
+
+    /**
+     * Copy the deck into the image.
+     * @param deck  the frame's deck
+     * @return the image, ready to upload
+     */
+    pub(crate) fn fill(mut self, deck : CloudDome) : Image {
+        const base : i64 = self.image.base();
+        const plane : i64 = (SKY_N as i64) * (SKY_N as i64);
+        for (i of 0..plane) {
+            const c : CloudRaw = deck.rawAt(i);
+            Mem::putWordOf(base, i, packHalves(c.cov, c.lit));
+            Mem::putWordOf(base, plane + i, packHalves(c.amb, 0));
+        }
+        return self.image;
+    }
+}
+
+/**
+ * Two sixteen-bit values as one `0xAARRGGBB` texel: the first in red (high byte)
+ * and green (low), the second in blue (high) and alpha (low).
+ * @param a  the first value, 0..65535
+ * @param b  the second value, 0..65535
+ * @return the texel
+ */
+fn packHalves(a : i32, b : i32) : i32 {
+    return ((b & 0xFF) << 24) | (((a >> 8) & 0xFF) << 16) | ((a & 0xFF) << 8) | ((b >> 8) & 0xFF);
+}

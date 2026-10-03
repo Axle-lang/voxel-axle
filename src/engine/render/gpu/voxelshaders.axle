@@ -1,0 +1,83 @@
+// voxelshaders — voxel's own GPU stages (`shaders/`, compiled into `spirv.axle`), handed
+// to the renderer once at start-up.
+
+use smalt::{ PlatformError, Renderer, ShaderDesc, ShaderHandle, ShaderKind };
+use crate::engine::render::gpu::spirv::{ Spirv };
+
+/** Every shader a frame is drawn with. */
+struct VoxelShaders {
+    pub(crate) terrain : ShaderHandle,
+    pub(crate) entity : ShaderHandle,
+    pub(crate) sky : ShaderHandle,
+    pub(crate) fog : ShaderHandle,
+    pub(crate) godRays : ShaderHandle,
+    pub(crate) underwater : ShaderHandle,
+    pub(crate) bright : ShaderHandle,
+    pub(crate) blur : ShaderHandle,
+    pub(crate) composite : ShaderHandle,
+    pub(crate) dim : ShaderHandle,
+}
+
+/**
+ * Upload them all.
+ * @param gfx  the renderer
+ * @return the handles
+ * @throws PlatformError when the GPU refuses one
+ */
+fn uploadShaders(gfx : Renderer) : VoxelShaders ! PlatformError {
+    return VoxelShaders {
+        terrain: accepted(gfx, ShaderDesc {
+            kind: ShaderKind::Mesh,
+            vert: Spirv::terrainVert(),
+            vertBytes: Spirv::terrainVertBytes(),
+            frag: Spirv::terrainFrag(),
+            fragBytes: Spirv::terrainFragBytes(),
+        }, "terrain")?,
+        entity: accepted(gfx, ShaderDesc {
+            kind: ShaderKind::Mesh,
+            vert: Spirv::entityVert(),
+            vertBytes: Spirv::entityVertBytes(),
+            frag: Spirv::entityFrag(),
+            fragBytes: Spirv::entityFragBytes(),
+        }, "entity")?,
+        sky: accepted(gfx, fullScreen(ShaderKind::Background, Spirv::sky(), Spirv::skyBytes()), "sky")?,
+        fog: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::fog(), Spirv::fogBytes()), "fog")?,
+        godRays: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::godRays(), Spirv::godRaysBytes()), "god rays")?,
+        underwater: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::underwater(), Spirv::underwaterBytes()), "underwater")?,
+        bright: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::bright(), Spirv::brightBytes()), "bright")?,
+        blur: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::blur(), Spirv::blurBytes()), "blur")?,
+        composite: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::composite(), Spirv::compositeBytes()), "composite")?,
+        dim: accepted(gfx, fullScreen(ShaderKind::Pass, Spirv::dim(), Spirv::dimBytes()), "dim")?,
+    };
+}
+
+/**
+ * A full-screen shader: a fragment stage and nothing else.
+ * @param kind   a background or a pass
+ * @param frag   its SPIR-V
+ * @param bytes  its size in bytes
+ * @return the description
+ */
+fn fullScreen(kind : ShaderKind, frag : i32[], bytes : i64) : ShaderDesc {
+    return ShaderDesc {
+        kind,
+        frag,
+        fragBytes: bytes,
+    };
+}
+
+/**
+ * One shader, uploaded.
+ * @param gfx   the renderer
+ * @param desc  the shader
+ * @param name  what it is, for the error
+ * @return its handle
+ * @throws PlatformError when the GPU refuses it
+ */
+fn accepted(gfx : Renderer, desc : ShaderDesc, name : string) : ShaderHandle ! PlatformError {
+    const h : ShaderHandle = gfx.uploadShader(desc);
+    if (h.isNone()) {
+        throw PlatformError("the GPU refused voxel's ${name} shader");
+    }
+    return h;
+}
