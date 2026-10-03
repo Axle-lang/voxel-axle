@@ -20,6 +20,12 @@ use crate::configs::motion::{ Motion };
 use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
 
 /**
+ * Below this, a support height is the "nothing found" sentinel — the floor
+ * scans start a million blocks down — and not a floor.
+ */
+const NO_SUPPORT_BELOW : f64 = -900000.0;
+
+/**
  * Compétence: a HP pool that takes damage and heals within [0, max] and knows
  * when it has run out. The class supplies only the storage (`hp` / `maxHp` /
  * `setHp`); the clamping LOGIC lives here as shared default bodies, so every
@@ -483,6 +489,17 @@ class Entity : Damageable, Physics {
                     self.pos.y.floorToInt() as i32
                 );
 
+                // The overlap is above the feet rows — a block landed in the
+                // body's head cell — so there is no floor to stand on. Hold
+                // still rather than "land" on the no-support sentinel, which
+                // is a million blocks down.
+                if (top < NO_SUPPORT_BELOW) {
+                    self.velY = 0.0;
+                    self.onGround = false;
+                    self.settleApexInWater();
+                    return;
+                }
+
                 // Rising a little onto a higher floor (stepping up onto snow / a
                 // partial block) is smoothed by the camera stepUp so it reads as
                 // a glide, not a jump.
@@ -508,6 +525,27 @@ class Entity : Damageable, Physics {
                 self.apexY = self.pos.y;
             }
             self.onGround = false;
+        }
+        self.settleApexInWater();
+    }
+
+    /**
+     * Forget the height a fall is measured from: the next landing counts only
+     * the drop from here. For whatever moves the body without falling — a
+     * respawn, a game-mode switch, the water.
+     */
+    pub(derived) fn resetFall(mut self) : void {
+        self.apexY = self.pos.y;
+    }
+
+    /**
+     * Water arrests a fall. While the body is in it, a later landing is
+     * measured from where the body is now, not from the cliff it jumped off —
+     * otherwise swimming to a bank and stepping out lands the whole drop at once.
+     */
+    fn settleApexInWater(mut self) : void {
+        if (self.inWater) {
+            self.resetFall();
         }
     }
 

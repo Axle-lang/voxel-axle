@@ -11,10 +11,8 @@
 // prints it, so a world worth keeping can be returned to with `--at`.
 //
 // This varies the *place*, not the world. A different world means a
-// different `Noise::SEED`, and that constant is read by
-// `block::blocks::partialBoxHeight` — which sits behind the collision
-// capability — so making it a runtime value threads a seed through the
-// kernel's seams. Worth doing, and not the same change as this one.
+// different `Noise::SEED`, a compile-time constant read by the terrain fields
+// and the mob spawner; making it a runtime value is its own change.
 
 use crate::engine::world::seams::{ VoxelQuery };
 use crate::configs::world::{ World };
@@ -157,9 +155,8 @@ class Spawn {
 
     /**
      * Search an 81×81 area around (`cx`, `cz`) for the highest dry, open
-     * hilltop. Falls back to that centre at sea level + 1 if nothing
-     * qualifies — which is a beach or a lake, and still somewhere to
-     * stand.
+     * hilltop. Falls back to the top of whatever is solid at that centre,
+     * and never below sea level + 1, if nothing qualifies.
      * @param man  the voxel-query surface to read heights from
      * @param cx   centre column x of the search
      * @param cz   centre column z of the search
@@ -179,8 +176,12 @@ class Spawn {
             }
         }
 
+        // No open hilltop in the window — a jagged range, a jungle. Stand on
+        // whatever is solid at the centre (a tree crown counts), never lower
+        // than the sea: the old fixed sea-level fallback started a mountain
+        // run inside the rock.
         if (bestH < 0) {
-            bestH = World::SEA_LEVEL + 1;
+            bestH = man.collisionHeight(cx, cz).max(World::SEA_LEVEL + 1);
         }
         self.h = bestH;
     }

@@ -18,7 +18,7 @@ use crate::engine::world::chunks::{ ChunkManager, lightLoop };
 use crate::engine::world::sim::blocksim::BlockSim;
 use crate::engine::entity::player::{ GameMode, Player };
 use crate::engine::entity::mobs::MobManager;
-use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::math::vec3::{ IVec3, ivec3, vec3 };
 use crate::engine::math::mathx::{ fract };
 use crate::engine::render::cpu::renderer::Renderer;
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
@@ -38,9 +38,9 @@ use crate::app::cli::{
 };
 use crate::game::rules::picker::{ Picker, cellInPlayer };
 use crate::game::rules::tick::TickManager;
+use crate::game::rules::start::{ Spawn };
 use crate::configs::blocks::{ Block };
 use crate::configs::gameplay::{ Gameplay };
-use crate::configs::health::{ Health };
 use crate::configs::hud::{ Hotbar };
 use crate::configs::time::{ Daylight };
 use crate::configs::water::{ Water };
@@ -497,7 +497,11 @@ class Game {
         self.man.lightUpdate(cell);
     }
 
-    /** Death: back to full health, on the ground of the same column. */
+    /**
+     * Death: back to full health on the nearest dry, open ground — the same
+     * search the start uses. The column the player died in is no answer: it
+     * may be a lake bed (and a drowning loop), or inside what they built.
+     */
     fn respawnIfDead(mut self) : void {
         if (self.player.hp > 0) {
             return;
@@ -505,12 +509,13 @@ class Game {
 
         const x = self.player.pos.x.floorToInt() as i32;
         const z = self.player.pos.z.floorToInt() as i32;
-        self.player.hp = Health::PLAYER_MAX_HP;
-        self.player.velY = 0.0;
-        self.player.airTicks = 0;
-        self.player.sinceHurt = 0;
-        self.player.pos.y = self.man.columnHeight(x, z) as f64;
-        self.player.refresh();
+        let sp : Spawn = new Spawn();
+        sp.find(self.man, x, z);
+        self.player.respawnAt(vec3(
+            (sp.sx as f64) + 0.5,
+            sp.h as f64,
+            (sp.sz as f64) + 0.5
+        ));
     }
 
     /**

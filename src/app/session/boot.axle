@@ -99,7 +99,10 @@ fn newRenderer(w : i32, h : i32) : Renderer {
 fn plantTorch(man : ChunkManager, p : Player) : void {
     const x = (p.pos.x - p.yaw.sin() * TORCH_AHEAD).floorToInt() as i32;
     const z = (p.pos.z + p.yaw.cos() * TORCH_AHEAD).floorToInt() as i32;
-    const cell = ivec3(x, man.columnHeight(x, z) + 1, z);
+    // The first air cell above whatever is solid there: the heightmap's own top
+    // is already that cell, so the old `+ 1` hung the torch a block in the air,
+    // and it ignored trees, so beside one the torch replaced the trunk.
+    const cell = ivec3(x, man.collisionHeight(x, z), z);
 
     man.placeAt(cell, Block::Torch);
     man.lightUpdate(cell);

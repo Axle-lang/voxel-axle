@@ -156,6 +156,24 @@ class Player : Entity, Looks, Survives, Inventory {
         } else {
             self.mode = GameMode::Survival;
         }
+        // Flight moves the body without falling, so neither side of the switch
+        // may inherit a drop measured from where the other one left it.
+        self.resetFall();
+    }
+
+    /**
+     * Back to full health, standing at `at`, with nothing left over from the
+     * life that ended: no fall in progress, no breath lost, no hurt timer.
+     * @param at  where the feet go
+     */
+    pub(crate) fn respawnAt(mut self, at : Vec3) : void {
+        self.hp = Health::PLAYER_MAX_HP;
+        self.velY = 0.0;
+        self.airTicks = 0;
+        self.sinceHurt = 0;
+        self.pos = at;
+        self.resetFall();
+        self.refresh();
     }
 
     /** Recompute look trig and the eye position the renderer projects from. */
@@ -202,8 +220,8 @@ class Player : Entity, Looks, Survives, Inventory {
     }
 
     /**
-     * Is the eye below sea level (so the player is submerged)?
-     * @return true when the eye height is under the sea level
+     * Is the eye's own voxel water (so the player is submerged)?
+     * @return true when the eye is in water, at any altitude
      */
     pub(crate) fn isUnderwater(self) : bool {
         return self.headInWater;
@@ -312,8 +330,12 @@ class Player : Entity, Looks, Survives, Inventory {
         if (!self.collidesAt(world, vec3(self.pos.x, self.pos.y, self.pos.z + dz))) {
             self.pos.z += dz;
         }
-        if (up) {
-            self.pos.y += Motion::FLY_VERT_SPEED;
+        // Climbing into a ceiling stops at it. The "don't sink" lift below is
+        // for the floor: left to it, a body pushed up into a roof was lifted
+        // onto the roof's top — through a ceiling of any thickness.
+        const climb : f64 = self.pos.y + Motion::FLY_VERT_SPEED;
+        if (up && !self.collidesAt(world, vec3(self.pos.x, climb, self.pos.z))) {
+            self.pos.y = climb;
         }
         if (down) {
             self.pos.y -= Motion::FLY_VERT_SPEED;
