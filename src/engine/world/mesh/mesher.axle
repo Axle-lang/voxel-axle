@@ -26,12 +26,15 @@ use crate::engine::block::box::{ boxOf };
  * renderer cuts a run wherever the shadow varies along it, so the bound here is
  * about the mesh alone — how long a face may be before the merge stops paying,
  * and how much surface one entry in the baked light arrays may stand for.
+ * `FaceMesh.fform` stores a run in three bits, so it can be no more than 8.
  */
 const MESH_MAX_RUN : i32 = 8;
 use crate::engine::world::seams::{ ChannelLevels };
 use crate::engine::world::voxstore::VoxStore;
 use crate::engine::world::light::engine::{ LightEngine };
-use crate::engine::world::mesh::meshbuf::{ FaceMesh, TorchField };
+use crate::engine::world::mesh::meshbuf::{
+    FaceMesh, TorchField, packXZ, packForm, faceKind, faceRun,
+};
 use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topSteps };
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
@@ -121,14 +124,12 @@ class ChunkMesher : Mesher {
 
         self.faces = FaceMesh {
             fcount: malloc<i16>(slots),
-            fx: malloc<i8>(faceCap),
+            fxz: malloc<i8>(faceCap),
             fy: malloc<i8>(faceCap),
-            fz: malloc<i8>(faceCap),
             ftile: malloc<i16>(faceCap),
-            frun: malloc<i8>(faceCap),
+            fform: malloc<i8>(faceCap),
             flight: Mem::take((faceCap as i64) * 8),
             fao: Mem::take(faceCap as i64),
-            fkind: malloc<i8>(faceCap),
             ftop: malloc<i16>(faceCap * 4),
             fflow: malloc<i8>(faceCap * 2),
         };
@@ -205,19 +206,16 @@ class ChunkMesher : Mesher {
 
         const local : IVec3 = c.local;
         const i : i32 = c.slot * World::MAX_FACES_PER_CHUNK + fc;
-        // Chunk-local x/z and world y, a byte each: every reader has the slot,
-        // and the slot has the origin. Four bytes for a number under sixteen
-        // was most of what the face arrays weighed.
-        self.faces.fx[i] = local.x as i8;
+        // Chunk-local x and z in a byte, and world y in another: every reader
+        // has the slot, and the slot has the origin.
+        self.faces.fxz[i] = packXZ(local.x, local.z);
         self.faces.fy[i] = local.y as i8;
-        self.faces.fz[i] = local.z as i8;
 
         // Pack the face direction (0..5) and atlas tile (< 256) into one slot.
         // renderFace unpacks dir = ftile / 256, tile = ftile % 256.
         const di : i32 = dir as i32;
         self.faces.ftile[i] = (di * 256 + tile) as i16;
-        self.faces.frun[i] = 1 as i8;
-        self.faces.fkind[i] = FaceKind::Solid as i8;
+        self.faces.fform[i] = packForm(FaceKind::Solid as i32, 1);
         self.setTops(i, di, 1.0);
         self.faces.fflow[i * 2] = 0 as i8;
         self.faces.fflow[i * 2 + 1] = 0 as i8;
@@ -234,7 +232,7 @@ class ChunkMesher : Mesher {
             if (head >= 0
                 && self.runWAt[k] == local.z - 1
                 && self.canMerge(head, i)) {
-                self.faces.frun[head] = ((self.faces.frun[head] as i32) + 1) as i8;
+                self.lengthen(head);
                 self.runWAt[k] = local.z;
                 return;
             }
@@ -247,7 +245,7 @@ class ChunkMesher : Mesher {
             if (head >= 0
                 && self.runUAt[k] == local.x - 1
                 && self.canMerge(head, i)) {
-                self.faces.frun[head] = ((self.faces.frun[head] as i32) + 1) as i8;
+                self.lengthen(head);
                 self.runUAt[k] = local.x;
                 return;
             }
@@ -255,6 +253,23 @@ class ChunkMesher : Mesher {
             self.runUAt[k] = local.x;
         }
         self.faces.fcount[c.slot] = (fc + 1) as i16;
+    }
+
+    /**
+     * One more cell on the run headed by `head`.
+     * @param head  the run's face
+     */
+    fn lengthen(mut self, head : i32) : void {
+        self.faces.fform[head] = packForm(faceKind(self.faces, head), faceRun(self.faces, head) + 1);
+    }
+
+    /**
+     * Say what a face stands on, keeping its run.
+     * @param i     the face
+     * @param kind  its kind
+     */
+    fn setKind(mut self, i : i32, own kind : FaceKind) : void {
+        self.faces.fform[i] = packForm(kind as i32, faceRun(self.faces, i));
     }
 
     /**
@@ -279,7 +294,7 @@ class ChunkMesher : Mesher {
      */
     fn canMerge(self, a : i32, b : i32) : bool {
         if (self.faces.ftile[a] != self.faces.ftile[b]
-            || (self.faces.frun[a] as i32) >= MESH_MAX_RUN) {
+            || faceRun(self.faces, a) >= MESH_MAX_RUN) {
             return false;
         }
 
@@ -485,7 +500,7 @@ class ChunkMesher : Mesher {
             return;
         }
 
-        self.faces.fkind[i] = FaceKind::Water as i8;
+        self.setKind(i, FaceKind::Water);
         for (k of 0..4) {
             const b : i32 = (di * 4 + k) * 3;
             if (self.geom.coff[b + 1] > 0) {
@@ -527,7 +542,7 @@ class ChunkMesher : Mesher {
             return;
         }
 
-        self.faces.fkind[i] = FaceKind::Partial as i8;
+        self.setKind(i, FaceKind::Partial);
         self.setTops(i, di, boxH);
     }
 

@@ -13,25 +13,85 @@
  */
 struct FaceMesh {
     pub(crate) fcount : i16[], // face count per slot — under MAX_FACES_PER_CHUNK
-    pub(crate) fx : i8[],      // the face's cell, CHUNK-LOCAL x/z (0..15) and world y:
-    pub(crate) fy : i8[],      // a byte each. The slot's origin is what makes it a
-    pub(crate) fz : i8[],      // world cell, and every reader has the slot to hand
+    pub(crate) fxz : i8[],     // the face's cell, CHUNK-LOCAL x and z (0..15 each), a
+                               // nibble each: read with `faceX` / `faceZ`. The slot's
+                               // origin makes it a world cell
+    pub(crate) fy : i8[],      // ... and its world y
     pub(crate) ftile : i16[],  // packs (dir << 8) | tile — see ChunkMesher.addFace
-    pub(crate) frun : i8[],    // cells this face spans along its merge axis; 1 = one
-                               // block. The greedy merge writes it, renderFace
-                               // stretches the quad and tiles the texture by it.
+    pub(crate) fform : i8[],   // what the face stands on and how far it runs: `faceKind`
+                               // (a FaceKind, 2 bits) and `faceRun` (the cells it spans
+                               // along its merge axis, 1..MESH_MAX_RUN, 3 bits)
     pub(crate) flight : i64,   // per-face SMOOTH light: 8 bytes/face, TWO per corner —
                                // (sky << 4) | blockR, then (blockG << 4) | blockB. Four
                                // nibbles, because block light has a colour and the sky
                                // does not (Minecraft-style smooth light, per channel)
     pub(crate) fao : i64,      // per-face ambient occlusion: ONE byte/face, two bits
                                // per corner (0..3), corner k at bits 2k..2k+1
-    pub(crate) fkind : i8[],   // FaceKind: solid, water or partial (facegeom)
     pub(crate) ftop : i16[],   // 4/face: corner k's height above the face's cell,
                                // in FaceTop::STEPS — 0 or full for a unit quad, the
                                // sloped water surface, a partial block's box top
     pub(crate) fflow : i8[],   // 2/face: a water face's flow, the level difference
                                // across it along x then z (0 for the rest)
+}
+
+/**
+ * A face's chunk-local cell column, as `FaceMesh.fxz` holds it.
+ * @param x  the local x, 0..15
+ * @param z  the local z, 0..15
+ * @return the packed byte
+ */
+fn packXZ(x : i32, z : i32) : i8 {
+    return (x | (z << 4)) as i8;
+}
+
+/**
+ * A face's local x.
+ * @param m  the faces
+ * @param i  the face
+ * @return 0..15
+ */
+fn faceX(m : FaceMesh, i : i32) : i32 {
+    return (m.fxz[i] as i32) & 15;
+}
+
+/**
+ * A face's local z.
+ * @param m  the faces
+ * @param i  the face
+ * @return 0..15
+ */
+fn faceZ(m : FaceMesh, i : i32) : i32 {
+    return ((m.fxz[i] as i32) >> 4) & 15;
+}
+
+/**
+ * A face's kind and run, as `FaceMesh.fform` holds them.
+ * @param kind  a `FaceKind` discriminant, 0..2
+ * @param run   the cells it spans, 1..8
+ * @return the packed byte
+ */
+fn packForm(kind : i32, run : i32) : i8 {
+    return (kind | ((run - 1) << 2)) as i8;
+}
+
+/**
+ * What a face stands on.
+ * @param m  the faces
+ * @param i  the face
+ * @return its `FaceKind` discriminant
+ */
+fn faceKind(m : FaceMesh, i : i32) : i32 {
+    return (m.fform[i] as i32) & 3;
+}
+
+/**
+ * How many cells a face spans along its merge axis.
+ * @param m  the faces
+ * @param i  the face
+ * @return 1..8
+ */
+fn faceRun(m : FaceMesh, i : i32) : i32 {
+    return (((m.fform[i] as i32) >> 2) & 7) + 1;
 }
 
 /** Per-slot torch posts (drawn as thin columns, not cubes): world x/y/z + count. */

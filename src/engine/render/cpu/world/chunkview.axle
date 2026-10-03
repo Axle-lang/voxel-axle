@@ -19,17 +19,17 @@ use crate::engine::render::cpu::raster::triangle::{
 };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, Band };
 use crate::engine::render::cpu::raster::mip::{ MipAtlas };
-use crate::engine::render::view::camera::{ Camera, Lens, Projected };
+use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::shade::facelight::{ FaceLight };
 use crate::engine::shade::gamma::{ Gamma, LinRgb };
 use crate::engine::render::cpu::sky::fogtables::{ FogTable };
 use crate::engine::shade::cornerlight::{ CornerLight, skyTint, sunSheen };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::world::seams::{ CornerProbe, CornerSample, TerrainView, SlotChunk };
-use crate::engine::world::mesh::meshbuf::{ FaceMesh };
+use crate::engine::world::mesh::meshbuf::{ FaceMesh, faceX, faceZ, faceKind, faceRun };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3, ivec3 };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
-use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topHeight };
+use crate::engine::world::mesh::facegeom::{ FaceTable, FaceKind, topHeight, cornerProbe };
 use crate::configs::face::{ FaceDir };
 use crate::configs::light::{ Light };
 use crate::configs::render::{ Render };
@@ -390,59 +390,6 @@ class ChunkRenderer {
     // ── Per-face baked-light reads through the split light seams ──
 
     /**
-     * Where one corner of a face samples the light volumes: its own air cell,
-     * and the two in-plane steps to the other three cells meeting there.
-     *
-     * The corner's cell is the face's probe cell advanced to the far end of the
-     * merged run when the corner sits at that end — a greedy quad is up to
-     * `MESH_MAX_RUN` cells long, and its far corner has to read the light where
-     * it actually is. The tangents are the corner's own ±1 block offsets, taken
-     * on the two axes that are not the face normal.
-     * @param cell     the face's air probe cell (its origin corner)
-     * @param off      the corner's block offset within the face (0 or 1 per axis)
-     * @param naxis    the face normal axis (0 = X, 1 = Y, 2 = Z)
-     * @param advX     cells to the far end of the run along X (0 if the run is not)
-     * @param advZ     cells to the far end of the run along Z (0 if the run is not)
-     * @return the corner's probe
-     */
-    fn cornerProbe(
-        self,
-        cell : IVec3,
-        off : IVec3,
-        naxis : i32,
-        advX : i32,
-        advZ : i32
-    ) : CornerProbe {
-        const sgx : i32 = off.x * 2 - 1;
-        const sgy : i32 = off.y * 2 - 1;
-        const sgz : i32 = off.z * 2 - 1;
-        const base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
-        match naxis {
-            0 => {
-                return CornerProbe {
-                    base,
-                    t1: ivec3(0, sgy, 0),
-                    t2: ivec3(0, 0, sgz),
-                };
-            }
-            1 => {
-                return CornerProbe {
-                    base,
-                    t1: ivec3(sgx, 0, 0),
-                    t2: ivec3(0, 0, sgz),
-                };
-            }
-            _ => {
-                return CornerProbe {
-                    base,
-                    t1: ivec3(sgx, 0, 0),
-                    t2: ivec3(0, sgy, 0),
-                };
-            }
-        }
-    }
-
-    /**
      * The ambient-sky occlusion factor of a corner sample: the baked
      * hemispherical sky access (ray-traced AO) mapped into [`Light::AO_SKY_MIN`, 1], so
      * valleys / recesses / canopy darken the ambient sky light.
@@ -487,15 +434,15 @@ class ChunkRenderer {
         cam : Camera,
         phase : f64
     ) : void {
-        const x : i32 = sv.ox + (sv.faces.fx[idx] as i32);
+        const x : i32 = sv.ox + faceX(sv.faces, idx);
         const y : i32 = sv.faces.fy[idx] as i32;
-        const z : i32 = sv.oz + (sv.faces.fz[idx] as i32);
+        const z : i32 = sv.oz + faceZ(sv.faces, idx);
 
         // Unpack the direction and atlas tile from the packed ftile slot, and
         // what the face's corners stand on.
         const packed : i32 = sv.faces.ftile[idx] as i32;
         const dir : FaceDir = faceDirFrom(packed / 256);
-        const kind : i32 = sv.faces.fkind[idx] as i32;
+        const kind : i32 = faceKind(sv.faces, idx);
         const isWaterFace : bool = kind == (FaceKind::Water as i32);
         const isPartialFace : bool = kind == (FaceKind::Partial as i32);
 
@@ -508,7 +455,7 @@ class ChunkRenderer {
         // The extent is wanted whole HERE, for the culling centre and the
         // distance cut, which measure the surface that is actually there; the
         // span loop below is what decides how many quads it is drawn as.
-        const run : i32 = sv.faces.frun[idx] as i32;
+        const run : i32 = faceRun(sv.faces, idx);
         const runF : f64 = run as f64;
         let runX : f64 = 1.0;
         let runZ : f64 = 1.0;
@@ -769,7 +716,7 @@ class ChunkRenderer {
             // three cells meeting there. On a merged quad that cell is the far
             // end of the run, not the face's origin — a term sampled at the
             // origin would be spread over eight blocks of surface.
-            const probe : CornerProbe = self.cornerProbe(
+            const probe : CornerProbe = cornerProbe(
                 sp.probe,
                 ivec3(oxv, oyv, ozv),
                 fs.naxis,

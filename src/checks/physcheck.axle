@@ -21,6 +21,7 @@
 // assertion here.
 
 use crate::engine::world::chunks::ChunkManager;
+use crate::engine::world::mesh::meshbuf::{ faceX, faceZ };
 use crate::game::world::terraingen::TerrainGen;
 use crate::engine::entity::player::Player;
 use crate::engine::math::vec3::{ IVec3, ivec3 };
@@ -614,9 +615,9 @@ fn ringInterior(man : ChunkManager, slot : i32) : bool {
 fn faceCell(man : ChunkManager, i : i32) : IVec3 {
     const slot : i32 = i / World::MAX_FACES_PER_CHUNK;
     return ivec3(
-        man.cols.cxs[slot] * World::CHUNK_SIZE + (man.mesher.faces.fx[i] as i32),
+        man.cols.cxs[slot] * World::CHUNK_SIZE + faceX(man.mesher.faces, i),
         man.mesher.faces.fy[i] as i32,
-        man.cols.czs[slot] * World::CHUNK_SIZE + (man.mesher.faces.fz[i] as i32)
+        man.cols.czs[slot] * World::CHUNK_SIZE + faceZ(man.mesher.faces, i)
     );
 }
 

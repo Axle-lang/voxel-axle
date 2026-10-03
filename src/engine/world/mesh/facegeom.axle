@@ -6,9 +6,13 @@
 // raster and the GPU mesh build.
 //
 // Directions are `FaceDir` discriminants: 0 +X, 1 -X, 2 top, 3 bottom, 4 +Z,
-// 5 -Z. Corners run counter-clockwise seen from outside the face; a corner's
+// 5 -Z. Corners run around the face, but not all six the same way round: a
+// backend that culls by winding orients each direction itself. A corner's
 // offset is 0 or 1 per axis from the face's block, and its texture u / v is 0
 // or 1 (v = 0 at the top of the tile).
+
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::world::seams::{ CornerProbe };
 
 /** The steps a stored corner height counts in: see `topSteps`. */
 const TOP_STEPS : f64 = 480.0;
@@ -77,4 +81,51 @@ fn topSteps(h : f64) : i32 {
  */
 fn topHeight(steps : i32) : f64 {
     return (steps as f64) / TOP_STEPS;
+}
+
+/**
+ * Where one corner of a face samples the light volumes: its own air cell, and the
+ * two in-plane steps to the other three cells meeting there.
+ *
+ * The corner's cell is the face's probe cell advanced to the far end of the merged
+ * run when the corner sits at that end — a greedy quad is up to `MESH_MAX_RUN` cells
+ * long, and its far corner has to read the light where it actually is. The tangents
+ * are the corner's own ±1 block offsets, taken on the two axes that are not the face
+ * normal. Every renderer that turns a face back into corners asks this, so they all
+ * light a corner from the same cells.
+ * @param cell   the face's air probe cell (its origin corner)
+ * @param off    the corner's block offset within the face (0 or 1 per axis)
+ * @param naxis  the face normal axis (0 = X, 1 = Y, 2 = Z)
+ * @param advX   cells to the far end of the run along X (0 if the run is not)
+ * @param advZ   cells to the far end of the run along Z (0 if the run is not)
+ * @return the corner's probe
+ */
+fn cornerProbe(cell : IVec3, off : IVec3, naxis : i32, advX : i32, advZ : i32) : CornerProbe {
+    const sgx : i32 = off.x * 2 - 1;
+    const sgy : i32 = off.y * 2 - 1;
+    const sgz : i32 = off.z * 2 - 1;
+    const base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
+    match naxis {
+        0 => {
+            return CornerProbe {
+                base,
+                t1: ivec3(0, sgy, 0),
+                t2: ivec3(0, 0, sgz),
+            };
+        }
+        1 => {
+            return CornerProbe {
+                base,
+                t1: ivec3(sgx, 0, 0),
+                t2: ivec3(0, 0, sgz),
+            };
+        }
+        _ => {
+            return CornerProbe {
+                base,
+                t1: ivec3(sgx, 0, 0),
+                t2: ivec3(0, sgy, 0),
+            };
+        }
+    }
 }

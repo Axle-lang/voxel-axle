@@ -27,16 +27,19 @@ use crate::configs::world::{ World };
 /**
  * The voxel field, its level field and the per-slot face-Y watermark.
  *
- * The level is one byte a voxel beside the id — a quarter more memory
+ * The level is half a byte a voxel beside the id — an eighth more memory
  * for the field, and the thing that makes a partial block a piece of
- * WORLD DATA rather than a function of where it happens to sit. A
+ * WORLD DATA rather than a function of where it happens to sit. Half a
+ * byte because a level is 0 or 1..`BLOCK_LEVELS` (8): `setVoxLocal` writes
+ * 0 and every other write goes through `levelOfHeight`, which clamps. A
  * height derived from the coordinates cannot be placed, cannot be dug
  * a layer at a time, and cannot differ between two cells the noise
  * happens to agree about.
  */
 class VoxData {
     pub(crate) vox : Block[],   // block field: slots × chunkSize² × worldHeight
-    pub(crate) lvl : i8[],      // per-voxel LEVEL, same layout; 0 = the id's default box
+    pub(crate) lvl : i8[],      // per-voxel LEVEL, two to a byte (even cell low nibble);
+                                // 0 = the id's default box
     pub(crate) maxFY : i16[],   // per-slot highest-face Y watermark (bounds the mesh/light
                                 // scan) — a level of the world, so under World::HEIGHT
 
@@ -47,7 +50,7 @@ class VoxData {
     constructor(slots : i32) {
         const s : i32 = World::CHUNK_SIZE;
         self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
-        self.lvl = malloc<i8>(slots * s * s * World::HEIGHT);
+        self.lvl = malloc<i8>((slots * s * s * World::HEIGHT + 1) / 2);
         self.maxFY = malloc<i16>(slots);
     }
 }
@@ -105,7 +108,7 @@ class VoxStore {
         // A write that says nothing about the level clears it, so a cell
         // never inherits the level of whatever used to be there. Zero is
         // "the id's own default box".
-        self.data.lvl[at] = 0;
+        self.putLevel(at, 0);
     }
 
     /**
@@ -129,7 +132,7 @@ class VoxStore {
     ) : void {
         const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         self.data.vox[at] = id;
-        self.data.lvl[at] = level as i8;
+        self.putLevel(at, level);
     }
 
     /**
@@ -142,7 +145,21 @@ class VoxStore {
         if (local.y < 0 || local.y >= World::HEIGHT) {
             return 0;
         }
-        return self.data.lvl[self.voxIdx(slot, local.x, local.y, local.z)] as i32;
+        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        return ((self.data.lvl[at >> 1] as i32) >> ((at & 1) * 4)) & 15;
+    }
+
+    /**
+     * Store a cell's level in its half of the byte it shares with its neighbour.
+     * Only the thread that edits the world writes levels, so the byte's other half
+     * is never written under it.
+     * @param at     the cell's flat index
+     * @param level  0..15
+     */
+    fn putLevel(mut self, at : i32, level : i32) : void {
+        const shift : i32 = (at & 1) * 4;
+        const kept : i32 = (self.data.lvl[at >> 1] as i32) & (0xF0 >> shift);
+        self.data.lvl[at >> 1] = (kept | ((level & 15) << shift)) as i8;
     }
 
     /**
