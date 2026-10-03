@@ -2,17 +2,25 @@
 // draws it.
 //
 // Everything a frame reads from the game is read here: the hour's light, the
-// camera, every creature's boxes and the light it stands in, the torches in
-// view, the aimed block's outline. A backend is handed the result and reads
-// nothing else of the game's, so what is on screen is the same decision
-// whichever backend paints it.
+// camera, the cloud deck, every creature's boxes and the light it stands in,
+// the torches in view, the aimed block's outline. A backend is handed the
+// result and reads nothing else of the game's, so what is on screen is the
+// same decision whichever backend paints it.
+//
+// The deck is the one piece of state a frame moves on: it is marched a slice
+// a frame, and how fast depends on whether the sky can be seen. Deciding that
+// here, from the view and the world rather than from what a backend painted,
+// is what keeps the deck the same whoever draws it.
 
 use smalt::Mem;
+use std::time::monotonicNanos;
 use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::engine::shade::daymodel::{ DayLighting, DayState };
 use crate::engine::shade::gamma::{ LinRgb };
 use crate::engine::render::view::camera::{ Camera, Lens, View, lensFor, cameraOf };
 use crate::engine::render::view::frustum::{ ViewCone, viewConeFor, chunkVisible };
+use crate::engine::sky::cloud::{ cloudFieldAt };
+use crate::engine::sky::cloudsky::{ CloudSky };
 use crate::engine::render::frame::framedesc::{
     FrameDesc, FrameClock, MobBox, AimBox, HudState,
 };
@@ -48,6 +56,9 @@ struct FrameRequest {
 
 class FrameBuilder {
     day : DayLighting,  // the hour's light, and the brightness curve
+    clouds : CloudSky,  // the cloud deck, marched a slice a frame
+    marchUs : i64,      // microseconds the deck's march has taken, over the run
+    builds : i64,       // frames built
     lens : Lens,        // the target's projection; follows the viewport
     model : BoxModel,   // scratch: the boxes the creature being read described
     boxes : MobBox[],
@@ -58,6 +69,9 @@ class FrameBuilder {
     /** A builder for the default render size, with room for every box and torch. */
     constructor() {
         self.day = new DayLighting();
+        self.clouds = new CloudSky();
+        self.marchUs = 0;
+        self.builds = 0;
         self.lens = lensFor(Screen::RENDER_W, Screen::RENDER_H);
         self.model = new BoxModel();
         self.boxes = malloc<MobBox>(Mobs::CAP * MODEL_MAX_PARTS);
@@ -84,6 +98,13 @@ class FrameBuilder {
     pub(crate) fn build(mut self, src : FrameSource, req : FrameRequest) : FrameDesc {
         const ds : DayState = self.day.update(req.clock.dayTime);
         const cam : Camera = cameraOf(req.view, self.lens);
+
+        const t : i64 = monotonicNanos();
+        const inView : bool = self.skyInView(src.man, cam, req.clock);
+        self.clouds.march(cloudFieldAt(req.clock.seconds), ds, cam.eye, inView);
+        self.marchUs += (monotonicNanos() - t) / 1000;
+        self.builds++;
+
         self.readMobs(src, ds);
         self.readTorches(src.man, cam);
 
@@ -97,6 +118,7 @@ class FrameBuilder {
             clock: req.clock,
             day: ds,
             lcurve: self.day.curve(),
+            clouds: self.clouds.dome(),
             boxes: self.boxes,
             boxCount: self.boxCount,
             torches: self.torches,
@@ -108,6 +130,48 @@ class FrameBuilder {
             },
             hud: req.hud,
         };
+    }
+
+    /**
+     * Whether any of the sky can be in this frame: not from under water, not
+     * from a cell the sky never reaches (a cave), and not when the top edge of
+     * the view points below the horizon (looking at the ground).
+     * @param man    the world, for the sky's reach at the eye
+     * @param cam    this frame's camera
+     * @param clock  the frame's clocks, for whether the eye is submerged
+     * @return false only when no sky pixel is possible
+     */
+    fn skyInView(self, man : ChunkManager, cam : Camera, clock : FrameClock) : bool {
+        if (clock.underwater) {
+            return false;
+        }
+
+        const eye : IVec3 = ivec3(
+            cam.eye.x.floorToInt() as i32,
+            cam.eye.y.floorToInt() as i32,
+            cam.eye.z.floorToInt() as i32
+        );
+        if (man.skyaccessGet(eye) == 0) {
+            return false;
+        }
+
+        // The top edge is the forward ray pitched up by half the vertical field
+        // of view; its height is sin(pitch + half).
+        const edge : f64 = (cam.lens.focal * cam.lens.focal + cam.lens.hh * cam.lens.hh).sqrt();
+        const topY : f64 = (cam.sinp * cam.lens.focal + cam.cosp * cam.lens.hh) / edge;
+        return topY > 0.0;
+    }
+
+    /**
+     * Print what deciding the frames cost, averaged over the run: the deck's
+     * march is the part of a frame no backend draws.
+     */
+    pub(crate) fn report(self) : void {
+        if (self.builds == 0) {
+            return;
+        }
+        Console::println("  frame (us): cloud march=${self.marchUs / self.builds}"
+            + "  over ${self.builds} builds");
     }
 
     /**

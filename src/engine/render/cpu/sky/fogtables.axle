@@ -12,7 +12,7 @@ use smalt::Mem;
 use crate::engine::sky::viewray::{ ViewRay };
 use crate::engine::sky::atmosphere::{ SkyColour, SkyDome };
 use crate::engine::render::cpu::sky::viewrays::{ ViewRays, ViewRow };
-use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSample };
+use crate::engine::sky::clouddome::{ CloudDome, CloudSample };
 use crate::configs::render::{ Render };
 
 /**

@@ -9,12 +9,12 @@
 // clouds, refilled the fog tables, ordered the gradient and the discs, and held
 // the pieces in the right order by hand.
 //
-// So this owns them and answers for them. `update` moves the sky on by one
-// frame; `draw` paints it; `fog` and `clouds` hand out the two views the world
-// pass needs. What the ground's shadow needs — the cloud's transmittance, per
-// column — is the light thread's business and stays with `cloudlight`, because
-// it is baked on that thread and read by `kworld`, and routing it through here
-// would only put a render-frame object in a path that has no frames.
+// So this owns the painting and answers for it. `update` builds a frame's
+// colour field and fog from the cloud deck the frame hands it; `draw` paints
+// them; `fog` hands the world pass the fog. The deck itself is not marched
+// here: it is state that moves on frame by frame, so it belongs to the frame
+// (frame::framebuilder advances `sky::cloudsky`) and is the same deck whichever
+// backend paints it.
 //
 //   atmosphere   what colour the sky is in a direction, and the fog that follows
 //   cloud        where the water is: a 3-D density field
@@ -22,10 +22,10 @@
 //   clouddome    …and on the way to the eye, as a direction-indexed table
 //   backdrop     the gradient, the halo, the sun and the moon
 //
-// The ordering rules it enforces: the cloud table is marched BEFORE the fog
-// grid and the gradient, because both composite it; the discs are drawn after
-// the gradient but read the same table, so a cloud crossing the sun hides it;
-// and the whole paint happens AFTER the world, into the pixels it left empty.
+// The ordering rules it enforces: the fog grid and the gradient both composite
+// the deck; the discs are drawn after the gradient but read the same table, so
+// a cloud crossing the sun hides it; and the whole paint happens AFTER the
+// world, into the pixels it left empty.
 
 use smalt::WorkerPool;
 use std::time::monotonicNanos;
@@ -35,19 +35,16 @@ use crate::engine::render::cpu::sky::viewrays::{ ViewRays };
 use crate::engine::render::cpu::sky::backdrop::{
     SkyPaint, SkyPaintFrame, SKY_BANDS, drawCelestial
 };
-use crate::engine::sky::cloud::{ CloudField, cloudFieldAt };
-use crate::engine::render::cpu::sky::clouddome::{ CloudDome };
-use crate::engine::render::cpu::sky::cloudsky::{ CloudSky };
+use crate::engine::sky::clouddome::{ CloudDome };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::render::view::camera::{ Camera };
 
 /**
- * The sky, for one frame: the atmosphere's colour field, the cloud deck, and the
- * tables the world pass reads out of them.
+ * The sky, for one frame: the atmosphere's colour field, and the tables the
+ * world pass reads out of it and the frame's cloud deck.
  */
 class SkyEngine {
-    cloudSky : CloudSky,   // the cloud deck as a direction table (owns its buffers)
     fogT : FogTables,      // the screen-space sky grid + the depth curve
     dome : SkyDome,        // this frame's colour field
     rays : ViewRays,       // …and how a pixel becomes a direction in it
@@ -55,13 +52,7 @@ class SkyEngine {
     pool : Shared<WorkerPool>, // the render crew, co-owned with the Renderer
     paintPass : i32,       // the sky paint's handle into that pool
     paintNow : Shared<SkyPaintFrame[]>, // one slot: what the paint is to draw this frame
-    paintSeen : Shared<i32[]>, // how much sky each band found, one slot per band. The
-                           // cloud march is priced off the total: a deck no pixel
-                           // of the window can reach is not worth marching at full
-                           // rate, and looking at the floor of a hole was paying
-                           // for all of it
-    skyPixels : i32,       // ...that total, from the frame just drawn
-    marchUs : i64,         // microseconds the cloud march + fog build have taken, over the run
+    fogUs : i64,           // microseconds the fog build has taken, over the run
     drawUs : i64,          // ...and the sky paint
 
     /**
@@ -69,7 +60,6 @@ class SkyEngine {
      * @param pool  the render crew the sky paint runs its row bands on
      */
     constructor(own pool : Shared<WorkerPool>) {
-        self.cloudSky = new CloudSky();
         self.fogT = new FogTables();
         self.dome = SkyDome {
             zenR: 0.0,
@@ -106,38 +96,28 @@ class SkyEngine {
 
         self.pool = pool;
         self.paintNow = Shared::wrap(malloc<SkyPaintFrame>(1));
-        self.paintSeen = Shared::wrap(malloc<i32>(SKY_BANDS));
-        for (i of 0..SKY_BANDS) {
-            self.paintSeen[i] = 0;
-        }
-
-        // Until the first paint has run, assume the sky is in full view: the
-        // deck has to be built before anything can decide it is not worth it.
-        self.skyPixels = 0x7FFFFFFF;
-        self.paintPass = self.pool.attach(new SkyPaint(self.paintNow, self.paintSeen));
-        self.marchUs = 0;
+        self.paintPass = self.pool.attach(new SkyPaint(self.paintNow));
+        self.fogUs = 0;
         self.drawUs = 0;
     }
 
     /**
-     * Move the sky on by one frame: the hour's colour field, the camera's view
-     * rays, a slice of the cloud table and the fog tables that read them.
+     * Ready the sky for one frame: the hour's colour field, the camera's view
+     * rays, and the fog tables that read them and the deck.
      *
-     * The order matters and is the reason this is one call. The dome is the
-     * atmosphere's answer for this hour; the fog grid samples that same dome, so
-     * distant terrain dissolves into the sky actually painted behind it; and the
-     * cloud table is marched here rather than at draw time so the god-rays, which
-     * run after the world, can read the same deck the sky was painted with.
-     * @param ds         the day/night state
-     * @param cam        the frame's camera (orientation, eye height and lens)
-     * @param worldTime  seconds since the run began, for the wind
-     * @param fb         the render target, for the fog grid's size
+     * The dome is the atmosphere's answer for this hour; the fog grid samples
+     * that same dome, so distant terrain dissolves into the sky actually painted
+     * behind it.
+     * @param ds     the day/night state
+     * @param cam    the frame's camera (orientation, eye height and lens)
+     * @param deck   the frame's cloud deck
+     * @param fb     the render target, for the fog grid's size
      */
     pub(crate) fn update(
         mut self,
         ds : DayState,
         cam : Camera,
-        worldTime : f64,
+        deck : CloudDome,
         fb : FrameBuf
     ) : void {
         const t : i64 = monotonicNanos();
@@ -152,16 +132,14 @@ class SkyEngine {
             focal: cam.lens.focal,
         };
 
-        const field : CloudField = cloudFieldAt(worldTime);
-        self.cloudSky.march(field, ds, cam.eye, self.skyPixels);
         self.lastFog = self.fogT.build(
             self.dome,
             self.rays,
-            self.cloudSky.dome(),
+            deck,
             fb.w,
             fb.h
         );
-        self.marchUs += (monotonicNanos() - t) / 1000;
+        self.fogUs += (monotonicNanos() - t) / 1000;
     }
 
     /**
@@ -170,11 +148,11 @@ class SkyEngine {
      * hide. Called AFTER the world, mobs and torches — it reads their z.
      * @param ds    the day/night state
      * @param cam   the frame's camera
+     * @param deck  the frame's cloud deck
      * @param fb    the render target
      */
-    pub(crate) fn draw(mut self, ds : DayState, cam : Camera, fb : FrameBuf) : void {
+    pub(crate) fn draw(mut self, ds : DayState, cam : Camera, deck : CloudDome, fb : FrameBuf) : void {
         const t : i64 = monotonicNanos();
-        const deck : CloudDome = self.cloudSky.dome();
         self.paintNow[0] = SkyPaintFrame {
             dome: self.dome,
             rays: self.rays,
@@ -183,31 +161,15 @@ class SkyEngine {
         };
         self.pool.run(self.paintPass, SKY_BANDS);
         drawCelestial(ds, cam, fb, deck);
-
-        let seen : i32 = 0;
-        for (i of 0..SKY_BANDS) {
-            seen += self.paintSeen[i];
-        }
-        self.skyPixels = seen;
         self.drawUs += (monotonicNanos() - t) / 1000;
     }
 
     /**
-     * Record a frame in which no sky was visible at all — the eye is under
-     * water and nothing was painted. The march prices itself off the sky the
-     * last frame showed, and without this it kept the last count from above the
-     * surface and marched at full cost for a deck nobody could see.
-     */
-    pub(crate) fn hidden(mut self) : void {
-        self.skyPixels = 0;
-    }
-
-    /**
-     * Microseconds the cloud march and fog build have taken, accumulated over the run.
+     * Microseconds the fog build has taken, accumulated over the run.
      * @return the total, in microseconds
      */
-    pub(crate) fn marchMicros(self) : i64 {
-        return self.marchUs;
+    pub(crate) fn fogMicros(self) : i64 {
+        return self.fogUs;
     }
 
     /**
@@ -225,14 +187,5 @@ class SkyEngine {
      */
     pub(crate) fn fog(self) : FogTable {
         return self.lastFog;
-    }
-
-    /**
-     * The cloud deck as a direction table — read by the god-rays, which are made
-     * of the light the deck let past.
-     * @return the dome view
-     */
-    pub(crate) fn clouds(self) : CloudDome {
-        return self.cloudSky.dome();
     }
 }

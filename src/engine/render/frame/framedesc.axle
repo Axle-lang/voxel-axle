@@ -12,6 +12,7 @@
 use crate::engine::math::vec3::{ Vec3, IVec3 };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::shade::gamma::{ LinRgb };
+use crate::engine::sky::clouddome::{ CloudDome };
 use crate::engine::render::view::camera::{ Camera };
 use crate::engine::entity::model::{ BoxPart };
 use crate::configs::blocks::{ Block };
@@ -61,6 +62,7 @@ struct FrameDesc {
     pub(crate) clock : FrameClock,
     pub(crate) day : DayState,
     pub(crate) lcurve : i64,          // the brightness curve, 16 f64s by light level
+    pub(crate) clouds : CloudDome,    // the cloud deck as it stands this frame
     pub(crate) boxes : MobBox[],
     pub(crate) boxCount : i32,
     pub(crate) torches : IVec3[],     // the torch cells in visible chunks

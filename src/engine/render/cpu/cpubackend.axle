@@ -194,14 +194,14 @@ class CpuBackend : RenderBackend {
         const world = self.times.world / n;
         const fill = self.renderer.fillMicros() / n;
         const build = world - fill;
-        const skyMarch = self.renderer.skyMarchMicros() / n;
+        const skyFog = self.renderer.skyFogMicros() / n;
         const skyDraw = self.renderer.skyDrawMicros() / n;
 
         Console::println("  world = build ${build}us (6 workers)"
             + " + fill ${fill}us (12 bands)"
             + " over ${self.renderer.triCount()} tris");
         Console::println("  per frame (us): world=${world}"
-            + " sky=${skyMarch}+${skyDraw}"
+            + " sky=${skyFog}+${skyDraw}"
             + " rays=${self.times.rays / n}"
             + " bloom=${self.times.bloom / n}"
             + " blit=${self.times.blit / n}"

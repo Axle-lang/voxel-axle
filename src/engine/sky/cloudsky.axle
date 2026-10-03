@@ -49,7 +49,7 @@ use crate::engine::shade::gamma::{ LinRgb };
 use crate::engine::sky::viewray::{ ViewRay };
 use crate::engine::sky::cloud::{ CloudField };
 use crate::engine::shade::daymodel::{ DayState };
-use crate::engine::render::cpu::sky::clouddome::{
+use crate::engine::sky::clouddome::{
     SKY_N, CloudCell, CloudDome, DeckLight, TAB_SCALE, tabGet, tabPut,
 };
 use crate::configs::cloud::{ Cloud };
@@ -180,30 +180,30 @@ class CloudSky {
      * the whole table (the first time) or the next slice of it, chasing the last
      * completed march meanwhile.
      * The light is always taken — it is a handful of arithmetic and the ground's
-     * cloud shadow reads it. The MARCH is priced off how much sky the last frame
-     * actually painted: below `Cloud::HIDDEN_SKY_PIXELS` the deck steps one frame
-     * in `Cloud::HIDDEN_SLICE_EVERY` rather than every frame. It is the most
+     * cloud shadow reads it. The MARCH is priced off whether the frame can see
+     * the sky at all: when it cannot, the deck steps one frame in
+     * `Cloud::HIDDEN_SLICE_EVERY` rather than every frame. It is the most
      * expensive thing a frame does that has nothing to do with the view, and
      * looking at the floor of a hole was paying all of it.
-     * @param field    the cloud field, already drifted
-     * @param ds       the day/night state (which body, how strong, what colour)
-     * @param eye      the camera's position: its altitude decides where the band is
-     *                 crossed, and the deck is marched above where it stands
-     * @param skyPixels  how much sky the last frame's paint found
+     * @param field   the cloud field, already drifted
+     * @param ds      the day/night state (which body, how strong, what colour)
+     * @param eye     the camera's position: its altitude decides where the band is
+     *                crossed, and the deck is marched above where it stands
+     * @param inView  whether any of the sky can be in this frame
      */
     pub(crate) fn march(
         mut self,
         field : CloudField,
         ds : DayState,
         eye : Vec3,
-        skyPixels : i32
+        inView : bool
     ) : void {
         self.takeLight(ds);
         if (self.filled == 0) {
             self.fill(field, ds, eye);
             return;
         }
-        if (skyPixels < Cloud::HIDDEN_SKY_PIXELS) {
+        if (!inView) {
             self.skipped++;
             if (self.skipped < Cloud::HIDDEN_SLICE_EVERY) {
                 return;

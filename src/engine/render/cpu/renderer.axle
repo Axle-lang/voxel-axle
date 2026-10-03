@@ -25,7 +25,7 @@ use std::time::monotonicNanos;
 use smalt::Color;
 use crate::engine::render::cpu::bloom::Bloom;
 use crate::engine::sky::viewray::{ ViewRay };
-use crate::engine::render::cpu::sky::clouddome::{ CloudSample };
+use crate::engine::sky::clouddome::{ CloudSample };
 use crate::engine::render::cpu::sky::skyengine::{ SkyEngine };
 use crate::engine::render::cpu::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::engine::render::cpu::atlas::{ TextureAtlas };
@@ -385,7 +385,7 @@ class Renderer {
         // The sky moves on by a frame whether or not it is drawn: the fog reads
         // its colour field, and the world is fogged even from under water. It
         // is PAINTED later, by `drawSky`, into whatever the world leaves empty.
-        self.sky.update(frame.day, self.cam, frame.clock.seconds, fb);
+        self.sky.update(frame.day, self.cam, frame.clouds, fb);
 
         self.drawWorld(
             world,
@@ -409,18 +409,17 @@ class Renderer {
      */
     pub(crate) fn drawSky(mut self, frame : FrameDesc, fb : FrameBuf) : void {
         if (frame.clock.underwater) {
-            self.sky.hidden();
             return;
         }
-        self.sky.draw(frame.day, self.cam, fb);
+        self.sky.draw(frame.day, self.cam, frame.clouds, fb);
     }
 
     /**
-     * Microseconds the cloud march and fog build have taken, accumulated over the run.
-     * @return the accumulated march time in microseconds
+     * Microseconds the sky's fog build has taken, accumulated over the run.
+     * @return the accumulated fog time in microseconds
      */
-    pub(crate) fn skyMarchMicros(self) : i64 {
-        return self.sky.marchMicros();
+    pub(crate) fn skyFogMicros(self) : i64 {
+        return self.sky.fogMicros();
     }
 
     /**
@@ -471,7 +470,7 @@ class Renderer {
             dz: ds.sunZ,
             inv: 1.0,
         };
-        const sunCloud : CloudSample = self.sky.clouds().sample(sunRay);
+        const sunCloud : CloudSample = frame.clouds.sample(sunRay);
         const expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
         if (expo < 0.002) {
             return;

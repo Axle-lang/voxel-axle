@@ -33,8 +33,8 @@ use crate::engine::math::vec3::{ Vec3, vec3 };
 use crate::engine::shade::facelight::{ FaceLight, shadeLambert };
 use crate::engine::sky::cloud::{ CloudField, cloudFieldAt };
 use crate::engine::sky::cloudlight::{ sunThrough };
-use crate::engine::render::cpu::sky::cloudsky::{ CloudSky };
-use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudCell };
+use crate::engine::sky::cloudsky::{ CloudSky };
+use crate::engine::sky::clouddome::{ CloudDome, CloudCell };
 use crate::engine::shade::daymodel::{ DayState, computeDayState };
 use smalt::Mem;
 
@@ -67,13 +67,13 @@ const CLOUD_SHADOW_RANGE : f64 = 0.30;
 const SHADOW_MIN_RATIO : f64 = 4.0;
 
 /**
- * Sky pixels the coherence check tells the deck it has in view.
+ * Whether the coherence check tells the deck the sky is in view.
  *
  * The march throttles itself when nothing on screen can reach the sky, and this
  * check drives the deck with no screen at all. It is asserting what the fade
  * does over a full cycle, so it has to be the un-throttled cycle.
  */
-const FULL_SKY : i32 = 1000000;
+const FULL_SKY : bool = true;
 
 /** How deep the plugged-tunnel check sinks its shaft, and how far the branch runs. */
 const TUNNEL_DEPTH : i32 = 6;

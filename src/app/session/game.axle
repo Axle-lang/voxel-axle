@@ -349,6 +349,7 @@ class Game {
         const h = self.display.height();
         Console::println("wrote ${SNAP_PATH}  (${w}x${h} render, ${fps} fps)");
         self.backend[0].report();
+        self.frames.report();
     }
 
 

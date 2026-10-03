@@ -19,7 +19,7 @@ use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::sky::viewray::{ ViewRay };
 use crate::engine::sky::atmosphere::{ SkyColour, SkyDome };
 use crate::engine::render::cpu::sky::viewrays::{ ViewRays, ViewRow, packSky };
-use crate::engine::render::cpu::sky::clouddome::{ CloudDome, CloudSample };
+use crate::engine::sky::clouddome::{ CloudDome, CloudSample };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf };
 use crate::engine::render::view::camera::{ Camera, Projected };
 use crate::engine::math::vec3::{ Vec3, vec3 };
@@ -207,7 +207,6 @@ fn drawSky(
  * @param fb     the render target (framebuffer + size)
  * @param y0     first screen row (inclusive)
  * @param y1     last screen row (exclusive)
- * @return how many pixels of sky this band actually found
  */
 fn drawSkyGradientRows(
     dome : SkyDome,
@@ -216,12 +215,11 @@ fn drawSkyGradientRows(
     fb : FrameBuf,
     y0 : i32,
     y1 : i32
-) : i32 {
+) : void {
     const pixels : i64 = fb.pixels;
     const zbuf : i64 = fb.zbuf;
     const w : i32 = fb.w;
 
-    let seen : i32 = 0;
     for (py of y0..y1) {
         const vr : ViewRow = rays.row((py as f64) + 0.5);
         const row : i32 = py * w;
@@ -244,11 +242,9 @@ fn drawSkyGradientRows(
                     };
                 }
                 Mem::putWordOf(pixels, row + px, packSky(c, px, py));
-                seen++;
             }
         }
     }
-    return seen;
 }
 
 /** Row bands the sky is painted in. */
@@ -276,21 +272,13 @@ struct SkyPaintFrame {
  */
 pub(crate) class SkyPaint : Job {
     now : Shared<SkyPaintFrame[]>, // one slot: what this frame paints
-    // How much sky each band found, one slot per band so no two workers write
-    // the same word and no atomic is needed. It is the only thing the frame
-    // learns about how much of the window the sky actually reaches — and the
-    // cloud march is priced off it, because a deck nobody can see is a deck not
-    // worth marching at full rate.
-    seen : Shared<i32[]>,
 
     /**
-     * Bind the pass to the slots it shares with the engine.
-     * @param now   the one-slot frame the engine publishes into
-     * @param seen  the per-band tally the engine reads back, one slot per band
+     * Bind the pass to the slot it shares with the engine.
+     * @param now  the one-slot frame the engine publishes into
      */
-    constructor(own now : Shared<SkyPaintFrame[]>, own seen : Shared<i32[]>) {
+    constructor(own now : Shared<SkyPaintFrame[]>) {
         self.now = now;
-        self.seen = seen;
     }
 
     /**
@@ -303,7 +291,7 @@ pub(crate) class SkyPaint : Job {
         const band : i32 = (f.fb.h + shares - 1) / shares;
         const y0 : i32 = (band * share).min(f.fb.h);
         const y1 : i32 = (band * (share + 1)).min(f.fb.h);
-        self.seen[share] = drawSkyGradientRows(
+        drawSkyGradientRows(
             f.dome,
             f.rays,
             f.cloud,
