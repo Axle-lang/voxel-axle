@@ -1,0 +1,187 @@
+// start — choosing where (and which way) the player starts. Scans columns
+// around a chosen centre for the highest dry, open, roughly-flat hilltop,
+// then picks a yaw whose forward view stays open. Pulled out of `main` so
+// the entry point stays a thin setup + loop. (Named `start`, not `spawn`,
+// because `spawn` is a reserved keyword.)
+//
+// **The centre is not the origin.** The terrain field is deterministic and
+// unbounded, so starting every run at (0, 0) meant starting every run on
+// the same hilltop looking at the same trees. `randomColumn` picks one a
+// long way out from the monotonic counter, which differs per run — and
+// prints it, so a world worth keeping can be returned to with `--at`.
+//
+// This varies the *place*, not the world. A different world means a
+// different `Noise::SEED`, and that constant is read by
+// `block::blocks::partialBoxHeight` — which sits behind the collision
+// capability — so making it a runtime value threads a seed through the
+// kernel's seams. Worth doing, and not the same change as this one.
+
+use crate::engine::seams::VoxelQuery;
+use crate::configs::world::{ World };
+
+/** How far out a random start may land, in blocks, on each axis. */
+const START_SPREAD : i64 = 400000;
+
+/** Odd multiplier of the start hash. */
+const START_HASH_MUL : i64 = 6364136223846793005;
+
+/**
+ * The second draw's offset — an odd constant, chosen only for being
+ * unrelated to the multiplier.
+ *
+ * Written in decimal because the usual golden-ratio hex spelling is
+ * above `i64`'s range, and a literal there is a `u64` that will not mix
+ * with one.
+ */
+const START_HASH_OFFSET : i64 = 2685821657736338717;
+
+/**
+ * A column a long way from the origin, derived from `entropy`.
+ *
+ * Two independent draws from one input, so the two axes do not move
+ * together: a pair taken from adjacent bits of one multiply walks a
+ * diagonal, and a player who ran twice would notice.
+ * @param entropy  a value that differs between runs — a monotonic counter
+ * @return the (x, z) block column to search around
+ */
+fn randomColumn(entropy : i64) : (x: i32, z: i32) {
+    const a : i64 = (entropy * START_HASH_MUL) >> 17;
+    const b : i64 = ((entropy + START_HASH_OFFSET) * START_HASH_MUL) >> 29;
+    return (spread(a), spread(b));
+}
+
+/**
+ * `v` folded into `[-START_SPREAD, START_SPREAD)`.
+ *
+ * The remainder is taken to its magnitude first: `%` on a negative
+ * operand answers a negative remainder, so subtracting the half-width
+ * from it straight away gives a range one and a half times too wide and
+ * lopsided towards negative — which is a bug you only see by printing
+ * the numbers, since any column is a valid place to stand.
+ * @param v  a hashed draw, any value
+ * @return the block offset it folds to on one axis
+ */
+fn spread(v : i64) : i32 {
+    let m : i64 = v % (START_SPREAD * 2);
+    if (m < 0) {
+        m = -m;
+    }
+    return (m - START_SPREAD) as i32;
+}
+
+/**
+ * A clearing to start in: the 3×3 columns around (gx, gz) are tree-free
+ * and within one block of height, so the player begins on flat open
+ * ground with a view rather than buried against a trunk.
+ * @param man  the voxel-query surface to read heights from
+ * @param gx   grid x of the candidate column
+ * @param gz   grid z of the candidate column
+ * @return true if the 3×3 area is open and roughly flat
+ */
+fn openSpot(man : dyn VoxelQuery, gx : i32, gz : i32) : bool {
+    const h0 : i32 = man.columnHeight(gx, gz);
+    for (dz of -1..=1) {
+        for (dx of -1..=1) {
+            const cx : i32 = gx + dx;
+            const cz : i32 = gz + dz;
+            const hc : i32 = man.columnHeight(cx, cz);
+            if (man.collisionHeight(cx, cz) != hc) {
+                return false;
+            }
+            let d : i32 = hc - h0;
+            if (d < 0) {
+                d = -d;
+            }
+            if (d > 1) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Pick the start yaw whose forward ray stays open (tree-free, not
+ * rising) for the most blocks, so the player faces the clearing rather
+ * than a trunk. Forward for a yaw is (-sin, cos).
+ * @param man    the voxel-query surface to read heights from
+ * @param sx     start column x
+ * @param sz     start column z
+ * @param baseH  surface height at the start column
+ * @return the yaw (radians) with the most open forward view
+ */
+fn openYaw(man : dyn VoxelQuery, sx : i32, sz : i32, baseH : i32) : f64 {
+    let best : f64 = 0.0;
+    let bestScore : i32 = -1;
+    for (k of 0..8) {
+        const yaw : f64 = (k as f64) * 0.7853981634;
+        const fwx : f64 = 0.0 - yaw.sin();
+        const fwz : f64 = yaw.cos();
+        let score : i32 = 0;
+        let blocked : bool = false;
+        let d : f64 = 1.5;
+        while (d < 8.0 && !blocked) {
+            const cx : i32 = ((sx as f64) + 0.5 + fwx * d).floorToInt() as i32;
+            const cz : i32 = ((sz as f64) + 0.5 + fwz * d).floorToInt() as i32;
+            const hc : i32 = man.columnHeight(cx, cz);
+            if (man.collisionHeight(cx, cz) != hc || hc > baseH + 1) {
+                blocked = true;
+            } else {
+                score++;
+            }
+            d += 1.0;
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            best = yaw;
+        }
+    }
+    return best;
+}
+
+/** The chosen start column (sx, sz) and its surface height `h`. */
+class Spawn {
+    pub(crate) sx : i32,
+    pub(crate) sz : i32,
+    pub(crate) h : i32,
+
+    /**
+     * Default the start to the origin column at sea level + 1.
+     */
+    constructor() {
+        self.sx = 0;
+        self.sz = 0;
+        self.h = World::SEA_LEVEL + 1;
+    }
+
+    /**
+     * Search an 81×81 area around (`cx`, `cz`) for the highest dry, open
+     * hilltop. Falls back to that centre at sea level + 1 if nothing
+     * qualifies — which is a beach or a lake, and still somewhere to
+     * stand.
+     * @param man  the voxel-query surface to read heights from
+     * @param cx   centre column x of the search
+     * @param cz   centre column z of the search
+     */
+    pub(crate) fn find(mut self, man : dyn VoxelQuery, cx : i32, cz : i32) : void {
+        self.sx = cx;
+        self.sz = cz;
+        let bestH : i32 = -1;
+        for (gz of cz - 40..=cz + 40) {
+            for (gx of cx - 40..=cx + 40) {
+                const hh : i32 = man.columnHeight(gx, gz);
+                if (hh > World::SEA_LEVEL + 2 && hh > bestH && openSpot(man, gx, gz)) {
+                    bestH = hh;
+                    self.sx = gx;
+                    self.sz = gz;
+                }
+            }
+        }
+
+        if (bestH < 0) {
+            bestH = World::SEA_LEVEL + 1;
+        }
+        self.h = bestH;
+    }
+}

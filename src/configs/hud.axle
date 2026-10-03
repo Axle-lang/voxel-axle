@@ -2,7 +2,7 @@
 // scale every overlay length is drawn at.
 //
 // Both sets of numbers are in OVERLAY pixels, which are framebuffer pixels only
-// at `Ui::REF_HEIGHT`. Everything else multiplies through `krender::uiscale`.
+// at `Ui::REF_HEIGHT`. Everything else multiplies through `ui::uiscale`.
 
 /** Inventory hotbar layout (keys 1-9). */
 class Hotbar {

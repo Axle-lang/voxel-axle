@@ -18,7 +18,7 @@ class Cloud {
     static COVERAGE : f64 = 0.43;
 
     // The shortest a cloud that exists at all may be, as a fraction of the band.
-    // Height is NOT coverage — see `ksky::cloud::heightOf`. Without this floor,
+    // Height is NOT coverage — see `sky::cloud::heightOf`. Without this floor,
     // thinning the sky to isolated clouds also flattened them, which is the
     // opposite of what isolating them was for.
     static HEIGHT_MIN : f64 = 0.46;
@@ -30,7 +30,7 @@ class Cloud {
 
     // How fast the mass thins toward that edge: 1 / the coverage at which a
     // column is at full density. Without it the outline is a step — see
-    // `ksky::cloud::densityAtCover`.
+    // `sky::cloud::densityAtCover`.
     static EDGE_RAMP : f64 = 12.0;
 
     // The altitude band the water lives in. `BASE` is the condensation level —
@@ -236,7 +236,7 @@ class Cloud {
 
     // How far the march walks, and in how many steps. The length is CAPPED but
     // continuous; the count is fixed. That pairing is deliberate — see
-    // `ksky::clouddome` — because a count derived from the length jumps, and a
+    // `render::cpu::sky::clouddome` — because a count derived from the length jumps, and a
     // jump in a value that varies with elevation draws a circle in the sky.
     //
     // The cap is sized so the longest step stays finer than the FINEST octave
@@ -260,7 +260,7 @@ class Cloud {
     static MIN_UP : f64 = 0.016;
 
     // Past this radius² of the disc (under about twenty degrees up), a cell is
-    // marched twice along the radius and averaged — see `ksky::clouddome`.
+    // marched twice along the radius and averaged — see `render::cpu::sky::clouddome`.
     static HORIZON_SS : f64 = 0.66;
 
     // How far a cloud is still worth drawing, in blocks along the view ray. A

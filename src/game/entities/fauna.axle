@@ -2,8 +2,8 @@
 // the kernel's `MobSpawner` seam so kworld/kentity's MobManager can populate the
 // world without ever naming a concrete species.
 
-use crate::kernel::kmath::vec3::{ Vec3 };
-use crate::kernel::kentity::mob::{ Mob, MobSpawner };
+use crate::engine::math::vec3::{ Vec3 };
+use crate::engine::entity::mob::{ Mob, MobSpawner };
 use crate::game::entities::creeper::Creeper;
 use crate::game::entities::pig::Pig;
 use crate::game::entities::cow::Cow;

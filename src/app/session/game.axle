@@ -1,0 +1,1019 @@
+// session — one play of the game, from opening the window to closing it.
+//
+// A frame runs  pollEvents → fitToWindow → togglePause → step | driveMenu → draw.
+// `step` is the running game and `driveMenu` the paused one; `draw` renders
+// whichever is showing, and is skipped while a paused screen is unchanged.
+
+use smalt::{
+    BitmapFont, Bmp, Clock, Event, EventKind, Events, Face, Frame, FramePacer, Mem, mixerLoop,
+    MouseButton, Platform, PlatformError, Surface, Window, WindowDesc,
+};
+use crate::engine::io::input::Keys;
+use crate::engine::io::assets::Assets;
+use crate::engine::audio::sfx::{ AudioManager };
+use crate::engine::world::chunks::{ ChunkManager, lightLoop };
+use crate::engine::world::sim::blocksim::BlockSim;
+use crate::engine::entity::player::{ GameMode, Player };
+use crate::engine::entity::mobs::MobManager;
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::math::narrow::{ FLOAT_BYTES };
+use crate::engine::seams::{ LightMoment };
+use crate::engine::render::cpu::renderer::Renderer;
+use crate::engine::render::cpu::raster::{ FrameBuf, Viewport, viewportFor };
+use crate::engine::ui::hud::drawHud;
+use crate::engine::ui::menu::{ drawPauseMenu, menuHit };
+use crate::game::world::terraingen::TerrainGen;
+use crate::game::entities::fauna::Fauna;
+use crate::game::rules::start::{ Spawn, openYaw };
+use crate::app::controls::{
+    applyLook, Intent, readGameMode, readHotbar, readIntent,
+};
+use crate::game::rules::stepaudio::{ StepTimers, stepAudio };
+use crate::app::cli::{
+    dayTimeArg, hasFlag, lookPin, snapDeadline, startColumn, walkBlocks, windowSize,
+};
+use crate::game::rules::picker::{ Picker, cellInPlayer };
+use crate::game::rules::tick::TickManager;
+use crate::configs::atlas::{ Atlas };
+use crate::configs::blocks::{ Block };
+use crate::configs::gameplay::{ Gameplay };
+use crate::configs::health::{ Health };
+use crate::configs::hud::{ Hotbar };
+use crate::configs::time::{ Daylight };
+use crate::configs::water::{ Water };
+use crate::configs::world::{ World };
+
+const WINDOW_TITLE : string = "Axle Voxel — survival";
+const SNAP_PATH : string = "voxel.bmp";
+
+/** How far ahead of the player `--torch` stands its torch, in blocks. */
+const TORCH_AHEAD : f64 = 3.5;
+
+/** The hover `menuHit` reports when the pointer is over no button. */
+const NO_HOVER : i32 = -1;
+/** A hover no frame reports, so the next paused frame always redraws. */
+const STALE_HOVER : i32 = -2;
+/** The pause menu's first button; the other one quits. */
+const MENU_RESUME : i32 = 0;
+
+
+// ── Small state ──────────────────────────────────────────────────────────
+
+/** One input's level last frame, so a press is seen once, on its way down. */
+struct Edge {
+    held : bool = false;
+
+    /**
+     * Records this frame's level.
+     * @param down  whether the input is down now
+     * @return whether it went down since the last call
+     */
+    fn rose(mut self, down : bool) : bool {
+        const pressed = down && !self.held;
+        self.held = down;
+        return pressed;
+    }
+}
+
+/** A view fixed by `--look`, held against the mouse for the whole run. */
+struct LookPin {
+    on : bool;
+    yaw : f64;
+    pitch : f64;
+}
+
+/** `--walk`: a sprint straight ahead until `reach` blocks from where it began. */
+struct ScriptedWalk {
+    reach : f64;
+    x0 : f64;
+    z0 : f64;
+
+    /**
+     * Whether the walk still has ground to cover, and so drives the player.
+     * @param p  the player being walked
+     * @return true while the player is closer than `reach` to where the walk began
+     */
+    fn drives(self, p : Player) : bool {
+        if (self.reach <= 0.0) {
+            return false;
+        }
+        const dx = p.pos.x - self.x0;
+        const dz = p.pos.z - self.z0;
+        return dx * dx + dz * dz < self.reach * self.reach;
+    }
+}
+
+/** Where in its days and seconds the run is, as this frame renders it. */
+struct Scene {
+    dayTime : f64;    // [0, 1), the sun's hour
+    seconds : f64;    // since the run began: the wind, and so the clouds
+    ripple : f64;     // the water's phase
+    underwater : bool;
+}
+
+/** Microseconds spent in each render pass, summed over the run for `--snap`. */
+struct FrameTimes {
+    world : i64 = 0;
+    rays : i64 = 0;
+    bloom : i64 = 0;
+    blit : i64 = 0;
+    frames : i64 = 0;
+
+    /**
+     * Prints the per-frame averages. The world pass is split in two, because
+     * its queue build runs on six workers and its fill on twelve bands.
+     * @param r  the renderer, which times the fill and the sky itself
+     */
+    fn report(self, r : Renderer) : void {
+        const n = self.frames;
+        if (n == 0) {
+            return;
+        }
+
+        const world = self.world / n;
+        const fill = r.fillMicros() / n;
+        const build = world - fill;
+        const skyMarch = r.skyMarchMicros() / n;
+        const skyDraw = r.skyDrawMicros() / n;
+
+        Console::println("  world = build ${build}us (6 workers)"
+            + " + fill ${fill}us (12 bands)"
+            + " over ${r.triCount()} tris");
+        Console::println("  per frame (us): world=${world}"
+            + " sky=${skyMarch}+${skyDraw}"
+            + " rays=${self.rays / n}"
+            + " bloom=${self.bloom / n}"
+            + " blit=${self.blit / n}"
+            + "  over ${n} frames");
+    }
+}
+
+
+// ── Display ──────────────────────────────────────────────────────────────
+
+/**
+ * The window, and the framebuffer and depth buffer the game draws into it.
+ * Both buffers follow the window's shape, so their addresses are read each
+ * frame and never kept: a resize moves them.
+ */
+class Display {
+    platform : Platform,
+    pub(file) win : Window,
+    screen : Surface,
+    zbuf : i64,
+
+    /**
+     * Opens a window of this size, with a framebuffer already its shape, so
+     * nothing has to be resized into place on frame two.
+     * @param w  the window's width, in pixels
+     * @param h  the window's height, in pixels
+     */
+    constructor(w : i32, h : i32) ! PlatformError {
+        const vp = viewportFor(w, h);
+        const desc = WindowDesc {
+            title: WINDOW_TITLE,
+            w,
+            h,
+            resizable: true,
+        };
+
+        self.platform = new Platform()?;
+        self.win = self.platform.open(desc)?;
+        self.screen = new Surface(vp.w, vp.h);
+        self.zbuf = takeDepth(vp);
+    }
+
+    /**
+     * The framebuffer's width — not the window's, once the pixel budget caps it.
+     * @return the width, in pixels
+     */
+    pub(file) fn width(self) : i32 {
+        return self.screen.width();
+    }
+
+    /**
+     * The framebuffer's height — not the window's, once the pixel budget caps it.
+     * @return the height, in pixels
+     */
+    pub(file) fn height(self) : i32 {
+        return self.screen.height();
+    }
+
+    /**
+     * The render target the world passes fill.
+     * @return this frame's pixels, depth buffer and shape
+     */
+    pub(file) fn frameBuf(self) : FrameBuf {
+        return FrameBuf {
+            pixels: self.screen.base(),
+            zbuf: self.zbuf,
+            w: self.width(),
+            h: self.height(),
+        };
+    }
+
+    /**
+     * The same pixels, as the drawing surface the overlay paints on.
+     * @return a `Frame` valid for this frame only
+     */
+    pub(file) fn overlay(mut self) : Frame {
+        return self.screen.frame();
+    }
+
+    /**
+     * A window-space point in framebuffer pixels.
+     * @param x  the point's x, in window pixels
+     * @param y  the point's y, in window pixels
+     * @return the point, scaled by the framebuffer-to-window ratio
+     */
+    pub(file) fn toFrame(self, x : i32, y : i32) : (x: i32, y: i32) {
+        const winW = self.win.width().max(1);
+        const winH = self.win.height().max(1);
+        return (x * self.width() / winW, y * self.height() / winH);
+    }
+
+    /**
+     * Matches the framebuffer to the window — both axes, up to a pixel budget —
+     * so going fullscreen widens the view instead of zooming into it.
+     * @return whether the buffers were reallocated
+     */
+    pub(file) fn fit(mut self) : bool {
+        const winW = self.win.width();
+        const winH = self.win.height();
+        if (winW < 1 || winH < 1) {
+            return false;
+        }
+
+        const want = viewportFor(winW, winH);
+        if (want.w == self.width() && want.h == self.height()) {
+            return false;
+        }
+
+        self.screen.resize(want.w, want.h);
+        Mem::release(self.zbuf);
+        self.zbuf = takeDepth(want);
+        return true;
+    }
+
+    /** Blits the framebuffer to the window, scaled to its client area. */
+    pub(file) fn present(mut self) : void {
+        self.screen.present(self.win);
+    }
+
+    /**
+     * Writes what is on screen to a BMP file.
+     * @param path  the file to write
+     * @return whether the file was written
+     */
+    pub(file) fn capture(mut self, path : string) : bool {
+        return Bmp::write(path, self.screen.frame());
+    }
+
+    /** Releases the buffers before the window, the window before the platform. */
+    pub(file) fn close(self) : void {
+        Mem::release(self.zbuf);
+        self.screen.close();
+        self.win.close();
+        self.platform.close();
+    }
+}
+
+
+// ── Game ─────────────────────────────────────────────────────────────────
+
+class Game {
+    display : Display,
+    events : Events,
+    clock : Clock,
+    pacer : FramePacer,
+
+    man : ChunkManager,
+    player : Player,
+    mobs : MobManager,
+    blocksim : BlockSim = new BlockSim(),
+    sched : TickManager = new TickManager(),
+    picker : Picker = new Picker(),
+
+    renderer : Renderer,
+    hudFont : BitmapFont = BitmapFont::baked(Face::Ui),
+    sfx : AudioManager,
+    times : FrameTimes = FrameTimes { },
+
+    audioTask : Task<i32>,
+    lightTask : Task<i32>,
+
+    look : LookPin,
+    walk : ScriptedWalk,
+    dayStart : f64 = dayTimeArg(),
+    snapAtMs : i64 = snapDeadline(),
+    startMs : i64,
+
+    running : bool = true,
+    paused : bool = false,
+    // The pointer was just grabbed, so the next look delta is the warp to the
+    // window's middle, not a turn — otherwise the camera snaps on un-pause.
+    swallowLook : bool = true,
+    // The hover the paused screen was last drawn with. The world is frozen
+    // while paused, so the loop only redraws when this changes.
+    lastHover : i32 = STALE_HOVER,
+    attackCd : i32 = 0,
+    timers : StepTimers = StepTimers {
+        foot: 0,
+        ambient: 0,
+    },
+
+    escKey : Edge = Edge { },
+    rightClick : Edge = Edge { },
+    menuClick : Edge = Edge { },
+    submerged : Edge = Edge { },
+    sprintLatch : bool = false,
+    gameModeChord : bool = false,
+
+    /**
+     * Opens the window, generates the world around this run's start column,
+     * stands the player on it and lights it, then starts the audio and light
+     * threads. Every failure leaves through `PlatformError`, so a `Game` that
+     * exists has an open window.
+     */
+    constructor() ! PlatformError {
+        const size = windowSize();
+        self.display = new Display(size.w, size.h)?;
+        self.events = new Events();
+        self.events.setRelativeMouse(true);
+        // Before the world: the random start column is drawn from its counter.
+        self.clock = new Clock();
+        // Naming the tick rate as well as the frame rate pins it, so a later
+        // change to the frame cap cannot silently retime the physics.
+        self.pacer = new FramePacer(World::TICK_HZ);
+        self.pacer.setTickRate(World::TICK_HZ);
+
+        self.man = newWorld();
+        const start = startColumn(self.clock);
+        Console::println("start column ${start.x} ${start.z}"
+            + "  (replay with: --at ${start.x} ${start.z})");
+        self.player = placePlayer(self.man, start.x, start.z);
+
+        const pin = lookPin();
+        self.look = LookPin {
+            on: pin.on,
+            yaw: pin.yaw,
+            pitch: pin.pitch,
+        };
+        if (self.look.on) {
+            self.player.aimAt(self.look.yaw, self.look.pitch);
+            self.player.refresh();
+        }
+        self.walk = ScriptedWalk {
+            reach: walkBlocks(),
+            x0: self.player.pos.x,
+            z0: self.player.pos.z,
+        };
+        // After the view is pinned, so the torch stands in the frame a capture shows.
+        if (hasFlag("--torch")) {
+            plantTorch(self.man, self.player);
+        }
+
+        self.mobs = new MobManager();
+        self.mobs.attachSpawner(new Fauna());
+        self.renderer = newRenderer(self.display.width(), self.display.height());
+
+        // The device is fed from its own thread, so a heavy frame cannot
+        // starve the queue and stutter the sound.
+        self.sfx = new AudioManager();
+        self.audioTask = spawn mixerLoop(self.sfx.mixer);
+
+        // The ring is lit here, as part of loading, and against the starting
+        // hour: published after the thread starts, its first pass would bake
+        // the default hour's shadows and spend seconds gliding off them.
+        self.man.setMoment(momentAt(self.player, self.dayStart, 0.0));
+        self.man.primeLight();
+        self.lightTask = spawn lightLoop(self.man);
+
+        self.startMs = self.clock.ticks();
+    }
+
+    /** Runs frames until the player quits, the window closes, or `--snap` fires. */
+    pub(crate) fn play(mut self) : void {
+        while (self.running) {
+            self.pacer.tick(self.clock);
+            self.pollEvents();
+            self.fitToWindow();
+            self.togglePause();
+
+            let hover : i32 = NO_HOVER;
+            if (self.paused) {
+                hover = self.driveMenu();
+            } else {
+                self.step();
+            }
+            if (self.needsDraw(hover)) {
+                self.draw(hover);
+            }
+
+            // After the draw, not inside it: while paused, what is on screen is
+            // a menu drawn once and then left alone.
+            self.snapshotIfDue();
+            self.sfx.setListener(self.player.pos);
+        }
+    }
+
+    /**
+     * Joins the worker threads, then releases everything in the reverse order
+     * of construction: no thread may outlive what it reads or writes.
+     */
+    pub(crate) fn close(mut self) : void {
+        self.sfx.stop();
+        self.man.stopLight();
+        self.audioTask.join();
+        self.lightTask.join();
+
+        self.sfx.close();
+        self.renderer.close();
+        self.events.close();
+        self.display.close();
+        self.clock.close();
+    }
+
+
+    // ── One frame ────────────────────────────────────────────────────────
+
+    /** Drains the event queue: the window closing, and the hotbar's wheel. */
+    fn pollEvents(mut self) : void {
+        self.events.pump(self.display.win, self.clock);
+        while (self.events.hasNext()) {
+            const e : Event = self.events.next();
+            if (e.kind == EventKind::Quit) {
+                self.running = false;
+            } else if (e.kind == EventKind::MouseWheel && e.wheel != 0) {
+                self.scrollHotbar(e.wheel);
+            }
+        }
+    }
+
+    /** Follows a resize of the window, and redraws a paused screen after one. */
+    fn fitToWindow(mut self) : void {
+        if (!self.display.fit()) {
+            return;
+        }
+        self.renderer.setViewport(self.display.width(), self.display.height());
+        self.lastHover = STALE_HOVER;
+    }
+
+    /** Esc, on its press, pauses or resumes. */
+    fn togglePause(mut self) : void {
+        const escDown = self.events.isKeyDown(Keys::pause());
+        if (!self.escKey.rose(escDown)) {
+            return;
+        }
+
+        if (self.paused) {
+            self.resume();
+        } else {
+            self.pause();
+        }
+    }
+
+    /** One running frame. */
+    fn step(mut self) : void {
+        self.readControls();
+        self.simulate(self.readMovement());
+        self.streamWorld();
+        self.editWorld();
+        self.respawnIfDead();
+    }
+
+    /**
+     * One paused frame: hit-tests the free cursor against the menu, and acts
+     * on a click.
+     * @return the button under the cursor, or `NO_HOVER`
+     */
+    fn driveMenu(mut self) : i32 {
+        // The menu is laid out in framebuffer pixels, the cursor reported in
+        // window pixels.
+        const cursor = self.display.toFrame(self.events.mouseX(), self.events.mouseY());
+        const hover = menuHit(
+            self.display.width(),
+            self.display.height(),
+            cursor.x,
+            cursor.y
+        );
+        const leftDown = self.events.isButtonDown(MouseButton::Left);
+        const clicked = self.menuClick.rose(leftDown);
+
+        if (clicked && hover == MENU_RESUME) {
+            self.resume();
+        } else if (clicked && hover != NO_HOVER) {
+            self.running = false;
+        }
+        return hover;
+    }
+
+    /**
+     * Running, every frame draws; paused, only one whose hover moved.
+     * @param hover  the button under the cursor this frame
+     * @return whether this frame must render
+     */
+    fn needsDraw(mut self, hover : i32) : bool {
+        if (!self.paused) {
+            return true;
+        }
+        const changed = hover != self.lastHover;
+        self.lastHover = hover;
+        return changed;
+    }
+
+    /**
+     * Renders the world, its effects and the overlay — or the pause menu — and presents.
+     * @param hover  the menu button to highlight, when paused
+     */
+    fn draw(mut self, hover : i32) : void {
+        const scene = self.scene();
+        // The light thread bakes against the hour published here.
+        self.man.setMoment(momentAt(self.player, scene.dayTime, scene.seconds));
+
+        const fb = self.display.frameBuf();
+        self.drawWorld(fb, scene);
+        self.drawEffects(fb, scene);
+
+        if (self.paused) {
+            drawPauseMenu(self.display.overlay(), self.hudFont, hover);
+        } else {
+            self.drawOverlay(fb);
+        }
+        self.present();
+    }
+
+    /** `--snap`: once its deadline passes, writes the capture, reports, and quits. */
+    fn snapshotIfDue(mut self) : void {
+        const elapsed = self.clock.ticks() - self.startMs;
+        if (self.snapAtMs <= 0 || elapsed < self.snapAtMs) {
+            return;
+        }
+
+        self.running = false;
+        if (!self.display.capture(SNAP_PATH)) {
+            Console::println("could not write ${SNAP_PATH}");
+            return;
+        }
+
+        // The pacer's average over its window; 0 before a full second has passed.
+        const fps = self.pacer.fps().round();
+        const w = self.display.width();
+        const h = self.display.height();
+        Console::println("wrote ${SNAP_PATH}  (${w}x${h} render, ${fps} fps)");
+        self.times.report(self.renderer);
+    }
+
+
+    // ── Running ──────────────────────────────────────────────────────────
+
+    /** The game-mode chord, the mouse look, and the hotbar's number keys. */
+    fn readControls(mut self) : void {
+        self.gameModeChord = readGameMode(self.events, self.player, self.gameModeChord);
+        self.swallowLook = applyLook(
+            self.events,
+            self.player,
+            self.swallowLook,
+            self.look.on
+        );
+        readHotbar(self.events, self.player);
+    }
+
+    /**
+     * The movement asked for — or, while `--walk` drives, a sprint straight ahead.
+     * @return the movement to hold through this frame's steps
+     */
+    fn readMovement(mut self) : Intent {
+        const (want, latch) = readIntent(self.events, self.sprintLatch);
+        self.sprintLatch = latch;
+        if (!self.walk.drives(self.player)) {
+            return want;
+        }
+
+        return Intent {
+            fwd: 1.0,
+            strafe: 0.0,
+            sprint: true,
+            up: false,
+            down: false,
+            moving: true,
+        };
+    }
+
+    /**
+     * Runs as many fixed steps as the elapsed time demands. Physics, mob AI and
+     * the footstep / ambience timers advance on the tick, never on the frame
+     * rate.
+     * @param want  the movement held through every step of this frame
+     */
+    fn simulate(mut self, want : Intent) : void {
+        const hpBefore = self.player.hp;
+        // Read once: `steps()` drains the pacer, and a range's bound is
+        // re-evaluated on every pass.
+        const steps = self.pacer.steps();
+
+        for (i of 0..steps) {
+            self.sched.advance();
+            self.player.update(
+                self.man,
+                want.fwd,
+                want.strafe,
+                want.sprint,
+                want.up,
+                want.down
+            );
+            self.mobs.update(self.man, self.player, self.sfx, self.blocksim);
+            self.timers = stepAudio(
+                self.man,
+                self.player,
+                self.mobs,
+                self.sfx,
+                moving: want.moving,
+                sprint: want.sprint,
+                timers: self.timers
+            );
+            if (self.attackCd > 0) {
+                self.attackCd--;
+            }
+        }
+        self.player.refresh();
+
+        if (self.player.hp < hpBefore) {
+            self.sfx.playerHurt(self.mobs.rand());
+        }
+        if (self.submerged.rose(self.player.isUnderwater())) {
+            self.sfx.splash(self.mobs.rand());
+        }
+    }
+
+    /**
+     * Streams the chunks around the player — a few per call, nearest first, so
+     * a new ring fills in over a handful of frames — and runs the slower world
+     * systems on their own cadence.
+     */
+    fn streamWorld(mut self) : void {
+        const cx = chunkOf(self.player.pos.x);
+        const cz = chunkOf(self.player.pos.z);
+        self.man.ensureLoaded(cx, cz);
+
+        if (self.sched.dueMaintain()) {
+            self.mobs.maintain(self.man, self.player);
+        }
+        if (self.sched.dueSim()) {
+            self.blocksim.step(self.man);
+        }
+    }
+
+    /** Aims, then digs and places against what the aim found. */
+    fn editWorld(mut self) : void {
+        self.picker.cast(self.man, self.player);
+        self.dig();
+        self.place();
+    }
+
+    /** Left button, held: strike the nearest mob in reach, or else break the aimed block. */
+    fn dig(mut self) : void {
+        const leftDown = self.events.isButtonDown(MouseButton::Left);
+        if (!leftDown || self.attackCd > 0) {
+            return;
+        }
+
+        self.attackCd = Gameplay::EDIT_COOLDOWN;
+        const struck = self.mobs.attackNearest(self.player, self.sfx) >= 0;
+        if (struck || !self.aimsAtBlock()) {
+            return;
+        }
+
+        const cell = self.aimedCell();
+        const broken : Block = self.man.worldGet(cell);
+        self.man.breakAt(cell);
+        self.sfx.blockEdit(broken, cell, self.mobs.rand());
+        self.settle(cell);
+    }
+
+    /** Right button, on its press: place the held block against the aimed face. */
+    fn place(mut self) : void {
+        const rightDown = self.events.isButtonDown(MouseButton::Right);
+        const pressed = self.rightClick.rose(rightDown);
+        if (!pressed || !self.aimsAtBlock()) {
+            return;
+        }
+
+        const cell = ivec3(self.picker.px, self.picker.py, self.picker.pz);
+        if (cellInPlayer(self.player, cell)) {
+            return;
+        }
+
+        const held : Block = self.player.heldBlock();
+        self.man.placeAt(cell, held);
+        self.sfx.blockEdit(held, cell, self.mobs.rand());
+        self.settle(cell);
+    }
+
+    /**
+     * After an edit: wakes the block sim around the cell, and relights it.
+     * @param cell  the cell that changed
+     */
+    fn settle(mut self, cell : IVec3) : void {
+        self.blocksim.enqueue6(cell);
+        self.man.lightUpdate(cell);
+    }
+
+    /** Death: back to full health, on the ground of the same column. */
+    fn respawnIfDead(mut self) : void {
+        if (self.player.hp > 0) {
+            return;
+        }
+
+        const x = self.player.pos.x.floorToInt() as i32;
+        const z = self.player.pos.z.floorToInt() as i32;
+        self.player.hp = Health::PLAYER_MAX_HP;
+        self.player.velY = 0.0;
+        self.player.airTicks = 0;
+        self.player.sinceHurt = 0;
+        self.player.pos.y = self.man.columnHeight(x, z) as f64;
+        self.player.refresh();
+    }
+
+    /**
+     * The wheel walks the hotbar, wrapping: up is the previous slot, down the next.
+     * @param wheel  the wheel's step for this event, non-zero
+     */
+    fn scrollHotbar(mut self, wheel : i32) : void {
+        const delta = wheel > 0 ? -1 : 1;
+        const slot = (self.player.selected + delta + Hotbar::SIZE) % Hotbar::SIZE;
+        self.player.selectSlot(slot);
+    }
+
+    /**
+     * Whether the last cast found a block within reach.
+     * @return true when `aimedCell` is meaningful
+     */
+    fn aimsAtBlock(self) : bool {
+        return self.picker.hit == 1;
+    }
+
+    /**
+     * The block the last cast found.
+     * @return its cell
+     */
+    fn aimedCell(self) : IVec3 {
+        return ivec3(self.picker.bx, self.picker.by, self.picker.bz);
+    }
+
+
+    // ── Paused ───────────────────────────────────────────────────────────
+
+    /** Frees the cursor for the menu, and forces the menu's first draw. */
+    fn pause(mut self) : void {
+        self.paused = true;
+        self.events.setRelativeMouse(false);
+        self.lastHover = STALE_HOVER;
+    }
+
+    /** Grabs the cursor again, discarding the warp the grab makes. */
+    fn resume(mut self) : void {
+        self.paused = false;
+        self.events.setRelativeMouse(true);
+        self.swallowLook = true;
+    }
+
+
+    // ── Drawing ──────────────────────────────────────────────────────────
+
+    /**
+     * Every clock the frame renders by, read off the simulation tick.
+     * @return this frame's hour, seconds, water phase and submersion
+     */
+    fn scene(self) : Scene {
+        const ticks = self.sched.tick as f64;
+        const days = ticks / (Daylight::LENGTH_TICKS as f64);
+
+        return Scene {
+            dayTime: fract(self.dayStart + days),
+            seconds: ticks / (World::TICK_HZ as f64),
+            ripple: ticks * Water::RIPPLE_SPEED,
+            underwater: self.player.isUnderwater(),
+        };
+    }
+
+    /**
+     * The opaque passes: terrain, mobs, torches, then the sky into what they left empty.
+     * @param fb  the frame to draw into
+     * @param s   this frame's clocks
+     */
+    fn drawWorld(mut self, fb : FrameBuf, s : Scene) : void {
+        const start = self.clock.micros();
+        self.renderer.render(
+            self.man,
+            self.player,
+            fb,
+            underwater: s.underwater,
+            phase: s.ripple,
+            dayTime: s.dayTime,
+            worldTime: s.seconds
+        );
+        self.times.world += self.clock.micros() - start;
+
+        self.renderer.renderMobs(self.man, self.mobs, self.player, fb);
+        self.renderer.renderTorches(self.man, self.player, fb);
+        self.renderer.drawSky(self.player, fb, s.underwater);
+    }
+
+    /**
+     * God-rays above water or the underwater fog below it, then bloom.
+     * @param fb  the frame the world was drawn into
+     * @param s   this frame's clocks
+     */
+    fn drawEffects(mut self, fb : FrameBuf, s : Scene) : void {
+        const start = self.clock.micros();
+        if (s.underwater) {
+            self.renderer.underwaterOverlay(fb, s.ripple);
+        } else {
+            self.renderer.godRays(self.player, fb);
+        }
+
+        const rays = self.clock.micros();
+        self.renderer.bloomPass(fb);
+        const bloom = self.clock.micros();
+
+        self.times.rays += rays - start;
+        self.times.bloom += bloom - rays;
+    }
+
+    /**
+     * The running overlay: the aimed block's outline, the HUD, the crosshair.
+     * @param fb  the frame the world was drawn into
+     */
+    fn drawOverlay(mut self, fb : FrameBuf) : void {
+        if (self.aimsAtBlock()) {
+            const cell = self.aimedCell();
+            self.renderer.drawSelection(
+                self.player,
+                fb,
+                cell.x,
+                cell.y,
+                cell.z,
+                topH: self.man.blockBoxHeight(cell)
+            );
+        }
+
+        drawHud(
+            self.display.overlay(),
+            self.hudFont,
+            self.renderer.atlasBase(),
+            hp: self.player.hp,
+            maxHp: self.player.maxHp,
+            hotbar: self.player.hotbar,
+            selected: self.player.selected,
+            creative: self.player.mode == GameMode::Creative
+        );
+        self.renderer.crosshair(fb);
+    }
+
+    /** Presents the frame, and counts it. */
+    fn present(mut self) : void {
+        const start = self.clock.micros();
+        self.display.present();
+        self.times.blit += self.clock.micros() - start;
+        self.times.frames++;
+    }
+}
+
+
+// ── Setup ────────────────────────────────────────────────────────────────
+
+/**
+ * An empty world, with the game's terrain attached. The kernel drives it
+ * through the `Generator` seam and never names `TerrainGen`.
+ * @return the world, with no chunk loaded yet
+ */
+fn newWorld() : ChunkManager {
+    const man = new ChunkManager();
+    man.attachGenerator(new TerrainGen(World::SPAN * World::SPAN));
+    return man;
+}
+
+/**
+ * Generates the ring around a column, finds an open hilltop on it, and stands
+ * the player there facing the clearing.
+ * @param man  the world, with its generator attached
+ * @param x    the start column's x
+ * @param z    the start column's z
+ * @return the player, on the ground, with the chunks around them loaded
+ */
+fn placePlayer(man : ChunkManager, x : i32, z : i32) : Player {
+    // The hilltop search reads heights, so the chunks it scans must exist first.
+    loadAround(man, x as f64, z as f64);
+    let sp : Spawn = new Spawn();
+    sp.find(man, x, z);
+
+    const px = (sp.sx as f64) + 0.5;
+    const pz = (sp.sz as f64) + 0.5;
+    let player : Player = new Player(px, sp.h as f64, pz);
+    player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
+    player.refresh();
+
+    loadAround(man, player.pos.x, player.pos.z);
+    return player;
+}
+
+/**
+ * Loads every chunk of the view ring around a point before returning.
+ * @param man  the world to stream
+ * @param x    the centre's world x
+ * @param z    the centre's world z
+ */
+fn loadAround(man : ChunkManager, x : f64, z : f64) : void {
+    while (man.ensureLoaded(chunkOf(x), chunkOf(z)) > 0) {
+    }
+}
+
+/**
+ * A renderer for a framebuffer of this size, with `atlas.raw` loaded into its
+ * mip chain. Level 0 is a full copy, so the file's buffer is released at once.
+ * @param w  the framebuffer's width
+ * @param h  the framebuffer's height
+ * @return the renderer, ready for its first frame
+ */
+fn newRenderer(w : i32, h : i32) : Renderer {
+    const renderer = new Renderer();
+    renderer.setViewport(w, h);
+
+    const tile = Atlas::TILE_PX as i64;
+    const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
+    const atlas = Mem::take(bytes);
+    if (Assets::loadAtlas(atlas, bytes) != bytes) {
+        Console::println("warning: atlas.raw not found next to the binary"
+            + " — textures will be blank");
+    }
+
+    renderer.setAtlas(atlas);
+    Mem::release(atlas);
+    return renderer;
+}
+
+/**
+ * `--torch`: stands a torch on the ground `TORCH_AHEAD` blocks in front of the
+ * player, through the same edit path a right-click takes. A night capture of
+ * coloured light needs a source in frame, and one placed by hand is a capture
+ * nobody can reproduce.
+ * @param man  the world to place into
+ * @param p    the player whose facing the torch is placed along
+ */
+fn plantTorch(man : ChunkManager, p : Player) : void {
+    const x = (p.pos.x - p.yaw.sin() * TORCH_AHEAD).floorToInt() as i32;
+    const z = (p.pos.z + p.yaw.cos() * TORCH_AHEAD).floorToInt() as i32;
+    const cell = ivec3(x, man.columnHeight(x, z) + 1, z);
+
+    man.placeAt(cell, Block::Torch);
+    man.lightUpdate(cell);
+    Console::println("torch at (${cell.x}, ${cell.y}, ${cell.z})");
+}
+
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * A depth buffer for a framebuffer of this shape.
+ * @param vp  the framebuffer's shape
+ * @return the buffer's address, released with `Mem::release`
+ */
+fn takeDepth(vp : Viewport) : i64 {
+    const pixels = (vp.w as i64) * (vp.h as i64);
+    return Mem::take(pixels * FLOAT_BYTES);
+}
+
+/**
+ * The hour, and the column the light ring follows, for the light thread.
+ * @param p        the player, whose column the ring follows
+ * @param dayTime  the time of day, in [0, 1)
+ * @param seconds  seconds since the run began
+ * @return the moment to publish
+ */
+fn momentAt(p : Player, dayTime : f64, seconds : f64) : LightMoment {
+    return LightMoment {
+        dayTime,
+        seconds,
+        camX: p.pos.x.floorToInt() as i32,
+        camZ: p.pos.z.floorToInt() as i32,
+    };
+}
+
+/**
+ * The index of the chunk containing a world coordinate.
+ * @param p  a world-space coordinate along one axis
+ * @return the chunk index along that axis
+ */
+fn chunkOf(p : f64) : i32 {
+    return (p / (World::CHUNK_SIZE as f64)).floorToInt() as i32;
+}
+
+/**
+ * `v` wrapped into `[0, 1)`.
+ * @param v  any value
+ * @return its fractional part, non-negative
+ */
+fn fract(v : f64) : f64 {
+    return v - (v.floorToInt() as f64);
+}

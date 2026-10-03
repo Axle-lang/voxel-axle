@@ -1,7 +1,7 @@
 // Pig — a calm pink animal that uses the base wander AI, a touch slower than
 // the others.
 
-use crate::kernel::kentity::mob::Mob;
+use crate::engine::entity::mob::Mob;
 use crate::configs::mobs::{ MobKind, Mobs };
 
 class Pig : Mob {

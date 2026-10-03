@@ -1,0 +1,377 @@
+// player — the human entity and the camera in one. Extends Entity, so it
+// falls, lands and walks up ledges through the shared physics; on top it
+// adds first-person look (yaw/pitch with cached sin/cos), eye position for
+// the renderer, walking/sprinting/jumping/swimming, and the survival
+// loop: fall damage, drowning, and health regeneration. There is no
+// floating fly-camera any more — where you look is where you walk, and
+// gravity always has a say.
+
+use crate::engine::entity::entity::Entity;
+use crate::engine::seams::VoxelQuery;
+use crate::engine::block::blocks::{ isWater };
+use crate::configs::blocks::{ Block };
+use crate::configs::health::{ Health };
+use crate::configs::hud::{ Hotbar };
+use crate::configs::motion::{ Motion };
+use crate::engine::math::mathx::{ clampF64 };
+use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
+
+/**
+ * Compétence: first-person aim — apply a yaw / pitch look delta and refresh the
+ * cached trig and the eye position the renderer projects from. Where you look is
+ * where you walk.
+ */
+trait Looks {
+    /**
+     * Apply a relative look delta.
+     * @param dyaw    yaw change in radians
+     * @param dpitch  pitch change in radians
+     */
+    fn look(mut self, dyaw : f64, dpitch : f64) : void;
+
+    /** Recompute the cached look trig and the eye position. */
+    fn refresh(mut self) : void;
+}
+
+/**
+ * Compétence: the survival upkeep loop — fall damage on a hard landing, drowning
+ * while submerged, and health regeneration once unhurt for a while. One call
+ * resolves all three from this frame's state.
+ */
+trait Survives {
+    /** Resolve fall damage, drowning and regeneration for this frame. */
+    fn survive(mut self) : void;
+}
+
+/** Compétence: a hotbar inventory — select a slot and read the held block. */
+trait Inventory {
+    /**
+     * Make hotbar slot `i` the active one.
+     * @param i  hotbar slot index to activate
+     */
+    fn selectSlot(mut self, i : i32) : void;
+
+    /**
+     * The block in the active hotbar slot.
+     * @return block id held for placing
+     */
+    fn heldBlock(self) : Block;
+}
+
+/** Which rules the player plays by. */
+enum GameMode : i32 {
+    Survival,
+    Creative,   // free flight, no fall / drown damage
+}
+
+class Player : Entity, Looks, Survives, Inventory {
+    pub(crate) yaw : f64,
+    pitch : f64,
+    pub(crate) siny : f64,
+    pub(crate) cosy : f64,
+    pub(crate) sinp : f64,
+    pub(crate) cosp : f64,
+    pub(crate) eye : Vec3,
+    pub(crate) airTicks : i32,
+    drownTick : i32,
+    pub(crate) sinceHurt : i32,
+    regenTick : i32,
+    pub(crate) mode : GameMode,
+    headInWater : bool,          // eye voxel is water → underwater visuals / drowning
+    pub(crate) hotbar : Block[], // block id held in each inventory slot
+    pub(crate) selected : i32,   // active hotbar slot (0-based)
+
+    /**
+     * Construct a player at (x, y, z) with a stocked hotbar and full HP.
+     * @param x  body-centre X
+     * @param y  foot height
+     * @param z  body-centre Z
+     */
+    constructor(x : f64, y : f64, z : f64) {
+        self.pos = vec3(x, y, z);
+        self.velY = 0.0;
+        self.radius = Motion::PLAYER_RADIUS;
+        self.height = Motion::PLAYER_HEIGHT;
+        self.gravityScale = 1.0;
+        self.hp = Health::PLAYER_MAX_HP;
+        self.maxHp = Health::PLAYER_MAX_HP;
+        self.onGround = false;
+        self.impact = 0.0;
+        self.grav = Motion::GRAVITY;
+        self.apexY = y;
+        self.stepUp = 0.0;
+        self.inWater = false;
+        self.yaw = 0.0;
+        self.pitch = 0.0 - 0.18;
+        self.siny = 0.0;
+        self.cosy = 1.0;
+        self.sinp = 0.0;
+        self.cosp = 1.0;
+        self.eye = vec3(x, y + Motion::EYE_HEIGHT, z);
+        self.airTicks = 0;
+        self.drownTick = Health::DROWN_EVERY_FRAMES;
+        self.sinceHurt = 0;
+        self.regenTick = Health::REGEN_EVERY_FRAMES;
+        self.mode = GameMode::Survival;
+        self.headInWater = false;
+        self.hotbar = malloc<Block>(Hotbar::SIZE);
+        self.hotbar[0] = Block::Grass;
+        self.hotbar[1] = Block::Dirt;
+        self.hotbar[2] = Block::Stone;
+        self.hotbar[3] = Block::Sand;
+        self.hotbar[4] = Block::Snow;
+        self.hotbar[5] = Block::Gravel;
+        self.hotbar[6] = Block::Wood;
+        self.hotbar[7] = Block::Torch;
+        self.hotbar[8] = Block::Water;
+        self.selected = 0;
+    }
+
+    /**
+     * Select hotbar slot `i` (ignored if out of range).
+     * @param i  hotbar slot index to activate
+     */
+    fn selectSlot(mut self, i : i32) : void {
+        if (i >= 0 && i < Hotbar::SIZE) {
+            self.selected = i;
+        }
+    }
+
+    /**
+     * The block id currently held for placing.
+     * @return block id in the active hotbar slot
+     */
+    fn heldBlock(self) : Block {
+        return self.hotbar[self.selected];
+    }
+
+    /**
+     * Toggle survival ↔ creative. Creative enables free flight; entering
+     * it cancels any fall, leaving it restores normal gravity.
+     */
+    pub(crate) fn toggleGameMode(mut self) : void {
+        if (self.mode == GameMode::Survival) {
+            self.mode = GameMode::Creative;
+            self.velY = 0.0;
+        } else {
+            self.mode = GameMode::Survival;
+        }
+    }
+
+    /** Recompute look trig and the eye position the renderer projects from. */
+    fn refresh(mut self) : void {
+        self.siny = self.yaw.sin();
+        self.cosy = self.yaw.cos();
+        self.sinp = self.pitch.sin();
+        self.cosp = self.pitch.cos();
+        self.eye.x = self.pos.x;
+        self.eye.y = self.pos.y + Motion::EYE_HEIGHT - self.stepUp;
+        self.eye.z = self.pos.z;
+    }
+
+    /**
+     * Apply a relative look delta, clamping pitch to the configured range.
+     * @param dyaw    yaw change in radians
+     * @param dpitch  pitch change in radians
+     */
+    fn look(mut self, dyaw : f64, dpitch : f64) : void {
+        self.yaw += dyaw;
+        self.pitch = clampF64(self.pitch + dpitch, 0.0 - Motion::PITCH_MAX, Motion::PITCH_MAX);
+    }
+
+    /**
+     * Point the aim at an ABSOLUTE yaw / pitch, where `look` takes a delta from
+     * wherever the mouse left it. What a scripted capture needs: two runs can
+     * only be compared as images if they are framed identically, and a mouse
+     * that twitched once during the grab frames them differently.
+     * @param yaw    the absolute yaw, in radians
+     * @param pitch  the absolute pitch, in radians (clamped to the look range)
+     */
+    pub(crate) fn aimAt(mut self, yaw : f64, pitch : f64) : void {
+        self.yaw = yaw;
+        self.pitch = clampF64(pitch, 0.0 - Motion::PITCH_MAX, Motion::PITCH_MAX);
+    }
+
+    /**
+     * Damage that also restarts the regeneration delay.
+     * @param d  points of damage to apply
+     */
+    pub(crate) fn hurt(mut self, d : i32) : void {
+        self.damage(d);
+        self.sinceHurt = 0;
+    }
+
+    /**
+     * Is the eye below sea level (so the player is submerged)?
+     * @return true when the eye height is under the sea level
+     */
+    pub(crate) fn isUnderwater(self) : bool {
+        return self.headInWater;
+    }
+
+    /**
+     * Full per-frame update. `fwd`/`strafe` are in [-1,1]; `up`/`down`
+     * drive vertical flight in creative. Survival applies gravity + the
+     * survival effects (fall / drown / regen); creative flies freely with
+     * no damage. Refreshes the camera at the end.
+     * @param world   chunk manager queried for solid voxels
+     * @param fwd     forward intent in [-1, 1]
+     * @param strafe  strafe intent in [-1, 1]
+     * @param sprint  whether the sprint modifier is held
+     * @param up      whether the up / jump input is held
+     * @param down    whether the down input is held
+     */
+    pub(crate) fn update(
+        mut self,
+        world : dyn VoxelQuery,
+        fwd : f64,
+        strafe : f64,
+        sprint : bool,
+        up : bool,
+        down : bool
+    ) : void {
+        if (self.mode == GameMode::Creative) {
+            self.fly(world, fwd, strafe, sprint, up, down);
+            self.refresh();
+            return;
+        }
+
+        const inWater : bool = self.bodyInWater(world);
+        self.inWater = inWater;
+
+        // Submerged = the eye's own voxel is water, at any altitude (not the
+        // absolute sea level) — this is what drives the underwater visuals and
+        // drowning, so a pool you dug on a hill counts too.
+        const ex : i32 = self.pos.x.floorToInt() as i32;
+        const ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
+        const ez : i32 = self.pos.z.floorToInt() as i32;
+        const submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
+        self.headInWater = submerged;
+
+        let speed : f64 = Motion::WALK_SPEED;
+        if (inWater) {
+            speed = Motion::SWIM_SPEED;
+        } else if (sprint) {
+            speed = Motion::SPRINT_SPEED;
+        }
+
+        let dx : f64 = (0.0 - self.siny) * fwd + self.cosy * strafe;
+        let dz : f64 = self.cosy * fwd + self.siny * strafe;
+        dx *= speed;
+        dz *= speed;
+
+        if (inWater) {
+            // Additive up/down swim thrust (gentle; you sink slowly and rise
+            // only while Space is held). The horizontal current that carries
+            // every entity is applied in Entity.tick.
+            if (up) {
+                self.velY += Motion::SWIM_UP_ACCEL;
+            }
+            if (down) {
+                self.velY -= Motion::SWIM_DOWN_SPEED;
+            }
+        } else if (up && self.onGround) {
+            self.velY = Motion::JUMP_VEL;
+        }
+
+        self.tick(world, dx, dz);
+        self.survive();
+        self.refresh();
+    }
+
+    /**
+     * Creative free flight: no gravity, faster horizontal movement,
+     * Space/Shift for up/down, blocked by walls but never sinks below
+     * the ground under the feet.
+     * @param world   chunk manager queried for solid voxels
+     * @param fwd     forward intent in [-1, 1]
+     * @param strafe  strafe intent in [-1, 1]
+     * @param sprint  whether the sprint modifier is held
+     * @param up      whether the up input is held
+     * @param down    whether the down input is held
+     */
+    fn fly(
+        mut self,
+        world : dyn VoxelQuery,
+        fwd : f64,
+        strafe : f64,
+        sprint : bool,
+        up : bool,
+        down : bool
+    ) : void {
+        const speed : f64 = sprint ? Motion::FLY_SPRINT_SPEED : Motion::FLY_SPEED;
+        const dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
+        const dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
+        self.velY = 0.0;
+        self.onGround = false;
+
+        // Horizontal move with voxel collision (no auto-step in flight).
+        if (!self.collidesAt(world, vec3(self.pos.x + dx, self.pos.y, self.pos.z))) {
+            self.pos.x += dx;
+        }
+        if (!self.collidesAt(world, vec3(self.pos.x, self.pos.y, self.pos.z + dz))) {
+            self.pos.z += dz;
+        }
+        if (up) {
+            self.pos.y += Motion::FLY_VERT_SPEED;
+        }
+        if (down) {
+            self.pos.y -= Motion::FLY_VERT_SPEED;
+        }
+
+        // Don't sink into the ground: if the body intersects blocks, lift
+        // the feet onto the highest support beneath them.
+        if (self.collidesAt(world, self.pos)) {
+            const top : f64 = self.supportTop(
+                world,
+                self.pos.x,
+                self.pos.z,
+                self.pos.y.floorToInt() as i32,
+                (self.pos.y + self.height).floorToInt() as i32
+            );
+            self.pos.y = top;
+            self.onGround = true;
+        }
+    }
+
+    /**
+     * Fall damage, drowning and regeneration based on this frame's state.
+     * Reads `headInWater`, already refreshed by `look` earlier this frame.
+     */
+    fn survive(mut self) : void {
+        const water : bool = self.headInWater;
+        self.sinceHurt++;
+
+        // Water cushions a fall; on land, falling far hurts (`impact` is
+        // the distance dropped from the apex).
+        if (!water && self.impact > Health::SAFE_FALL_DIST) {
+            const excess : f64 = self.impact - Health::SAFE_FALL_DIST;
+            const dmg : i32 = (excess * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
+            if (dmg > 0) {
+                self.hurt(dmg);
+            }
+        }
+
+        if (water) {
+            self.airTicks++;
+            if (self.airTicks > Health::DROWN_GRACE_FRAMES) {
+                self.drownTick--;
+                if (self.drownTick <= 0) {
+                    self.hurt(1);
+                    self.drownTick = Health::DROWN_EVERY_FRAMES;
+                }
+            }
+        } else {
+            self.airTicks = 0;
+            self.drownTick = Health::DROWN_EVERY_FRAMES;
+        }
+
+        if (!water && self.hp < self.maxHp && self.sinceHurt > Health::REGEN_DELAY_FRAMES) {
+            self.regenTick--;
+            if (self.regenTick <= 0) {
+                self.heal(1);
+                self.regenTick = Health::REGEN_EVERY_FRAMES;
+            }
+        }
+    }
+}

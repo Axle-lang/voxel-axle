@@ -1,0 +1,542 @@
+// bloom — the soft-glow post-process, split out of Renderer.
+//
+// A self-contained LEAF mini-manager: it owns its six half-resolution scratch
+// buffers and reads/writes only the framebuffer pixels — no day-state, no
+// projection scratch, no atlas. It depends only on `smalt` + `configs`,
+// so `render.axle` composes a Bloom one-way with NO import cycle.
+//
+// Pipeline: bright-extract + downsample to half-res (luma above `Render::BLOOM_THRESHOLD`,
+// soft-knee), separable box blur (`Render::BLOOM_ITERS` passes, ping-ponging bl* ↔ bt*),
+// then composite the upsampled glow back over the full frame. The extract and
+// composite passes each split into two disjoint row bands run on two threads;
+// the blur is single-threaded, and measured to be right to stay that way.
+//
+// The blur slides a RUNNING SUM rather than re-summing `2*rad+1` taps per
+// pixel, so its cost no longer depends on `Render::BLOOM_RADIUS` at all —
+// widening the glow is free now — and the vertical half walks rows keeping
+// one sum per column, where it used to walk a column and miss cache on
+// nearly every tap. Together they took most of the pass off the frame.
+//
+// Splitting the blur into bands as well was tried and REVERTED: it cost
+// more than it saved. A `spawn` and its `join` are not free, and each
+// sub-pass here is short enough that the split was mostly overhead. The
+// rule the measurement left behind, rather than the number it left: a band
+// must carry appreciably more work than one spawn costs before it is worth
+// being a thread — and that cost belongs to the platform, so it is worth
+// re-measuring on the machine at hand before splitting anything else.
+
+use smalt::Mem;
+use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
+use crate::configs::screen::{ Screen };
+use crate::engine::render::cpu::raster::{ FrameBuf, PostEffect };
+use crate::configs::render::{ Render };
+
+class Bloom : PostEffect {
+    blR : i64, // half-res bright buffers (R/G/B) + blur ping-pong target
+    blG : i64,
+    blB : i64,
+    btR : i64, // blur scratch (R/G/B)
+    btG : i64,
+    btB : i64,
+    cap : i64, // half-resolution pixels each buffer currently holds
+    acR : i64, // per-column running sums, one per channel, for the vertical pass
+    acG : i64,
+    acB : i64,
+    acc : i64, // columns the three accumulators currently hold
+
+    /**
+     * Start with room for the configured frame; `fit` grows it if the
+     * frame ever does.
+     *
+     * The capacity used to be the literal `640 * 200`, which is neither
+     * the frame size nor derived from it — it happened to be twice what
+     * a 640x400 frame needs at half resolution, and exactly what the
+     * main loop's 1280-wide clamp needs at that same height. Change the
+     * render HEIGHT and it is a segmentation fault, which is what
+     * raising the resolution to 960x600 found.
+     */
+    constructor() {
+        self.cap = 0;
+        self.blR = 0;
+        self.blG = 0;
+        self.blB = 0;
+        self.btR = 0;
+        self.btG = 0;
+        self.btB = 0;
+        self.acR = 0;
+        self.acG = 0;
+        self.acB = 0;
+        self.acc = 0;
+        self.fit(halfCount(Screen::RENDER_W, Screen::RENDER_H));
+        self.fitAcc(((Screen::RENDER_W + 1) / 2) as i64);
+    }
+
+    /**
+     * Make sure the six buffers hold `want` half-resolution pixels each.
+     *
+     * Grows and never shrinks: a frame that got smaller will get bigger
+     * again when the window is dragged back, and a realloc per resize
+     * step is a stutter for nothing.
+     * @param want  half-resolution pixels the pass is about to touch
+     */
+    pub(file) fn fit(mut self, want : i64) : void {
+        if (want <= self.cap) {
+            return;
+        }
+        Mem::release(self.blR);
+        Mem::release(self.blG);
+        Mem::release(self.blB);
+        Mem::release(self.btR);
+        Mem::release(self.btG);
+        Mem::release(self.btB);
+        self.cap = want;
+        self.blR = Mem::take(want * FLOAT_BYTES);
+        self.blG = Mem::take(want * FLOAT_BYTES);
+        self.blB = Mem::take(want * FLOAT_BYTES);
+        self.btR = Mem::take(want * FLOAT_BYTES);
+        self.btG = Mem::take(want * FLOAT_BYTES);
+        self.btB = Mem::take(want * FLOAT_BYTES);
+    }
+
+    /**
+     * PostEffect entry point: bloom the finished frame (reads/writes only its
+     * colour buffer). Delegates to `run` with the framebuffer's dimensions.
+     * @param fb  the render target (framebuffer + z-buffer + size)
+     */
+    fn apply(mut self, fb : FrameBuf) : void {
+        self.run(fb.pixels, fb.w, fb.h);
+    }
+
+    /**
+     * Run the full bloom pass over the frame: bright pixels (luminance above
+     * `Render::BLOOM_THRESHOLD`) bleed a soft warm glow. Midtones are untouched. Call
+     * after the sky/world/god-rays, before the HUD.
+     * @param pixels  framebuffer base
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     */
+    fn run(self, pixels : i64, w : i32, h : i32) : void {
+        if (!Render::BLOOM_ON) {
+            return;
+        }
+        const dw : i32 = (w + 1) / 2;
+        const dh : i32 = (h + 1) / 2;
+        self.fit(halfCount(w, h));
+
+        // 1) Bright extraction + downsample — two threads (disjoint output rows).
+        const halfD : i32 = dh / 2;
+        const te : Task<i32> = spawn bloomExtractJob(
+            self,
+            pixels,
+            w,
+            h,
+            dw,
+            dh,
+            0,
+            halfD
+        );
+        self.extractRows(
+            pixels,
+            w,
+            h,
+            dw,
+            dh,
+            halfD,
+            dh
+        );
+        const de : i32 = te.join();
+
+        // 2) Separable box blur, as a RUNNING SUM (`Render::BLOOM_ITERS` passes).
+        //
+        // The box is separable and cumulative, so sliding the window one
+        // step is one add and one subtract per channel - not `2*rad+1`
+        // taps re-summed from scratch. The cost stops depending on the
+        // radius, and `BLOOM_RADIUS` becomes a free knob.
+        self.fitAcc(dw as i64);
+        const rad : i32 = Render::BLOOM_RADIUS;
+        const invK : f64 = 1.0 / ((2 * rad + 1) as f64);
+        for (it of 0..Render::BLOOM_ITERS) {
+            self.blurRows(dw, rad, invK, 0, dh);
+            self.blurCols(dw, dh, rad, invK, 0, dw);
+        }
+
+        // 3) Composite the upsampled glow over the full frame — two threads.
+        const st : f64 = Render::BLOOM_STRENGTH;
+        const halfH : i32 = h / 2;
+        const tc : Task<i32> = spawn bloomCompositeJob(
+            self,
+            pixels,
+            w,
+            h,
+            dw,
+            st,
+            0,
+            halfH
+        );
+        self.compositeRows(
+            pixels,
+            w,
+            h,
+            dw,
+            st,
+            halfH,
+            h
+        );
+        const dc : i32 = tc.join();
+    }
+
+    /**
+     * Make sure the three per-column accumulators hold `want` columns.
+     *
+     * Sized by the half-res WIDTH, not the pixel count: the vertical pass
+     * keeps one running sum per column and nothing more. Grows and never
+     * shrinks, for the same reason `fit` does.
+     * @param want  half-resolution columns the pass is about to touch
+     */
+    pub(file) fn fitAcc(mut self, want : i64) : void {
+        if (want <= self.acc) {
+            return;
+        }
+        Mem::release(self.acR);
+        Mem::release(self.acG);
+        Mem::release(self.acB);
+        self.acc = want;
+        self.acR = Mem::take(want * FLOAT_BYTES);
+        self.acG = Mem::take(want * FLOAT_BYTES);
+        self.acB = Mem::take(want * FLOAT_BYTES);
+    }
+
+    /**
+     * Horizontal box blur, bl* -> bt*, over half-res rows [y0, y1).
+     *
+     * The first column of a row pays the full clamped window; every later
+     * column inherits it, because `window(x) - window(x-1)` is exactly one
+     * clamped tap in and one clamped tap out. The edge behaviour is
+     * therefore the tap loop's own, carried rather than recomputed.
+     * @param dw    half-res width
+     * @param rad   blur radius
+     * @param invK  1 / (2*rad+1), the box normaliser
+     * @param y0    first half-res row (inclusive)
+     * @param y1    last half-res row (exclusive)
+     */
+    pub(file) fn blurRows(self, dw : i32, rad : i32, invK : f64, y0 : i32, y1 : i32) : void {
+        const last : i32 = dw - 1;
+        for (y of y0..y1) {
+            const rb : i32 = y * dw;
+
+            let sr : f64 = 0.0;
+            let sg : f64 = 0.0;
+            let sb : f64 = 0.0;
+            for (k of -rad..=rad) {
+                let xx : i32 = k;
+                if (xx < 0) {
+                    xx = 0;
+                }
+                if (xx > last) {
+                    xx = last;
+                }
+                sr += floatOf(self.blR, rb + xx);
+                sg += floatOf(self.blG, rb + xx);
+                sb += floatOf(self.blB, rb + xx);
+            }
+            putFloatOf(self.btR, rb, sr * invK);
+            putFloatOf(self.btG, rb, sg * invK);
+            putFloatOf(self.btB, rb, sb * invK);
+
+            for (x of 1..=last) {
+                let ai : i32 = x + rad;
+                if (ai > last) {
+                    ai = last;
+                }
+                let si : i32 = x - 1 - rad;
+                if (si < 0) {
+                    si = 0;
+                }
+                sr = sr + floatOf(self.blR, rb + ai) - floatOf(self.blR, rb + si);
+                sg = sg + floatOf(self.blG, rb + ai) - floatOf(self.blG, rb + si);
+                sb = sb + floatOf(self.blB, rb + ai) - floatOf(self.blB, rb + si);
+                putFloatOf(self.btR, rb + x, sr * invK);
+                putFloatOf(self.btG, rb + x, sg * invK);
+                putFloatOf(self.btB, rb + x, sb * invK);
+            }
+        }
+    }
+
+    /**
+     * Vertical box blur, bt* -> bl*, over half-res columns [x0, x1).
+     *
+     * Walks ROWS and keeps one running sum per column, where the tap loop
+     * walked a column top to bottom: the old order stepped a whole row
+     * between taps, so all three channels missed cache on nearly every
+     * read.
+     * Columns are disjoint, so a band writes only its own slice of the
+     * shared accumulators and two bands never touch the same one.
+     * @param dw    half-res width
+     * @param dh    half-res height
+     * @param rad   blur radius
+     * @param invK  1 / (2*rad+1), the box normaliser
+     * @param x0    first half-res column (inclusive)
+     * @param x1    last half-res column (exclusive)
+     */
+    pub(file) fn blurCols(
+        self,
+        dw : i32,
+        dh : i32,
+        rad : i32,
+        invK : f64,
+        x0 : i32,
+        x1 : i32
+    ) : void {
+        const lastY : i32 = dh - 1;
+        for (z of x0..x1) {
+            putFloatOf(self.acR, z, 0.0);
+            putFloatOf(self.acG, z, 0.0);
+            putFloatOf(self.acB, z, 0.0);
+        }
+
+        for (k of -rad..=rad) {
+            let yy : i32 = k;
+            if (yy < 0) {
+                yy = 0;
+            }
+            if (yy > lastY) {
+                yy = lastY;
+            }
+            const rb : i32 = yy * dw;
+            for (xi of x0..x1) {
+                putFloatOf(self.acR, xi, floatOf(self.acR, xi) + floatOf(self.btR, rb + xi));
+                putFloatOf(self.acG, xi, floatOf(self.acG, xi) + floatOf(self.btG, rb + xi));
+                putFloatOf(self.acB, xi, floatOf(self.acB, xi) + floatOf(self.btB, rb + xi));
+            }
+        }
+
+        for (xw of x0..x1) {
+            putFloatOf(self.blR, xw, floatOf(self.acR, xw) * invK);
+            putFloatOf(self.blG, xw, floatOf(self.acG, xw) * invK);
+            putFloatOf(self.blB, xw, floatOf(self.acB, xw) * invK);
+        }
+
+        for (y of 1..=lastY) {
+            let ay : i32 = y + rad;
+            if (ay > lastY) {
+                ay = lastY;
+            }
+            let sy : i32 = y - 1 - rad;
+            if (sy < 0) {
+                sy = 0;
+            }
+            const ab : i32 = ay * dw;
+            const sbb : i32 = sy * dw;
+            const ob : i32 = y * dw;
+            for (xx of x0..x1) {
+                const nr : f64 = floatOf(self.acR, xx)
+                    + floatOf(self.btR, ab + xx)
+                    - floatOf(self.btR, sbb + xx);
+                const ng : f64 = floatOf(self.acG, xx)
+                    + floatOf(self.btG, ab + xx)
+                    - floatOf(self.btG, sbb + xx);
+                const nb : f64 = floatOf(self.acB, xx)
+                    + floatOf(self.btB, ab + xx)
+                    - floatOf(self.btB, sbb + xx);
+                putFloatOf(self.acR, xx, nr);
+                putFloatOf(self.acG, xx, ng);
+                putFloatOf(self.acB, xx, nb);
+                putFloatOf(self.blR, ob + xx, nr * invK);
+                putFloatOf(self.blG, ob + xx, ng * invK);
+                putFloatOf(self.blB, ob + xx, nb * invK);
+            }
+        }
+    }
+
+    /**
+     * Bright-extraction + 2×2 downsample into the half-res bright buffers, for
+     * half-res rows [dy0, dy1).
+     * @param pixels  framebuffer base
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     * @param dw      half-res width
+     * @param dh      half-res height
+     * @param dy0     first half-res row (inclusive)
+     * @param dy1     last half-res row (exclusive)
+     */
+    pub(file) fn extractRows(
+        self,
+        pixels : i64,
+        w : i32,
+        h : i32,
+        dw : i32,
+        dh : i32,
+        dy0 : i32,
+        dy1 : i32
+    ) : void {
+        const thr : f64 = Render::BLOOM_THRESHOLD;
+        for (dy of dy0..dy1) {
+            const sy0 : i32 = dy * 2;
+            for (dx of 0..dw) {
+                const sx0 : i32 = dx * 2;
+                let ar : f64 = 0.0;
+                let ag : f64 = 0.0;
+                let ab : f64 = 0.0;
+                for (jy of 0..2) {
+                    const yy : i32 = sy0 + jy;
+                    if (yy < h) {
+                        for (jx of 0..2) {
+                            const xx : i32 = sx0 + jx;
+                            if (xx < w) {
+                                const c : i32 = Mem::dwordAt(pixels, ((yy * w + xx) as i64) * 4);
+                                const r : f64 = ((c >> 16) & 0xFF) as f64;
+                                const g : f64 = ((c >> 8) & 0xFF) as f64;
+                                const b : f64 = (c & 0xFF) as f64;
+                                const lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
+                                if (lum > thr) {
+                                    const f : f64 = (lum - thr) / lum;
+                                    ar += r * f;
+                                    ag += g * f;
+                                    ab += b * f;
+                                }
+                            }
+                        }
+                    }
+                }
+                const di : i32 = dy * dw + dx;
+                putFloatOf(self.blR, di, ar * 0.25);
+                putFloatOf(self.blG, di, ag * 0.25);
+                putFloatOf(self.blB, di, ab * 0.25);
+            }
+        }
+    }
+
+    /**
+     * Composite (add the upsampled glow back) for full-res rows [y0, y1).
+     * @param pixels  framebuffer base
+     * @param w       framebuffer width
+     * @param h       framebuffer height
+     * @param dw      half-res width
+     * @param st      bloom strength multiplier
+     * @param y0      first row (inclusive)
+     * @param y1      last row (exclusive)
+     */
+    pub(file) fn compositeRows(
+        self,
+        pixels : i64,
+        w : i32,
+        h : i32,
+        dw : i32,
+        st : f64,
+        y0 : i32,
+        y1 : i32
+    ) : void {
+        for (py of y0..y1) {
+            const row : i32 = py * w;
+            const drow : i32 = (py / 2) * dw;
+            for (px of 0..w) {
+                const di : i32 = drow + px / 2;
+                const addr : f64 = floatOf(self.blR, di) * st;
+                const addg : f64 = floatOf(self.blG, di) * st;
+                const addb : f64 = floatOf(self.blB, di) * st;
+                if (addr > 0.5 || addg > 0.5 || addb > 0.5) {
+                    const c : i32 = Mem::dwordAt(pixels, (row + px) as i64 * 4);
+                    let r : i32 = ((c >> 16) & 0xFF) + (addr.floorToInt() as i32);
+                    let g : i32 = ((c >> 8) & 0xFF) + (addg.floorToInt() as i32);
+                    let b : i32 = (c & 0xFF) + (addb.floorToInt() as i32);
+                    if (r > 255) {
+                        r = 255;
+                    }
+                    if (g > 255) {
+                        g = 255;
+                    }
+                    if (b > 255) {
+                        b = 255;
+                    }
+                    Mem::putWordOf(
+                        pixels,
+                        row + px,
+                        (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (b & 0xFF)
+                    );
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Worker job: bloom bright-extraction for one half-res row band.
+ * @param b       the bloom mini-manager
+ * @param pixels  framebuffer base
+ * @param w       framebuffer width
+ * @param h       framebuffer height
+ * @param dw      half-res width
+ * @param dh      half-res height
+ * @param dy0     first half-res row (inclusive)
+ * @param dy1     last half-res row (exclusive)
+ * @return 0
+ */
+fn bloomExtractJob(
+    b : Bloom,
+    pixels : i64,
+    w : i32,
+    h : i32,
+    dw : i32,
+    dh : i32,
+    dy0 : i32,
+    dy1 : i32
+) : i32 {
+    b.extractRows(
+        pixels,
+        w,
+        h,
+        dw,
+        dh,
+        dy0,
+        dy1
+    );
+    return 0;
+}
+
+/**
+ * Worker job: bloom composite for one full-res row band.
+ * @param b       the bloom mini-manager
+ * @param pixels  framebuffer base
+ * @param w       framebuffer width
+ * @param h       framebuffer height
+ * @param dw      half-res width
+ * @param st      bloom strength multiplier
+ * @param y0      first row (inclusive)
+ * @param y1      last row (exclusive)
+ * @return 0
+ */
+fn bloomCompositeJob(
+    b : Bloom,
+    pixels : i64,
+    w : i32,
+    h : i32,
+    dw : i32,
+    st : f64,
+    y0 : i32,
+    y1 : i32
+) : i32 {
+    b.compositeRows(
+        pixels,
+        w,
+        h,
+        dw,
+        st,
+        y0,
+        y1
+    );
+    return 0;
+}
+
+/**
+ * Half-resolution pixels a `w` by `h` frame needs.
+ *
+ * One expression, so the allocation and the pass that fills it cannot
+ * round the halving differently — which is the shape of an overflow that
+ * only shows at an odd width.
+ * @param w  frame width
+ * @param h  frame height
+ * @return the half-resolution pixel count
+ */
+fn halfCount(w : i32, h : i32) : i64 {
+    return (((w + 1) / 2) as i64) * (((h + 1) / 2) as i64);
+}

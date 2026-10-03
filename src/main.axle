@@ -18,15 +18,15 @@
 // no shared library to ship and nothing to install.
 //
 // This entry point only chooses what to run: one of the headless checks,
-// or the game itself — a `game::session::Game`.
+// or the game itself — a `app::session::game::Game`.
 
 use smalt::{ PlatformError };
-use crate::game::session::Game;
-use crate::game::cli::{ hasFlag, wantsPhysicsCheck };
-use crate::game::physcheck::runPhysicsCheck;
-use crate::game::lightcheck::runLightCheck;
-use crate::game::biomecheck::runBiomeScan;
-use crate::game::cullcheck::runCullCheck;
+use crate::app::session::game::Game;
+use crate::app::cli::{ hasFlag, wantsPhysicsCheck };
+use crate::checks::physcheck::runPhysicsCheck;
+use crate::checks::lightcheck::runLightCheck;
+use crate::checks::biomecheck::runBiomeScan;
+use crate::checks::cullcheck::runCullCheck;
 
 /**
  * Runs a headless check when one is asked for, the game otherwise.

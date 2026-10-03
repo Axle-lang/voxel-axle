@@ -5,12 +5,12 @@
 // here (not on the calm base Mob) — only the creeper charges.
 
 use std::numeric::math;
-use crate::kernel::kentity::mob::{ Mob, MobState, Hostile };
-use crate::kernel::kentity::player::{ GameMode, Player };
-use crate::kernel::seams::{ VoxelQuery, VoxelEdit };
-use crate::kernel::kworld::blocksim::BlockSim;
-use crate::kernel::kio::sfx::AudioManager;
-use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::engine::entity::mob::{ Mob, MobState, Hostile };
+use crate::engine::entity::player::{ GameMode, Player };
+use crate::engine::seams::{ VoxelQuery, VoxelEdit };
+use crate::engine::world::sim::blocksim::BlockSim;
+use crate::engine::audio::sfx::AudioManager;
+use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::blocks::{ Block };
 use crate::configs::mobs::{ MobKind, Mobs };
 

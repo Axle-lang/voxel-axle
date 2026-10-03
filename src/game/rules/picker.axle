@@ -1,0 +1,327 @@
+// ray — picking the block the player is looking at. A voxel DDA
+// (Amanatides–Woo) from the eye records the first solid voxel (to break)
+// and the empty cell just before it (where a block is placed). Also the
+// small "would this block trap the player?" test used to refuse placing
+// inside yourself.
+
+use crate::engine::seams::VoxelQuery;
+use crate::engine::entity::player::Player;
+use crate::engine::math::vec3::{ Vec3, vec3, ivec3 };
+use crate::configs::gameplay::{ Gameplay };
+use crate::configs::motion::{ Motion };
+
+/**
+ * Cast the player's look-ray into the voxel world and record what it targets.
+ * The picker's own capability, named so the interaction layer depends on "a thing
+ * that can cast a pick" rather than the concrete Picker.
+ *
+ * NOTE on the world param: the DDA reads only block solidity (`VoxelReader`) and
+ * partial-block box heights (`CollisionField`), so it would ideally take a
+ * two-capability bundle rather than the whole `dyn VoxelQuery` (it never touches
+ * `Heightfield`). A single `dyn` param must name ONE declared trait, though, and
+ * the only bundle ChunkManager (kworld-owned, read-only here) declares that
+ * spans both leaves is `VoxelQuery`. Narrowing further would need kworld to
+ * declare a `VoxelReader + CollisionField` bundle on ChunkManager, so the param
+ * stays `dyn VoxelQuery` for now.
+ */
+trait RayCaster {
+    /**
+     * Cast the look-ray of `p` into the world and record the targeted block.
+     * @param man  the voxel-query surface the ray walks through
+     * @param p    the player whose eye and look angles drive the ray
+     */
+    fn cast(mut self, man : dyn VoxelQuery, p : Player) : void;
+}
+
+/** Result of casting the player's look-ray into the voxel world. */
+class Picker : RayCaster {
+    pub(crate) hit : i32 = 0,
+    pub(crate) bx : i32 = 0,
+    pub(crate) by : i32 = 0,
+    pub(crate) bz : i32 = 0,
+    pub(crate) px : i32 = 0,
+    pub(crate) py : i32 = 0,
+    pub(crate) pz : i32 = 0,
+
+    /**
+     * Initialise an empty pick result (nothing hit yet).
+     */
+    constructor() {
+    }
+
+    /**
+     * Voxel DDA from the eye along the look direction
+     * `(-siny·cosp, sinp, cosy·cosp)`, up to `Gameplay::REACH_DIST` blocks. Records
+     * the first solid voxel and the air cell stepped from.
+     * @param man  the voxel-query surface (any `VoxelQuery`; ChunkManager conforms)
+     * @param p    the player whose eye and look angles drive the ray
+     */
+    fn cast(mut self, man : dyn VoxelQuery, p : Player) : void {
+        self.hit = 0;
+        const ox : f64 = p.eye.x;
+        const oy : f64 = p.eye.y;
+        const oz : f64 = p.eye.z;
+        const dx : f64 = (0.0 - p.siny) * p.cosp;
+        const dy : f64 = p.sinp;
+        const dz : f64 = p.cosy * p.cosp;
+        const big : f64 = 1.0e30;
+
+        let x : i32 = ox.floorToInt() as i32;
+        let y : i32 = oy.floorToInt() as i32;
+        let z : i32 = oz.floorToInt() as i32;
+
+        let stepX : i32 = 0;
+        let tMaxX : f64 = big;
+        let tDeltaX : f64 = big;
+        if (dx > 0.0) {
+            stepX = 1;
+            tMaxX = (((x + 1) as f64) - ox) / dx;
+            tDeltaX = 1.0 / dx;
+        } else if (dx < 0.0) {
+            stepX = -1;
+            tMaxX = ((x as f64) - ox) / dx;
+            tDeltaX = -1.0 / dx;
+        }
+
+        let stepY : i32 = 0;
+        let tMaxY : f64 = big;
+        let tDeltaY : f64 = big;
+        if (dy > 0.0) {
+            stepY = 1;
+            tMaxY = (((y + 1) as f64) - oy) / dy;
+            tDeltaY = 1.0 / dy;
+        } else if (dy < 0.0) {
+            stepY = -1;
+            tMaxY = ((y as f64) - oy) / dy;
+            tDeltaY = -1.0 / dy;
+        }
+
+        let stepZ : i32 = 0;
+        let tMaxZ : f64 = big;
+        let tDeltaZ : f64 = big;
+        if (dz > 0.0) {
+            stepZ = 1;
+            tMaxZ = (((z + 1) as f64) - oz) / dz;
+            tDeltaZ = 1.0 / dz;
+        } else if (dz < 0.0) {
+            stepZ = -1;
+            tMaxZ = ((z as f64) - oz) / dz;
+            tDeltaZ = -1.0 / dz;
+        }
+
+        let prevx : i32 = x;
+        let prevy : i32 = y;
+        let prevz : i32 = z;
+        let t : f64 = 0.0;
+        while (t <= Gameplay::REACH_DIST && self.hit == 0) {
+            prevx = x;
+            prevy = y;
+            prevz = z;
+            if (tMaxX < tMaxY && tMaxX < tMaxZ) {
+                x += stepX;
+                t = tMaxX;
+                tMaxX += tDeltaX;
+            } else if (tMaxY < tMaxZ) {
+                y += stepY;
+                t = tMaxY;
+                tMaxY += tDeltaY;
+            } else {
+                z += stepZ;
+                t = tMaxZ;
+                tMaxZ += tDeltaZ;
+            }
+
+            if (man.solidTarget(ivec3(x, y, z))) {
+                const boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
+                if (boxH >= 1.0) {
+                    // Full cube: the DDA's step-from cell IS the place cell.
+                    self.hit = 1;
+                    self.bx = x;
+                    self.by = y;
+                    self.bz = z;
+                    self.px = prevx;
+                    self.py = prevy;
+                    self.pz = prevz;
+                } else {
+                    // Partial block (snow today, slabs later): a hit only when the
+                    // ray pierces the REAL short box — not the phantom full cube —
+                    // and the place cell is derived from the FACE actually struck,
+                    // not the coarse DDA step-from cell (which for a thin box is
+                    // usually a side cell, so the block popped out sideways).
+                    const face : i32 = rayCellBoxFace(
+                        p.eye,
+                        vec3(dx, dy, dz),
+                        x,
+                        y,
+                        z,
+                        boxH,
+                        Gameplay::REACH_DIST
+                    );
+                    if (face != 0) {
+                        self.hit = 1;
+                        self.bx = x;
+                        self.by = y;
+                        self.bz = z;
+                        self.px = x;
+                        self.py = y;
+                        self.pz = z;
+                        match face {
+                            1 => { self.px = x + 1; }
+                            2 => { self.px = x - 1; }
+                            3 => { self.py = y + 1; }
+                            4 => { self.py = y - 1; }
+                            5 => { self.pz = z + 1; }
+                            _ => { self.pz = z - 1; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Ray vs the REAL box of cell (cx,cy,cz): full in X/Z, `boxHeight` tall in Y (a
+ * thin snow layer sits on the bottom of its cell, box [cy, cy+boxHeight]). A
+ * standard slab test, clamped to the look interval [0, reach]: the running
+ * [tEntry, tExit] interval is narrowed by each axis pair of planes, and a hit
+ * survives only if it stays non-empty. Returns the FACE the ray enters through
+ * (the axis that set tEntry, signed by the ray direction) so the picker can both
+ * target a partial block only when the look-ray pierces its short box AND place
+ * against the real face hit — not the coarse DDA cell it stepped in from (which,
+ * for a thin box, is usually a side cell, popping the placed block sideways).
+ * @param origin      ray origin (the eye)
+ * @param dir         ray direction (look vector, need not be normalised)
+ * @param cx          cell X (box spans [cx, cx+1])
+ * @param cy          cell Y (box spans [cy, cy+boxHeight])
+ * @param cz          cell Z (box spans [cz, cz+1])
+ * @param boxHeight   the box's real height in Y (1.0 full, snowDepth for snow)
+ * @param reach       max ray distance to consider a hit (in direction units)
+ * @return 0 if missed, else the entered face's outward normal: 1=+X 2=-X 3=+Y
+ *         4=-Y 5=+Z 6=-Z (defaults to +Y when the origin is inside the box)
+ */
+fn rayCellBoxFace(
+    origin : Vec3,
+    dir : Vec3,
+    cx : i32,
+    cy : i32,
+    cz : i32,
+    boxHeight : f64,
+    reach : f64
+) : i32 {
+    const boxMinX : f64 = cx as f64;
+    const boxMaxX : f64 = boxMinX + 1.0;
+    const boxMinY : f64 = cy as f64;
+    const boxMaxY : f64 = boxMinY + boxHeight;
+    const boxMinZ : f64 = cz as f64;
+    const boxMaxZ : f64 = boxMinZ + 1.0;
+    let tEntry : f64 = 0.0;
+    let tExit : f64 = reach;
+    let entryAxis : i32 = -1;   // 0=X 1=Y 2=Z; -1 = origin already inside
+
+    // X slab
+    if (dir.x != 0.0) {
+        const invDirX : f64 = 1.0 / dir.x;
+        const tAtMinX : f64 = (boxMinX - origin.x) * invDirX;
+        const tAtMaxX : f64 = (boxMaxX - origin.x) * invDirX;
+        let tNearX : f64 = tAtMinX;
+        let tFarX : f64 = tAtMaxX;
+        if (tAtMinX > tAtMaxX) {
+            tNearX = tAtMaxX;
+            tFarX = tAtMinX;
+        }
+        if (tNearX > tEntry) {
+            tEntry = tNearX;
+            entryAxis = 0;
+        }
+        if (tFarX < tExit) {
+            tExit = tFarX;
+        }
+    } else if (origin.x < boxMinX || origin.x > boxMaxX) {
+        return 0;
+    }
+
+    // Y slab
+    if (dir.y != 0.0) {
+        const invDirY : f64 = 1.0 / dir.y;
+        const tAtMinY : f64 = (boxMinY - origin.y) * invDirY;
+        const tAtMaxY : f64 = (boxMaxY - origin.y) * invDirY;
+        let tNearY : f64 = tAtMinY;
+        let tFarY : f64 = tAtMaxY;
+        if (tAtMinY > tAtMaxY) {
+            tNearY = tAtMaxY;
+            tFarY = tAtMinY;
+        }
+        if (tNearY > tEntry) {
+            tEntry = tNearY;
+            entryAxis = 1;
+        }
+        if (tFarY < tExit) {
+            tExit = tFarY;
+        }
+    } else if (origin.y < boxMinY || origin.y > boxMaxY) {
+        return 0;
+    }
+
+    // Z slab
+    if (dir.z != 0.0) {
+        const invDirZ : f64 = 1.0 / dir.z;
+        const tAtMinZ : f64 = (boxMinZ - origin.z) * invDirZ;
+        const tAtMaxZ : f64 = (boxMaxZ - origin.z) * invDirZ;
+        let tNearZ : f64 = tAtMinZ;
+        let tFarZ : f64 = tAtMaxZ;
+        if (tAtMinZ > tAtMaxZ) {
+            tNearZ = tAtMaxZ;
+            tFarZ = tAtMinZ;
+        }
+        if (tNearZ > tEntry) {
+            tEntry = tNearZ;
+            entryAxis = 2;
+        }
+        if (tFarZ < tExit) {
+            tExit = tFarZ;
+        }
+    } else if (origin.z < boxMinZ || origin.z > boxMaxZ) {
+        return 0;
+    }
+
+    if (tExit < tEntry) {
+        return 0;
+    }
+
+    // Outward normal of the entry face = opposite the ray direction on that axis.
+    if (entryAxis == 0) {
+        return dir.x < 0.0 ? 1 : 2;
+    }
+    if (entryAxis == 2) {
+        return dir.z < 0.0 ? 5 : 6;
+    }
+    if (entryAxis == 1) {
+        return dir.y < 0.0 ? 3 : 4;
+    }
+    return 3;   // origin inside the box → treat as a top hit
+}
+
+/**
+ * True if the unit cube at `cell` overlaps the player's body
+ * (a `Motion::PLAYER_RADIUS` disc, ~1.8 blocks tall) — used to refuse placing a
+ * block inside yourself.
+ * @param p     the player to test against
+ * @param cell  the world voxel
+ * @return true if the cell overlaps the player's body box
+ */
+fn cellInPlayer(p : Player, cell : IVec3) : bool {
+    const r : f64 = Motion::PLAYER_RADIUS;
+    const minX : f64 = p.pos.x - r;
+    const maxX : f64 = p.pos.x + r;
+    const minZ : f64 = p.pos.z - r;
+    const maxZ : f64 = p.pos.z + r;
+    const minY : f64 = p.pos.y;
+    const maxY : f64 = p.pos.y + 1.8;
+    const fx : f64 = cell.x as f64;
+    const fy : f64 = cell.y as f64;
+    const fz : f64 = cell.z as f64;
+    return fx < maxX && fx + 1.0 > minX
+        && fz < maxZ && fz + 1.0 > minZ
+        && fy < maxY && fy + 1.0 > minY;
+}

@@ -39,7 +39,7 @@ class World {
     // unavailable or disabled. 60 matches a typical display.
     static TICK_HZ : i32 = 60;
 
-    // ── Scheduler cadences (see `game::tick::TickManager`) ──────
+    // ── Scheduler cadences (see `game::rules::tick::TickManager`) ──────
     // Heavy, low-urgency systems run on a coarser uniform cadence than physics.
     // The mob cull + spawn-ring scan (formerly every tick) only needs to top the
     // population up a few times a second; it is invisible because spawning is
@@ -47,7 +47,7 @@ class World {
     // cross), not periodic, so it has no constant here.
     static MAINTAIN_TICKS : i32 = 10;  // mob cull + spawn scan every 10 ticks (~6 Hz)
 
-    // ── Block-update sim (`kworld::blocksim`) ───────────────────
+    // ── Block-update sim (`world::sim::blocksim`) ───────────────────
     // Falling blocks + edit-driven water flow are stepped on this cadence, with a
     // per-step cell budget so a big disturbance spreads over a few frames instead
     // of spiking. The queue caps total pending cells (drop-on-full keeps it

@@ -1,0 +1,182 @@
+// selection — the targeted-block wireframe, split out of Renderer.
+//
+// A small owned helper (the Renderer holds one) that draws the soft,
+// depth-tested outline on the block the player is looking at. It keeps its OWN
+// 8-corner projection scratch, so it never touches the Renderer's world-face
+// buffers — one-way dependency (render → selection), no import cycle. Hidden
+// (back) edges are culled against the z-buffer so the box reads as an outline
+// on the block, not a see-through cage.
+
+use smalt::Mem;
+use smalt::Color;
+use crate::engine::math::narrow::{ floatOf };
+use crate::engine::render::cpu::raster::{ FrameBuf, Camera, Lens, Projected };
+use crate::engine::math::vec3::{ Vec3, vec3 };
+use crate::engine::entity::player::Player;
+use crate::configs::screen::{ Screen };
+
+class Selection {
+    csx : i64,   // projected screen x / y / inverse depth for the 8 box corners
+    csy : i64,
+    ciz : i64,
+
+    /** Allocate the 8-corner projection scratch. */
+    constructor() {
+        self.csx = Mem::take(8 * 8);
+        self.csy = Mem::take(8 * 8);
+        self.ciz = Mem::take(8 * 8);
+    }
+
+    /**
+     * Project a world point to screen slot `k`, storing screen x/y and inverse
+     * depth; false (with a sentinel x) if behind the near plane.
+     * @param cam  the camera (eye + orientation + projection width)
+     * @param w    the world-space point
+     * @param k    scratch slot index to store the result in
+     * @return true if the point is in front of the near plane
+     */
+    fn projCorner(self, cam : Camera, w : Vec3, k : i32) : bool {
+        const pr : Projected = cam.project(w);
+        if (pr.cz < Screen::NEAR_PLANE) {
+            return false;
+        }
+        Mem::putRealOf(self.csx, k, pr.sx);
+        Mem::putRealOf(self.csy, k, pr.sy);
+        Mem::putRealOf(self.ciz, k, pr.iz);
+        return true;
+    }
+
+    /**
+     * Stamp a soft 2×2 dot at (px, py) if its inverse depth `iz` is not behind
+     * the z-buffer — so the outline only shows on visible faces (no back edges
+     * bleeding through).
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param px     dot top-left x
+     * @param py     dot top-left y
+     * @param iz     inverse depth of the dot
+     * @param color  dot color
+     */
+    fn selDot(self, fb : FrameBuf, px : i32, py : i32, iz : f64, color : i32) : void {
+        const pixels : i64 = fb.pixels;
+        const zbuf : i64 = fb.zbuf;
+        const w : i32 = fb.w;
+        const h : i32 = fb.h;
+
+        for (yy of py..py + 2) {
+            for (xx of px..px + 2) {
+                if (xx >= 0 && xx < w && yy >= 0 && yy < h) {
+                    const idx : i32 = yy * w + xx;
+                    // A hair in front of the surface it sits on; well in front of
+                    // nothing means a back edge stays hidden.
+                    if (iz * 1.004 >= floatOf(zbuf, idx)) {
+                        Mem::putWordOf(pixels, idx, color);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Depth-tested thick line between projected corners a and b.
+     * @param fb     the render target (framebuffer + z-buffer + size)
+     * @param a      first projected corner slot
+     * @param b      second projected corner slot
+     * @param color  line color
+     */
+    fn selEdge(self, fb : FrameBuf, a : i32, b : i32, color : i32) : void {
+        const ax : f64 = Mem::realOf(self.csx, a);
+        const bx : f64 = Mem::realOf(self.csx, b);
+        if (ax < 0.0 - 1.0e8 || bx < 0.0 - 1.0e8) {
+            return;
+        }
+
+        const ay : f64 = Mem::realOf(self.csy, a);
+        const by : f64 = Mem::realOf(self.csy, b);
+        const aiz : f64 = Mem::realOf(self.ciz, a);
+        const biz : f64 = Mem::realOf(self.ciz, b);
+        const ddx : f64 = bx - ax;
+        const ddy : f64 = by - ay;
+
+        let adx : f64 = ddx;
+        if (adx < 0.0) {
+            adx = 0.0 - adx;
+        }
+        let ady : f64 = ddy;
+        if (ady < 0.0) {
+            ady = 0.0 - ady;
+        }
+        let steps : i32 = adx.floorToInt() as i32;
+        if (ady.floorToInt() as i32 > steps) {
+            steps = ady.floorToInt() as i32;
+        }
+        if (steps < 1) {
+            steps = 1;
+        }
+
+        const inv : f64 = 1.0 / (steps as f64);
+        for (i of 0..steps + 1) {
+            const t : f64 = (i as f64) * inv;
+            const px : i32 = (ax + ddx * t).floorToInt() as i32;
+            const py : i32 = (ay + ddy * t).floorToInt() as i32;
+            const iz : f64 = aiz + (biz - aiz) * t;
+            self.selDot(fb, px, py, iz, color);
+        }
+    }
+
+    /**
+     * Draw the Minecraft-style selection box: a soft, depth-tested wireframe on
+     * the targeted block (bx, by, bz). Back edges are culled by the z-buffer so
+     * it reads as an outline on the block, not a see-through cage.
+     * @param p     player providing the eye position and orientation
+     * @param fb    the render target (framebuffer + z-buffer + size)
+     * @param lens  the frame's projection centre + focal length
+     * @param bx    targeted block x
+     * @param by    targeted block y
+     * @param bz    targeted block z
+     * @param topH  the block's real height (1.0 full, snowDepth for a thin snow
+     *              layer) so the outline hugs the true box, not a cube
+     */
+    pub(crate) fn draw(
+        self,
+        p : Player,
+        fb : FrameBuf,
+        lens : Lens,
+        bx : i32,
+        by : i32,
+        bz : i32,
+        topH : f64
+    ) : void {
+        const cam : Camera = Camera {
+            eye: p.eye,
+            cosy: p.cosy,
+            siny: p.siny,
+            cosp: p.cosp,
+            sinp: p.sinp,
+            lens,
+        };
+
+        for (k of 0..8) {
+            const cdx : f64 = (k & 1) as f64;
+            const cdy : f64 = ((k / 2) & 1) as f64 * topH;
+            const cdz : f64 = ((k / 4) & 1) as f64;
+            const corner : Vec3 = vec3((bx as f64) + cdx, (by as f64) + cdy, (bz as f64) + cdz);
+            if (!self.projCorner(cam, corner, k)) {
+                Mem::putRealOf(self.csx, k, 0.0 - 1.0e9);
+            }
+        }
+
+        const col : i32 = Color::packBytes(36, 38, 44);
+        self.selEdge(fb, 0, 1, col);
+        self.selEdge(fb, 2, 3, col);
+        self.selEdge(fb, 4, 5, col);
+        self.selEdge(fb, 6, 7, col);
+        self.selEdge(fb, 0, 2, col);
+        self.selEdge(fb, 1, 3, col);
+        self.selEdge(fb, 4, 6, col);
+        self.selEdge(fb, 5, 7, col);
+        self.selEdge(fb, 0, 4, col);
+        self.selEdge(fb, 1, 5, col);
+        self.selEdge(fb, 2, 6, col);
+        self.selEdge(fb, 3, 7, col);
+    }
+}

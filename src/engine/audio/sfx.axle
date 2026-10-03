@@ -1,0 +1,597 @@
+// sfx — the game's audio orchestrator. Owns the single software Mixer and every
+// sound bank, and exposes semantic play methods. Positional sounds (a mob's
+// voice, a dug block, the creeper's fuse / blast) carry their WORLD POSITION and
+// an audible range; the mixer attenuates them live against the listener set each
+// frame via `setListener`, so a sound fades as the player walks away — even
+// mid-playback. The player's own sounds (footstep, hurt, splash, ambience) are
+// non-positional and play at a fixed gain.
+//
+// The manager is split by capability into small components: a `BankLoader`
+// resolves the sounds/ prefix once and decodes banks; a `Cue` is a loaded bank
+// with its gain (and, for a 3D source, its range) that plays one random variant
+// — non-positional via `Voiced.play`, distance-attenuated via `Positional.playAt`.
+// Footstep / dig material banks and mob voices are modelled uniformly as Cues
+// (grouped by `MaterialSound` and `MobVoice`), so the manager holds no bespoke
+// per-sound fields — only cues it emits under the mixer lock. Clips live under
+// `assets/sounds/` (next to the binary or one dir up — the prefix is resolved
+// once). Missing files are silent.
+//
+// The device is pumped on its own OS thread so a slow render/bake frame
+// can't starve the queue and stutter the sound. That loop, the flag that
+// ends it and the lock that makes it safe are all smalt's now
+// (`smalt::mixerLoop`); this file used to carry a spinlock and a
+// thirty-line pump loop of its own for them.
+
+use smalt::{AssetFile, Mixer, SoundBank};
+
+use crate::engine::block::blocks::materialOf;
+use crate::engine::math::vec3::{ Vec3, IVec3, vec3 };
+use crate::configs::audio::{ Audio, AudioMaterial };
+use crate::configs::blocks::{ Block };
+use crate::configs::mobs::{ MobKind };
+
+/**
+ * Folder name under `step/` and `dig/` for the material with discriminant `m`
+ * (0=Grass … 7=Glass, the AudioMaterial enum order). A single index→folder data
+ * map that folds the former `materialAt` (index→material) and `matFolder`
+ * (material→folder) pair into one lookup — the load loop walks discriminants
+ * directly, and the play path already indexes the cues by `material as i32`.
+ * @param m  the material discriminant
+ * @return the material's folder name
+ */
+fn matFolder(m : i32) : string {
+    return match m {
+        0 => "grass",
+        1 => "sand",
+        2 => "gravel",
+        3 => "snow",
+        4 => "stone",
+        5 => "wood",
+        6 => "foliage",
+        _ => "glass",
+    };
+}
+
+/**
+ * Load sound banks from disk. Resolves the `assets/sounds/` prefix once (next to
+ * the binary, or one directory up) and decodes banks relative to it — the sole
+ * owner of the on-disk layout, so the manager only deals in loaded cues.
+ */
+class BankLoader : Closeable {
+    /** Slots a fresh loader starts with; it doubles from there. */
+    static INITIAL_SLOTS : i32 = 32;
+
+    /** Numbered variants a sound folder may hold — `1.wav`..`8.wav`. */
+    static VARIANTS : i32 = 8;
+
+    base : string,
+    /**
+     * Every bank this loader made, so exactly one thing closes each.
+     *
+     * A `SoundBank` owns decoded PCM, and a cue holds one *without*
+     * owning it — the player-hurt bank is the shared fallback for three
+     * species, so four cues name the same bank. Letting a cue close it
+     * would free the same clips four times; letting nobody close it
+     * would leak every sound in the game. Neither is a choice worth
+     * making per cue, so the creator keeps them and the creator closes
+     * them.
+     *
+     * A bank is never bound to a local on its way in here, which is not
+     * a style choice: a `Closeable` local must be closed on the path
+     * that binds it (E0511), and the whole point of this table is that
+     * the path which *makes* a bank is not the one that releases it.
+     * Every one goes straight from `new` into this array.
+     */
+    banks : SoundBank[],
+    count : i32,
+    cap : i32,
+
+    /** Resolve the sounds prefix by probing a known clip. */
+    constructor() {
+        self.base = "assets/sounds/";
+        if (!AssetFile::exists("assets/sounds/step/grass/1.wav")) {
+            self.base = "../assets/sounds/";
+        }
+        self.cap = BankLoader::INITIAL_SLOTS;
+        self.banks = malloc<SoundBank>(self.cap as i64);
+        self.count = 0;
+    }
+
+    /**
+     * Make room for one more bank, doubling the table when it is full.
+     *
+     * Growing rather than capping is what removes the question a fixed
+     * size would leave open: a table sized from the material count is a
+     * number to keep true, and the answer to getting it wrong would be
+     * either a leaked bank or a refused sound. Doubling happens at most
+     * a couple of times, at startup, over a table of handles.
+     */
+    fn reserve(mut self) : void {
+        if (self.count < self.cap) {
+            return;
+        }
+        const grown : i32 = self.cap * 2;
+        let wider : SoundBank[] = malloc<SoundBank>(grown as i64);
+        for (i of 0..self.count) {
+            wider[i] = self.banks[i];
+        }
+        free(self.banks);
+        self.banks = wider;
+        self.cap = grown;
+    }
+
+    /**
+     * Take a fresh bank into the table and answer its slot.
+     *
+     * The slot rather than the bank, so the caller fills it in place —
+     * a returned bank would have to be bound to a local to add clips to,
+     * and that local is what `Closeable` refuses.
+     * @param capacity  how many clips the new bank can hold
+     * @return the slot the new bank was stored in
+     */
+    fn keepNew(mut self, capacity : i32) : i32 {
+        self.reserve();
+        self.banks[self.count] = new SoundBank(capacity);
+        self.count++;
+        return self.count - 1;
+    }
+
+    /**
+     * A bank of the numbered variants `1.wav`..`8.wav` under `<base><rel>/`
+     * (missing files skipped silently).
+     * @param rel  the folder, relative to the sounds prefix
+     * @return the loaded bank, owned by this loader
+     */
+    pub(file) fn dir(mut self, rel : string) : SoundBank {
+        const slot : i32 = self.keepNew(BankLoader::VARIANTS);
+        for (i of 1..=BankLoader::VARIANTS) {
+            self.banks[slot].add(self.base + rel + "/" + i + ".wav");
+        }
+        return self.banks[slot];
+    }
+
+    /**
+     * A one-clip bank from the single file `<base><rel>` (a bespoke sound that
+     * is not a numbered variant folder, e.g. the creeper's charge / blast).
+     * @param rel  the file path, relative to the sounds prefix
+     * @return the loaded bank, owned by this loader
+     */
+    pub(file) fn file(mut self, rel : string) : SoundBank {
+        const slot : i32 = self.keepNew(1);
+        self.banks[slot].add(self.base + rel);
+        return self.banks[slot];
+    }
+
+    /**
+     * An empty bank — a cue that is a silent no-op, which is what the
+     * creeper has instead of an idle voice.
+     * @return the empty bank, owned by this loader
+     */
+    pub(file) fn empty(mut self) : SoundBank {
+        return self.banks[self.keepNew(1)];
+    }
+
+    /**
+     * Release every bank.
+     *
+     * Must run **after** the mixer closes: a voice holds sample
+     * addresses, not clips, so one still playing out of a bank that has
+     * been freed reads memory nobody owns.
+     */
+    fn close(self) : void {
+        for (i of 0..self.count) {
+            self.banks[i].close();
+        }
+        free(self.banks);
+    }
+}
+
+/**
+ * Play one random variant of a sound group at a fixed, non-positional gain — the
+ * player's own sounds (footstep, hurt, splash, ambience), which are heard at the
+ * same level wherever they happen.
+ */
+trait Voiced {
+    /**
+     * Play one random variant at a fixed gain.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn play(self, mx : Mixer, rnd : f64) : void;
+}
+
+/**
+ * Play one random variant as a 3D world source, attenuated live by listener
+ * distance — a mob's voice, a dug block, the creeper's fuse / blast, which fade
+ * as the player walks away.
+ */
+trait Positional {
+    /**
+     * Play one random variant as a world source at `pos`.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
+    fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void;
+}
+
+/**
+ * A loaded sound group ready to play: its bank plus the playback `gain` and (for
+ * a positional source) the audible `range`. One Cue serves both capabilities —
+ * the caller chooses `play` (non-positional) or `playAt` (3D-attenuated) — so the
+ * same abstraction models every sound the game emits. Playing an empty bank (a
+ * species with no clip) is a silent no-op, folding the old "if loaded" guards
+ * into the play path. `bank.loaded()` is read directly for material fallback.
+ */
+struct Cue : Voiced, Positional {
+    bank : SoundBank,
+    gain : f64,
+    range : f64,
+
+    /**
+     * Play a random variant at the fixed gain (non-positional).
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn play(self, mx : Mixer, rnd : f64) : void {
+        self.bank.playRand(mx, rnd, self.gain);
+    }
+
+    /**
+     * Play a random variant at `pos`, attenuated live by listener distance.
+     * @param mx   the mixer to queue the voice on
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
+    fn playAt(self, mx : Mixer, rnd : f64, pos : Vec3) : void {
+        self.bank.playRandPos(
+            mx,
+            rnd,
+            self.gain,
+            pos.x,
+            pos.y,
+            pos.z,
+            self.range
+        );
+    }
+}
+
+/**
+ * A material's two ground sounds: the non-positional `step` under the listener's
+ * feet and the positional `dig` at the edited block. One per AudioMaterial,
+ * indexed by discriminant; a material with no clip falls back to stone's cue.
+ */
+struct MaterialSound {
+    step : Cue,
+    dig : Cue,
+}
+
+/**
+ * A mob species' positional voice: an idle `say` cue and a `hurt` cry cue, both
+ * attenuated live by distance. One per MobKind, indexed by discriminant — a
+ * species with no dedicated hurt clip reuses the shared player-hurt bank, and
+ * the creeper's say cue wraps an empty bank (a silent no-op).
+ */
+struct MobVoice {
+    say : Cue,
+    hurt : Cue,
+}
+
+/**
+ * Publish the listener (player) position each frame so positional cues attenuate
+ * live by distance. Implemented by AudioManager, which owns the mixer.
+ */
+trait Listener {
+    /**
+     * Publish where the listener stands this frame.
+     * @param at  the listener position, in world space
+     */
+    fn setListener(self, at : Vec3) : void;
+}
+
+class AudioManager : Listener, Closeable {
+    /**
+     * The device and the voices. Public to the crate because `main`
+     * hands it to `smalt::mixerLoop` — the pump thread takes the mixer,
+     * not this manager, and the mixer takes its own lock.
+     */
+    pub(crate) mixer : Mixer,
+    banks : BankLoader,          // the one owner of every decoded clip; closed last
+    materials : MaterialSound[], // footstep + dig cues, indexed by AudioMaterial
+    voices : MobVoice[],         // one voice per MobKind, indexed by its discriminant
+    playerHurtCue : Cue,
+    splashCue : Cue,
+    ambientCue : Cue,
+    creeperFuseCue : Cue,
+    creeperBlastCue : Cue,
+
+    /** Open the mixer, resolve the sounds/ prefix and load every cue. */
+    constructor() {
+        self.mixer = new Mixer();
+        self.banks = new BankLoader();
+
+        // Per-material footstep + dig cues. `m` IS the AudioMaterial discriminant,
+        // so the cues land at the same index the play path reads them by
+        // (`material as i32`); variants are auto-discovered 1..8.
+        self.materials = malloc<MaterialSound>(Audio::MATERIAL_COUNT);
+        for (m of 0..Audio::MATERIAL_COUNT) {
+            self.materials[m] = MaterialSound {
+                step: Cue {
+                    bank: self.banks.dir("step/" + matFolder(m)),
+                    gain: Audio::VOL_FOOTSTEP,
+                    range: 0.0,
+                },
+                dig: Cue {
+                    bank: self.banks.dir("dig/" + matFolder(m)),
+                    gain: Audio::VOL_BREAK,
+                    range: Audio::BREAK_DIST,
+                },
+            };
+        }
+
+        // The player's own non-positional sounds. The hurt bank is reused
+        // below as the shared fallback for species with no dedicated hurt
+        // cry, and it is reached through the cue that already holds it —
+        // a local binding for a bank the loader owns would be a second
+        // name for one resource, which is exactly what the `Closeable`
+        // contract refuses (E0511).
+        self.playerHurtCue = Cue {
+            bank: self.banks.dir("player/hurt"),
+            gain: Audio::VOL_PLAYER,
+            range: 0.0,
+        };
+        self.splashCue = Cue {
+            bank: self.banks.dir("player/splash"),
+            gain: Audio::VOL_PLAYER,
+            range: 0.0,
+        };
+        self.ambientCue = Cue {
+            bank: self.banks.dir("ambient/underwater"),
+            gain: Audio::VOL_AMBIENT,
+            range: 0.0,
+        };
+
+        // One positional voice (idle say + hurt cry) per MobKind, at mob gain /
+        // range. Sheep / pig / creeper have no dedicated hurt clip, so their hurt
+        // cue reuses the shared player-hurt bank; the creeper has no idle voice,
+        // so its say cue wraps an empty bank (a silent no-op).
+        self.voices = malloc<MobVoice>(5);
+        self.voices[MobKind::Chicken as i32] = MobVoice {
+            say: Cue {
+                bank: self.banks.dir("mob/chicken/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.banks.dir("mob/chicken/hurt"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+        };
+        self.voices[MobKind::Sheep as i32] = MobVoice {
+            say: Cue {
+                bank: self.banks.dir("mob/sheep/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+        };
+        self.voices[MobKind::Cow as i32] = MobVoice {
+            say: Cue {
+                bank: self.banks.dir("mob/cow/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.banks.dir("mob/cow/hurt"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+        };
+        self.voices[MobKind::Creeper as i32] = MobVoice {
+            say: Cue {
+                bank: self.banks.empty(),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+        };
+        self.voices[MobKind::Pig as i32] = MobVoice {
+            say: Cue {
+                bank: self.banks.dir("mob/pig/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+        };
+
+        // The creeper's charge / blast are single bespoke files (not numbered
+        // variant folders), so load them directly.
+        self.creeperFuseCue = Cue {
+            bank: self.banks.file("mob/creeper/charge.wav"),
+            gain: Audio::VOL_CREEPER,
+            range: Audio::CREEPER_DIST,
+        };
+        self.creeperBlastCue = Cue {
+            bank: self.banks.file("mob/creeper/exploded.wav"),
+            gain: Audio::VOL_CREEPER,
+            range: Audio::CREEPER_DIST,
+        };
+    }
+
+    /**
+     * Set the listener (player) position for live distance attenuation.
+     * @param at  where the listener is, in world space
+     */
+    fn setListener(self, at : Vec3) : void {
+        self.mixer.setListener(at.x, at.y, at.z);
+    }
+
+    /**
+     * Emit a non-positional cue.
+     *
+     * No lock here any more: `Mixer` takes its own, so the pump thread
+     * and this one are serialised inside the library rather than by an
+     * agreement between two files that both had to remember it.
+     * @param cue  the cue to play
+     * @param rnd  variant selector in [0, 1)
+     */
+    fn emit(self, cue : Cue, rnd : f64) : void {
+        cue.play(self.mixer, rnd);
+    }
+
+    /**
+     * Emit a positional cue at `pos`.
+     * @param cue  the cue to play
+     * @param rnd  variant selector in [0, 1)
+     * @param pos  the source world position
+     */
+    fn emitAt(self, cue : Cue, rnd : f64, pos : Vec3) : void {
+        cue.playAt(self.mixer, rnd, pos);
+    }
+
+    /** Ask the pump thread to finish (call before joining it on quit). */
+    pub(crate) fn stop(self) : void {
+        self.mixer.requestStop();
+    }
+
+    /**
+     * Release the device and every decoded clip.
+     *
+     * Called after the audio thread has been stopped *and joined* — the
+     * pump runs on that thread, and closing the device under it is a
+     * mixer reading a handle that has been given back.
+     *
+     * The order inside is the one smalt's `SoundBank` states: the mixer
+     * first, because its voices hold sample addresses out of the banks.
+     */
+    fn close(self) : void {
+        self.mixer.close();
+        self.banks.close();
+    }
+
+    /**
+     * The footstep cue for material `mat`, falling back to stone where the
+     * material has no footfall clip (e.g. ice).
+     * @param mat  the surface material
+     * @return the cue to play
+     */
+    fn stepCue(self, mat : AudioMaterial) : Cue {
+        let c : Cue = self.materials[mat as i32].step;
+        if (!c.bank.loaded()) {
+            c = self.materials[AudioMaterial::Stone as i32].step;
+        }
+        return c;
+    }
+
+    /**
+     * The dig cue for material `mat`, falling back to stone where the material
+     * has no dig clip.
+     * @param mat  the edited block's material
+     * @return the cue to play
+     */
+    fn digCue(self, mat : AudioMaterial) : Cue {
+        let c : Cue = self.materials[mat as i32].dig;
+        if (!c.bank.loaded()) {
+            c = self.materials[AudioMaterial::Stone as i32].dig;
+        }
+        return c;
+    }
+
+    /**
+     * Footstep for the block underfoot (the listener's own step, fixed gain).
+     * @param blockId  the block stepped on
+     * @param rnd      variant selector in [0, 1)
+     */
+    pub(crate) fn footstep(self, blockId : Block, rnd : f64) : void {
+        self.emit(self.stepCue(materialOf(blockId)), rnd);
+    }
+
+    /**
+     * Dig / place sound at a block, attenuated live by distance.
+     * @param blockId  the block broken or placed
+     * @param cell     the block cell
+     * @param rnd      variant selector in [0, 1)
+     */
+    pub(crate) fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
+        const center : Vec3 = vec3(
+            (cell.x as f64) + 0.5,
+            (cell.y as f64) + 0.5,
+            (cell.z as f64) + 0.5
+        );
+        self.emitAt(self.digCue(materialOf(blockId)), rnd, center);
+    }
+
+    /**
+     * A mob's idle voice at its world position, attenuated live by distance.
+     * @param kind  the mob kind
+     * @param pos   the source position
+     * @param rnd   variant selector in [0, 1)
+     */
+    pub(crate) fn mobSay(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+        self.emitAt(self.voices[kind as i32].say, rnd, pos);
+    }
+
+    /**
+     * A mob's hurt cry at its world position. Species without a dedicated clip
+     * fall back to the generic impact (player hurt) sound.
+     * @param kind  the mob kind
+     * @param pos   the source position
+     * @param rnd   variant selector in [0, 1)
+     */
+    pub(crate) fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
+        self.emitAt(self.voices[kind as i32].hurt, rnd, pos);
+    }
+
+    /**
+     * The player taking damage (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    pub(crate) fn playerHurt(self, rnd : f64) : void {
+        self.emit(self.playerHurtCue, rnd);
+    }
+
+    /**
+     * A splash as the player enters water (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    pub(crate) fn splash(self, rnd : f64) : void {
+        self.emit(self.splashCue, rnd);
+    }
+
+    /**
+     * A soft underwater ambience while submerged (non-positional).
+     * @param rnd  variant selector in [0, 1)
+     */
+    pub(crate) fn ambientUnderwater(self, rnd : f64) : void {
+        self.emit(self.ambientCue, rnd);
+    }
+
+    /**
+     * The creeper lighting its fuse, attenuated live by distance.
+     * @param pos  the creeper position
+     */
+    pub(crate) fn creeperFuse(self, pos : Vec3) : void {
+        self.emitAt(self.creeperFuseCue, 0.0, pos);
+    }
+
+    /**
+     * The creeper detonating, attenuated live by distance.
+     * @param pos  the creeper position
+     */
+    pub(crate) fn creeperBlast(self, pos : Vec3) : void {
+        self.emitAt(self.creeperBlastCue, 0.0, pos);
+    }
+}

@@ -1,0 +1,1959 @@
+// lightstore — the per-voxel LIGHT data of the chunk ring, split out of
+// ChunkManager.
+//
+// A LEAF mini-manager (imports only `smalt` + `configs`) holding the
+// per-voxel byte light volumes — block light, sky light, soft sun visibility,
+// hemispherical sky access and the one-bounce coloured tint — all indexed by the
+// shared `VoxStore.voxIdx` layout, plus the block-light flood stacks, the sky-AO
+// hemisphere ray table and the per-slot light/sky-AO dirty + sweep cursors.
+//
+// `LightEngine` (below) composes one (`self.lights`) and runs the light flood /
+// shadow / sky-AO passes over it; `ChunkManager` in turn composes a LightEngine.
+// The light engine co-owns the voxel field and the ring ownership with the
+// manager, each as a `Shared` handle, so the background light thread reaches the
+// live world with no copy — the data has a focused home.
+
+use smalt::Mem;
+use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
+use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
+use crate::engine::world::voxstore::VoxStore;
+use crate::engine::world::mesh::meshbuf::{ ColumnRing };
+use crate::engine::block::blocks::{
+    isOpaque, lightTransmit, emissionOf, albedoFor, Emission
+};
+use crate::engine::seams::{
+    LightSample, LightMoment, CornerProbe, CornerSample, ChannelLevels
+};
+use crate::configs::blocks::{ Block };
+use crate::configs::light::{ Light };
+use crate::engine::shade::daymodel::{ SkyBodyLight, activeBody };
+use crate::engine::sky::cloud::{ cloudFieldAt };
+use crate::engine::sky::cloudlight::{ CloudMap };
+use crate::configs::time::{ Daylight };
+use crate::configs::world::{ World };
+
+/**
+ * Threads the priority sun-shadow bake is split over.
+ *
+ * It only ever runs on a ring that has just filled — the start of a run, or a
+ * walk into new chunks — so it is a burst, not a load: the render is between
+ * frames or waiting on the very chunks this is lighting. Sized for the burst,
+ * not for a steady share of the machine.
+ */
+const SUN_BAKE_WORKERS : i32 = 8;
+
+/**
+ * A chunk found once for the four cells of a face corner: which slot holds it,
+ * and where its origin sits in the world, so the four reads can subtract it
+ * rather than divide their way down to it again.
+ *
+ * `slot` is -1 when the corner straddles a chunk border or the chunk is not
+ * loaded, and the origin means nothing then.
+ */
+struct CornerChunk {
+    slot : i32,
+    ox : i32,
+    oz : i32,
+}
+
+/**
+ * The mean of one channel of four packed bounce tints.
+ * @param b0     the corner's own tint
+ * @param b1     one step along the first in-plane axis
+ * @param b2     one step along the second
+ * @param b3     one step along both
+ * @param shift  where the channel sits in the packed word
+ * @return the channel's mean, 0..255
+ */
+fn chanMean(b0 : i32, b1 : i32, b2 : i32, b3 : i32, shift : i32) : i32 {
+    return (((b0 >> shift) & 0xFF) + ((b1 >> shift) & 0xFF)
+        + ((b2 >> shift) & 0xFF) + ((b3 >> shift) & 0xFF)) / 4;
+}
+
+/**
+ * The mean of the four cells meeting at a face corner.
+ *
+ * The bounce tint averages per channel: packed, its channels would carry each
+ * other's overflow and a corner between a green cell and a red one would come
+ * out neither.
+ * @param s0  the corner's own cell
+ * @param s1  one step along the first in-plane axis
+ * @param s2  one step along the second
+ * @param s3  one step along both
+ * @return the averaged terms
+ */
+fn blend4(
+    s0 : CornerSample,
+    s1 : CornerSample,
+    s2 : CornerSample,
+    s3 : CornerSample
+) : CornerSample {
+    const r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    const g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    const b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+
+    return CornerSample {
+        sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
+        sky: (s0.sky + s1.sky + s2.sky + s3.sky) / 4,
+        bounce: r * 65536 + g * 256 + b,
+    };
+}
+
+/**
+ * One entry of the block-light removal stack: a voxel + its old light level.
+ *
+ * At the width the values need. `x` and `z` are world columns and stay whole
+ * words; `y` is a level of the world and a step either side of one, which is
+ * a short; a light level is 0..15, which is a byte. The stack holds
+ * `Light::QUEUE_CAP` of these, so the four bytes that leaves are a quarter of
+ * a megabyte. The x/z pair leads so the short and the byte share the tail
+ * word rather than each taking one.
+ */
+struct LightRemoval {
+    x : i32,
+    z : i32,
+    y : i16,
+    lvl : i8,
+}
+
+/**
+ * One four-bit plane inside a byte volume: the volume, and which half of each
+ * byte is this plane's.
+ *
+ * Block light per channel and sky light are levels 0..15, and a level was
+ * stored in a byte of its own — four planes, forty-eight megabytes, half of
+ * every byte always zero. Two planes share a byte now; the flood and the
+ * readers go through this handle and never see the other half.
+ */
+struct Nibble {
+    base : i64,   // the byte volume, in voxIdx layout
+    shift : i32,  // 0 for the low half, 4 for the high
+}
+
+/**
+ * The plane's level at a byte offset.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @return the level 0..15
+ */
+fn nibGet(p : Nibble, off : i64) : i32 {
+    return (Mem::byteAt(p.base, off) >> p.shift) & 15;
+}
+
+/**
+ * Store a level in the plane's half of the byte, leaving the other half as
+ * it was. Whole-byte read-modify-write; the two halves of a byte are only ever
+ * written by the one thread that runs the floods, so nothing is torn.
+ * @param p    the plane
+ * @param off  the cell's voxIdx offset
+ * @param v    the level 0..15
+ */
+fn nibPut(p : Nibble, off : i64, v : i32) : void {
+    const keep : i32 = Mem::byteAt(p.base, off) & (0xF0 >> p.shift);
+    Mem::putByte(p.base, off, keep | ((v & 15) << p.shift));
+}
+
+/**
+ * The seven per-voxel light volumes (each a raw byte array in voxIdx layout):
+ * block light per CHANNEL and sky light (0..15, two planes to a byte), soft
+ * sun visibility + hemispherical sky access (0..255), and the one-bounce
+ * coloured indirect tint (r/g/b, 128 = neutral). Grouped so `LightStore`
+ * carries one field instead of seven loose pointers.
+ */
+struct LightVolumes {
+    lightRG : i64,   // per-voxel block light 0..15, red in the low nibble and
+                     // green in the high: a source floods each channel from its
+                     // own level, so the light carries its colour and its reach
+    lightBS : i64,   // ...blue in the low nibble, and SKY light 0..15 (open-to-
+                     // sky exposure) in the high
+    sunlit : i64,    // per-voxel SOFT sun visibility 0..255 (255 = full sun,
+                     // 0 = full shadow, between = penumbra)
+    skyaccess : i64, // per-voxel hemispherical SKY ACCESS 0..255 (AO / GI)
+    bnR : i64,       // per-voxel one-bounce COLOURED indirect tint (hue-only,
+    bnG : i64,       // 128 = neutral 1.0): sky-AO rays that hit a surface sample
+    bnB : i64,       // its albedo, so ambient bleeds the nearby colour.
+
+    /**
+     * The red block-light plane.
+     * @return its handle
+     */
+    fn red(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 0 };
+    }
+
+    /**
+     * The green block-light plane.
+     * @return its handle
+     */
+    fn green(self) : Nibble {
+        return Nibble { base: self.lightRG, shift: 4 };
+    }
+
+    /**
+     * The blue block-light plane.
+     * @return its handle
+     */
+    fn blue(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 0 };
+    }
+
+    /**
+     * The sky-light plane.
+     * @return its handle
+     */
+    fn sky(self) : Nibble {
+        return Nibble { base: self.lightBS, shift: 4 };
+    }
+}
+
+/** The precomputed upper-hemisphere ray directions used by the sky-AO bake. */
+struct HemiRays {
+    hemiX : i64,
+    hemiY : i64,
+    hemiZ : i64,
+}
+
+/**
+ * What one hemisphere ray came back with: how much of the sky it still saw
+ * after whatever it crossed, and the colour of the first thing that dimmed it
+ * (-1 if nothing did) — the surface the one bounce takes its hue from.
+ */
+struct HemiHit {
+    open : f64,
+    albedo : i32,
+}
+
+class LightStore {
+    pub(file) vols : LightVolumes, // the 9 per-voxel light volumes
+    pub(file) rays : HemiRays,     // M precomputed upper-hemisphere ray directions (sky-AO)
+    pub(file) sunCursor : i32,     // round-robin slot index for the throttled shadow refresh
+    pub(file) sunDirty : i8[],     // per-slot "sun shadows never baked here" flag — a slot
+                                   // carrying it jumps the round-robin queue, so a chunk
+                                   // arrives WITH its shadows instead of gaining them a
+                                   // second later as the cursor wanders past
+    pub(file) sunBaked : i64,      // per-slot direction of the light at that slot's last
+                                   // sun bake, three f32 a slot. A slot the light has
+                                   // barely moved over since would measure what it already
+                                   // holds, so it is skipped; the all-zero a slot starts
+                                   // with matches nothing, so a fresh slot always bakes
+    pub(file) skyAOcursor : i32,   // round-robin slot index for the throttled sky-AO bake
+    pub(file) skyAOdirty : i8[],   // per-slot "sky-access needs (re)baking" flag
+    pub(file) ldirty : i8[],       // per-slot "light changed → re-mesh" flag
+    pub(file) lq : IVec3[],        // block-light flood (add) stack — one voxel per entry
+    pub(file) lqn : i32,           // its depth
+    pub(file) rq : LightRemoval[], // block-light removal stack — voxel + its old level
+    pub(file) rqn : i32,           // its depth
+
+    /**
+     * Allocate the per-voxel light volumes (block / sky / sun / sky-access /
+     * bounce), the flood stacks, the per-slot dirty flags and the precomputed
+     * sky-AO hemisphere ray table.
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(slots : i32) {
+        const s : i32 = World::CHUNK_SIZE;
+        const vol : i64 = (slots as i64) * (s as i64) * (s as i64) * (World::HEIGHT as i64);
+
+        // Zeroed, not merely taken: a slot's volumes are given their real
+        // values by `clearLight` when a chunk lands in it, and until then every
+        // read of them — the mesher's corner average, the renderer's sample —
+        // would be reading whatever the allocator last left there.
+        self.vols = LightVolumes {
+            lightRG: Mem::takeZeroed(vol),
+            lightBS: Mem::takeZeroed(vol),
+            sunlit: Mem::takeZeroed(vol),
+            skyaccess: Mem::takeZeroed(vol),
+            bnR: Mem::takeZeroed(vol),
+            bnG: Mem::takeZeroed(vol),
+            bnB: Mem::takeZeroed(vol),
+        };
+        self.sunCursor = 0;
+        self.skyAOcursor = 0;
+
+        // Precompute M upper-hemisphere directions (Fibonacci spiral, cosine-ish)
+        // for the sky-access bake.
+        const m : i32 = Light::SKY_AO_SAMPLES;
+        self.rays = HemiRays {
+            hemiX: Mem::take((m as i64) * 8),
+            hemiY: Mem::take((m as i64) * 8),
+            hemiZ: Mem::take((m as i64) * 8),
+        };
+        for (hi of 0..m) {
+            const yy : f64 = ((hi as f64) + 0.5) / (m as f64); // 0..1 toward up
+            const rr : f64 = (1.0 - yy * yy).sqrt();
+            const th : f64 = (hi as f64) * 2.399963;           // golden angle
+            Mem::putRealOf(self.rays.hemiX, hi, rr * th.cos());
+            Mem::putRealOf(self.rays.hemiY, hi, yy);
+            Mem::putRealOf(self.rays.hemiZ, hi, rr * th.sin());
+        }
+
+        self.sunDirty = malloc<i8>(slots);
+        self.sunBaked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
+        self.skyAOdirty = malloc<i8>(slots);
+        self.ldirty = malloc<i8>(slots);
+
+        const lcap : i32 = Light::QUEUE_CAP;
+        self.lq = malloc<IVec3>(lcap);
+        self.lqn = 0;
+        self.rq = malloc<LightRemoval>(lcap);
+        self.rqn = 0;
+    }
+}
+
+/**
+ * The throttled per-frame light bake capability (directional sun soft-shadows +
+ * hemispherical sky-access / one-bounce GI), run by the background light thread.
+ */
+trait LightBaker {
+    /**
+     * One pass of the throttled bake: refresh the sun shadows and drain any
+     * pending sky-access / bounce work.
+     */
+    fn stepBake(mut self) : void;
+}
+
+/**
+ * LightEngine — the voxel LIGHTING engine, lifted whole out of ChunkManager.
+ *
+ * Owns the LightStore (per-voxel light volumes + flood stacks) and reads world
+ * topology through its own VoxStore view plus the chunk ring (loaded / cxs /
+ * czs), both co-owned with the manager — no data is copied, the light thread
+ * reaches the same voxels the manager does. It runs the block-light flood, the sky-light
+ * column + sideways gradient, the directional sun soft-shadow march and the
+ * hemispherical sky-access / one-bounce GI bake, and satisfies the LightSample
+ * read capabilities (Block/Sky/Sun/Bounce light fields) the renderer samples per
+ * face corner. The manager keeps only thin delegators + the mesh flush, so the
+ * whole lighting system finally has a focused, self-contained home.
+ */
+class LightEngine : LightSample, LightBaker {
+    store : VoxStore,             // this engine's view of the voxel field
+    lights : LightStore,          // per-voxel light volumes + flood stacks (owned here)
+    cols : Shared<ColumnRing>,    // the ring's loaded flags + chunk coords, co-owned
+    moment : LightMoment,         // the hour, the clock and the camera column, published
+                                  // by the main loop — everything the bake needs about now
+    clouds : CloudMap,            // the sun's transmittance through the deck, per column
+    lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
+
+    /**
+     * Compose the light volumes over a shared voxel field + ring ownership.
+     * @param store  this engine's view of the voxel field
+     * @param cols   the chunk ring, co-owned with the manager
+     * @param slots  the number of ring slots (span * span)
+     */
+    constructor(own store : VoxStore, own cols : Shared<ColumnRing>, slots : i32) {
+        self.store = store;
+        self.cols = cols;
+        self.lights = new LightStore(slots);
+        self.moment = LightMoment {
+            dayTime: Daylight::START,
+            seconds: 0.0,
+            camX: 0,
+            camZ: 0,
+        };
+        self.clouds = new CloudMap();
+        self.lightRunning = new AtomicBoolean(true);
+    }
+
+    // ── Grid / topology helpers ─────────────────────────────────
+
+    /**
+     * Floor division of `a` by `b` (toward negative infinity).
+     * @param a  the dividend
+     * @param b  the divisor
+     * @return the floored quotient
+     */
+    fn floorDiv(self, a : i32, b : i32) : i32 {
+        let q : i32 = a / b;
+        if (a - q * b < 0) {
+            q--;
+        }
+        return q;
+    }
+
+    /**
+     * Wrap a chunk coordinate into [0, span) for slot addressing.
+     * @param v  the chunk coordinate
+     * @return the coordinate wrapped into [0, span)
+     */
+    fn wrap(self, v : i32) : i32 {
+        const s : i32 = World::SPAN;
+        let m : i32 = v - (v / s) * s;
+        if (m < 0) {
+            m += s;
+        }
+        return m;
+    }
+
+    /**
+     * Slot index for chunk coords (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     * @return the ring slot that chunk maps to
+     */
+    fn slotFor(self, cx : i32, cz : i32) : i32 {
+        return self.wrap(cz) * World::SPAN + self.wrap(cx);
+    }
+
+    /**
+     * True if `slot` currently holds chunk (cx, cz).
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @return whether the slot is loaded with exactly that chunk
+     */
+    fn owns(self, slot : i32, cx : i32, cz : i32) : bool {
+        return self.cols.loaded[slot] == 1
+            && self.cols.cxs[slot] == cx
+            && self.cols.czs[slot] == cz;
+    }
+
+    /**
+     * Block id at a world voxel; bedrock below 0, air above / unloaded.
+     * @param cell  the world voxel
+     * @return the block id there
+     */
+    pub(crate) fn worldGet(self, cell : IVec3) : Block {
+        if (cell.y < 0) {
+            return Block::Stone;
+        }
+        if (cell.y >= World::HEIGHT) {
+            return Block::Air;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return Block::Air;
+        }
+        return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
+     * A world voxel for the MESHER's neighbour reads: the block that is there,
+     * or a wall where the ring holds no chunk yet.
+     *
+     * The difference from `worldGet` is what an unloaded neighbour means. To
+     * the light it is open air, which is right — the sky is up there. To a face
+     * it would be a window: every chunk on the ring's edge would grow a wall of
+     * faces toward the chunks that have not arrived, and drop them the moment
+     * they do. A wall says the same thing the old skirt used to say there —
+     * nothing to draw — and when the neighbour lands, `regen` flags this chunk
+     * and the faces that are really open are meshed then.
+     * @param cell  the world voxel
+     * @return the block id, or Stone past the ring
+     */
+    pub(crate) fn worldGetOrWall(self, cell : IVec3) : Block {
+        if (cell.y < 0) {
+            return Block::Stone;
+        }
+        if (cell.y >= World::HEIGHT) {
+            return Block::Air;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return Block::Stone;
+        }
+        return self.store.getVox(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    /**
+     * The stored LEVEL of a world cell; 0 outside the loaded ring.
+     *
+     * The other half of a voxel. A block id says what is there and the
+     * level says how much of the cell it fills, and both have to be read
+     * through the same slot lookup or a partial block's height and its
+     * identity can come from two different chunks.
+     * @param cell  the world voxel
+     * @return the cell's level, or 0 for "the id's default box"
+     */
+    pub(crate) fn worldLevel(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 0;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 0;
+        }
+        return self.store.getLevel(slot, ivec3(cell.x - cx * s, cell.y, cell.z - cz * s));
+    }
+
+    // ── Per-slot mesh-dirty bridge (read back by the manager's flush) ──
+
+    /**
+     * Flag a slot's light as changed so the manager re-meshes it.
+     * @param slot  the slot index
+     */
+    pub(crate) fn markDirty(mut self, slot : i32) : void {
+        self.lights.ldirty[slot] = 1;
+    }
+
+    /**
+     * Flag a chunk dirty, but only if it is currently loaded at (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
+    pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
+        const slot : i32 = self.slotFor(cx, cz);
+        if (self.owns(slot, cx, cz)) {
+            self.lights.ldirty[slot] = 1;
+        }
+    }
+
+    /**
+     * Consume a slot's dirty flag: return whether it was set, clearing it.
+     * @param slot  the slot index
+     * @return whether the flag was set
+     */
+    pub(crate) fn takeDirty(mut self, slot : i32) : bool {
+        if (self.lights.ldirty[slot] == 1) {
+            self.lights.ldirty[slot] = 0;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Flag a slot's RAY passes for a re-bake after its geometry changed: the
+     * hemispherical sky access, and the sun shadows too — the round-robin would
+     * reach the slot eventually, but "eventually" is a second, and a block the
+     * player just placed should cast its shadow as it lands.
+     * @param slot  the slot index
+     */
+    pub(crate) fn flagSkyAO(mut self, slot : i32) : void {
+        self.lights.skyAOdirty[slot] = 1;
+        self.lights.sunDirty[slot] = 1;
+    }
+
+    // ── Block + sky light (flood-fill; opaque blocks cast shadow) ──
+
+    /**
+     * Light level (0..15) of one plane at a world voxel; 0 if unloaded / out
+     * of range. `p` selects a block-light channel or the sky light.
+     * @param p     the plane
+     * @param cell  the world voxel
+     * @return the level 0..15
+     */
+    fn lvGetW(self, p : Nibble, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 0;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 0;
+        }
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return nibGet(p, off);
+    }
+
+    /**
+     * Set one channel volume's light at a world voxel (owner chunk), flagging
+     * for re-mesh every slot whose FACES read that cell.
+     *
+     * That is not only the slot the cell belongs to. A face is lit at its four
+     * corners, and a corner averages the four air cells meeting there — so a
+     * face on the near side of a chunk border takes part of its light from the
+     * cell across it. Flagging only the owner leaves the neighbour's border
+     * faces holding the light they were baked with.
+     *
+     * It shows as a cave that will not go dark. Plugging the hole is correct in
+     * the volume — the removal flood does reach — but the flood runs up to
+     * fifteen blocks from the block you placed, and everything it darkened
+     * across a border kept its old bright bake. Another block somewhere else
+     * dirties another slot and another piece of the cave finally goes out,
+     * which is why it took several.
+     * @param p     the plane
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
+    fn lvSetW(mut self, p : Nibble, cell : IVec3, v : i32) : void {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return;
+        }
+
+        const lx : i32 = cell.x - cx * s;
+        const lz : i32 = cell.z - cz * s;
+        const off : i64 = self.store.voxIdx(slot, lx, cell.y, lz) as i64;
+        if (nibGet(p, off) != v) {
+            nibPut(p, off, v);
+            self.lights.ldirty[slot] = 1;
+            if (lx == 0) {
+                self.markDirtyAt(cx - 1, cz);
+            }
+            if (lx == s - 1) {
+                self.markDirtyAt(cx + 1, cz);
+            }
+            if (lz == 0) {
+                self.markDirtyAt(cx, cz - 1);
+            }
+            if (lz == s - 1) {
+                self.markDirtyAt(cx, cz + 1);
+            }
+        }
+    }
+
+    /**
+     * Block light per channel (0..15 each) at a world voxel; 0 if unloaded.
+     * @param cell  the world voxel
+     * @return the red, green and blue block-light levels
+     */
+    fn blGetW(self, cell : IVec3) : ChannelLevels {
+        return ChannelLevels {
+            r: self.lvGetW(self.lights.vols.red(), cell),
+            g: self.lvGetW(self.lights.vols.green(), cell),
+            b: self.lvGetW(self.lights.vols.blue(), cell),
+        };
+    }
+
+    /**
+     * Set one channel's block light; flags the slot for re-mesh if changed.
+     * @param p     the channel's plane
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
+    fn blSetCh(mut self, p : Nibble, cell : IVec3, v : i32) : void {
+        self.lvSetW(p, cell, v);
+    }
+
+    /**
+     * Sky-light level (0..15) at a world voxel; 0 if unloaded / out of range.
+     * @param cell  the world voxel
+     * @return the sky-light level 0..15
+     */
+    fn skGetW(self, cell : IVec3) : i32 {
+        return self.lvGetW(self.lights.vols.sky(), cell);
+    }
+
+    /**
+     * Set sky light at a world voxel; flags the slot for re-mesh if changed.
+     * @param cell  the world voxel
+     * @param v     the new level 0..15
+     */
+    fn skSetW(mut self, cell : IVec3, v : i32) : void {
+        self.lvSetW(self.lights.vols.sky(), cell, v);
+    }
+
+    /**
+     * Recompute a column's sky light: 15 from the top down to the first opaque
+     * block, 0 below it.
+     * @param wx  world x
+     * @param wz  world z
+     */
+    fn skyColumn(mut self, wx : i32, wz : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return;
+        }
+
+        const lx : i32 = wx - cx * s;
+        const lz : i32 = wz - cz * s;
+        let lit : i32 = 15;
+        let y : i32 = World::HEIGHT - 1;
+        while (y >= 0) {
+            if (lit > 0 && isOpaque(self.store.getVox(slot, ivec3(lx, y, lz)))) {
+                lit = 0;
+            }
+            const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+            const sky : Nibble = self.lights.vols.sky();
+            if (nibGet(sky, off) != lit) {
+                nibPut(sky, off, lit);
+                self.lights.ldirty[slot] = 1;
+            }
+            y--;
+        }
+    }
+
+    /**
+     * Seed sky light for a freshly generated chunk: set each column's vertical
+     * exposure, then flood the sideways gradient so overhung / roofed spots fade
+     * in instead of leaving a hard black patch.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                self.skyColumn(cx * s + lx, cz * s + lz);
+            }
+        }
+
+        self.lights.lqn = 0;
+        let top : i32 = self.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (bz of 0..s) {
+            for (bx of 0..s) {
+                for (by of 0..=top) {
+                    const sky : Nibble = self.lights.vols.sky();
+                    const off : i64 = self.store.voxIdx(slot, bx, by, bz) as i64;
+                    if (nibGet(sky, off) == 15) {
+                        self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
+                    }
+                }
+            }
+        }
+        self.floodAddCh(self.lights.vols.sky());
+    }
+
+    /**
+     * Spread one channel's light into a neighbour, losing one level per block,
+     * when it would be brighter there (and the neighbour isn't opaque).
+     * @param p          the plane
+     * @param neighbour  the neighbour world voxel
+     * @param lv         this cell's level (the neighbour gets lv-1)
+     */
+    fn trySpreadCh(mut self, p : Nibble, neighbour : IVec3, lv : i32) : void {
+        if (isOpaque(self.worldGet(neighbour))) {
+            return;
+        }
+        if (self.lvGetW(p, neighbour) < lv - 1) {
+            self.lvSetW(p, neighbour, lv - 1);
+            self.lpush(neighbour);
+        }
+    }
+
+    /**
+     * Flood one channel's add-stack to completion: each popped cell spreads to
+     * its 6 neighbours.
+     * @param p    the plane
+     */
+    fn floodAddCh(mut self, p : Nibble) : void {
+        while (self.lights.lqn > 0) {
+            self.lights.lqn--;
+            const entry : IVec3 = self.lights.lq[self.lights.lqn];
+            const lv : i32 = self.lvGetW(p, entry);
+            if (lv > 1) {
+                self.trySpreadCh(p, ivec3(entry.x + 1, entry.y, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x - 1, entry.y, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y + 1, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y - 1, entry.z), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y, entry.z + 1), lv);
+                self.trySpreadCh(p, ivec3(entry.x, entry.y, entry.z - 1), lv);
+            }
+        }
+    }
+
+    /**
+     * One channel removal neighbour step: a neighbour dimmer than the removed
+     * level is cleared and queued for further removal; an equal/brighter
+     * neighbour is a surviving source, queued onto the add-stack to refill.
+     * @param p          the plane
+     * @param neighbour  the neighbour world voxel
+     * @param lvl        the level being removed from the parent cell
+     */
+    fn tryRemoveCh(mut self, p : Nibble, neighbour : IVec3, lvl : i32) : void {
+        const nl : i32 = self.lvGetW(p, neighbour);
+        if (nl != 0) {
+            if (nl < lvl) {
+                self.lvSetW(p, neighbour, 0);
+                self.rpush(neighbour, nl);
+            } else {
+                self.lpush(neighbour);
+            }
+        }
+    }
+
+    /**
+     * Flood one channel's removal stack, feeding the add-stack from surviving
+     * (brighter/equal) sources so they refill the cleared region.
+     * @param p    the plane
+     */
+    fn floodRemoveCh(mut self, p : Nibble) : void {
+        while (self.lights.rqn > 0) {
+            self.lights.rqn--;
+            const entry : LightRemoval = self.lights.rq[self.lights.rqn];
+            const ey : i32 = entry.y as i32;
+            const lvl : i32 = entry.lvl as i32;
+            self.tryRemoveCh(p, ivec3(entry.x + 1, ey, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x - 1, ey, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey + 1, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey - 1, entry.z), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey, entry.z + 1), lvl);
+            self.tryRemoveCh(p, ivec3(entry.x, ey, entry.z - 1), lvl);
+        }
+    }
+
+    /**
+     * Push a cell onto the (shared block/sky) light add-stack; dropped if full.
+     * @param cell  the world voxel to push
+     */
+    fn lpush(mut self, cell : IVec3) : void {
+        if (self.lights.lqn >= Light::QUEUE_CAP) {
+            return;
+        }
+        self.lights.lq[self.lights.lqn] = IVec3 {
+            x: cell.x,
+            y: cell.y,
+            z: cell.z,
+        };
+        self.lights.lqn++;
+    }
+
+    /**
+     * Push a cell plus its old level onto the light removal-stack; dropped if full.
+     * @param cell  the world voxel to push
+     * @param lvl   the level it held before removal
+     */
+    fn rpush(mut self, cell : IVec3, lvl : i32) : void {
+        if (self.lights.rqn >= Light::QUEUE_CAP) {
+            return;
+        }
+        self.lights.rq[self.lights.rqn] = LightRemoval {
+            x: cell.x,
+            z: cell.z,
+            y: cell.y as i16,
+            lvl: lvl as i8,
+        };
+        self.lights.rqn++;
+    }
+
+    /**
+     * Re-flood ONE block-light channel around an edited cell: remove the level
+     * that was there and everything it fed, re-seed this block's own emission,
+     * then let the six neighbours flow back in.
+     *
+     * A channel at a time, because the flood stacks are shared and because the
+     * channels do not interact: what red does around a torch says nothing about
+     * what blue does, beyond the level each started at.
+     * @param p     the channel's plane
+     * @param cell  the edited world voxel
+     * @param had   the level that cell held before the edit
+     * @param emit  the level the block now there emits on this channel
+     */
+    fn refloodChannel(mut self, p : Nibble, cell : IVec3, had : i32, emit : i32) : void {
+        self.lights.lqn = 0;
+        self.lights.rqn = 0;
+        self.blSetCh(p, cell, 0);
+        self.rpush(cell, had + 1);
+        self.floodRemoveCh(p);
+
+        if (emit > 0) {
+            self.blSetCh(p, cell, emit);
+            self.lpush(cell);
+        }
+
+        self.lpush(ivec3(cell.x + 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x - 1, cell.y, cell.z));
+        self.lpush(ivec3(cell.x, cell.y + 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y - 1, cell.z));
+        self.lpush(ivec3(cell.x, cell.y, cell.z + 1));
+        self.lpush(ivec3(cell.x, cell.y, cell.z - 1));
+        self.floodAddCh(p);
+    }
+
+    /**
+     * Recompute block + sky light after ANY edit at a world voxel. Clears the
+     * light that ran through the cell, re-seeds emission, then re-floods from the
+     * cell's neighbours; reconciles the edited column's sky exposure and the
+     * sideways sky gradient. Flags every touched slot (plus border neighbours)
+     * dirty — the MANAGER runs the actual re-mesh flush afterwards.
+     * @param cell  the edited world voxel
+     */
+    pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
+        const wx : i32 = cell.x;
+        const wy : i32 = cell.y;
+        const wz : i32 = cell.z;
+
+        // 1..3. Block light, once per channel: clear what ran through the cell,
+        // re-seed this block's own emission, then let the neighbours flow back
+        // in. The three channels share the flood stacks, so they run in turn.
+        const cur : ChannelLevels = self.blGetW(cell);
+        const emit : Emission = emissionOf(self.worldGet(ivec3(wx, wy, wz)));
+        self.refloodChannel(self.lights.vols.red(), cell, cur.r, emit.r);
+        self.refloodChannel(self.lights.vols.green(), cell, cur.g, emit.g);
+        self.refloodChannel(self.lights.vols.blue(), cell, cur.b, emit.b);
+
+        // 4. Sky light: reconcile the edited column's vertical exposure — seed a
+        // REMOVAL where a cell darkened and an ADD where it brightened — then
+        // flood both, so sky light recedes as well as fills.
+        self.lights.lqn = 0;
+        self.lights.rqn = 0;
+        const scx : i32 = self.floorDiv(wx, World::CHUNK_SIZE);
+        const scz : i32 = self.floorDiv(wz, World::CHUNK_SIZE);
+        const sslot : i32 = self.slotFor(scx, scz);
+        if (self.owns(sslot, scx, scz)) {
+            const slx : i32 = wx - scx * World::CHUNK_SIZE;
+            const slz : i32 = wz - scz * World::CHUNK_SIZE;
+            let lit : i32 = 15;
+            let cy : i32 = World::HEIGHT - 1;
+            while (cy >= 0) {
+                if (lit > 0 && isOpaque(self.store.getVox(sslot, ivec3(slx, cy, slz)))) {
+                    lit = 0;
+                }
+                const coff : i64 = self.store.voxIdx(sslot, slx, cy, slz) as i64;
+                const sky : Nibble = self.lights.vols.sky();
+                const oldv : i32 = nibGet(sky, coff);
+                if (oldv > lit) {
+                    nibPut(sky, coff, lit);
+                    self.lights.ldirty[sslot] = 1;
+                    self.rpush(ivec3(wx, cy, wz), oldv);
+                } else if (lit > oldv) {
+                    nibPut(sky, coff, lit);
+                    self.lights.ldirty[sslot] = 1;
+                    self.lpush(ivec3(wx, cy, wz));
+                }
+                cy--;
+            }
+        }
+        self.floodRemoveCh(self.lights.vols.sky());
+
+        // Also seed the add from the edited cell + its 6 neighbours, so the
+        // sideways sky gradient flows into a newly opened space even when the
+        // edit doesn't change the column.
+        self.lpush(cell);
+        self.lpush(ivec3(wx + 1, wy, wz));
+        self.lpush(ivec3(wx - 1, wy, wz));
+        self.lpush(ivec3(wx, wy + 1, wz));
+        self.lpush(ivec3(wx, wy - 1, wz));
+        self.lpush(ivec3(wx, wy, wz + 1));
+        self.lpush(ivec3(wx, wy, wz - 1));
+        self.floodAddCh(self.lights.vols.sky());
+
+        // A border face is baked from the NEIGHBOUR chunk's light, which didn't
+        // change — re-flag the edited chunk plus any border neighbour so their
+        // shared faces re-bake with the final light.
+        const ecs : i32 = World::CHUNK_SIZE;
+        const ecx : i32 = self.floorDiv(wx, ecs);
+        const ecz : i32 = self.floorDiv(wz, ecs);
+        const elx : i32 = wx - ecx * ecs;
+        const elz : i32 = wz - ecz * ecs;
+        self.markDirtyAt(ecx, ecz);
+        if (elx == 0) {
+            self.markDirtyAt(ecx - 1, ecz);
+        }
+        if (elx == ecs - 1) {
+            self.markDirtyAt(ecx + 1, ecz);
+        }
+        if (elz == 0) {
+            self.markDirtyAt(ecx, ecz - 1);
+        }
+        if (elz == ecs - 1) {
+            self.markDirtyAt(ecx, ecz + 1);
+        }
+    }
+
+    /**
+     * Reset a slot's per-voxel light maps for a freshly (re)generated chunk:
+     * block + sky light to 0, sun visibility + sky access to full, the
+     * colour-bounce tint to neutral, and flag the slot for a sky-AO bake.
+     * @param slot  the slot index
+     */
+    pub(crate) fn clearLight(mut self, slot : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const n : i32 = s * s * World::HEIGHT;
+        const base : i64 = (slot as i64) * (n as i64);
+        for (i of 0..n) {
+            const at : i64 = base + (i as i64);
+            Mem::putByte(self.lights.vols.lightRG, at, 0);
+            Mem::putByte(self.lights.vols.lightBS, at, 0);
+            Mem::putByte(self.lights.vols.sunlit, at, 255);
+            Mem::putByte(self.lights.vols.skyaccess, at, 255);
+            Mem::putByte(self.lights.vols.bnR, at, 128);
+            Mem::putByte(self.lights.vols.bnG, at, 128);
+            Mem::putByte(self.lights.vols.bnB, at, 128);
+        }
+
+        self.lights.skyAOdirty[slot] = 1;
+        self.lights.sunDirty[slot] = 1;
+    }
+
+    // ── Directional sun shadows ─────────────────────────────────
+
+    /**
+     * Sun visibility at a world voxel: 0 (shadow) .. 255 (full sun). Out of
+     * range / unloaded reads full sun so it never darkens a face wrongly.
+     * @param cell  the world voxel
+     * @return soft sun visibility 0..255
+     */
+    fn sunlitGet(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 255;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 255;
+        }
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return Mem::byteAt(self.lights.vols.sunlit, off);
+    }
+
+    /**
+     * March a ray from an air cell toward the sun and return how much of the
+     * sun survives the trip: 1 if it escapes above all terrain (`ceil`) or runs
+     * the full reach unobstructed, 0 behind a wall, and a fraction through a
+     * canopy — each block of leaves crossed keeps `Light::LEAF_TRANSMIT` of what
+     * is left, so the shade deepens with the depth of the canopy over the cell.
+     *
+     * The march samples cells rather than crossing their faces, so a block can
+     * be sampled twice at this step; the leaf term is a look, not a measurement,
+     * and a canopy sampled twice reads as one that is twice as thick, which is
+     * the direction a leaf block is wrong in anyway.
+     * @param cell  origin air cell
+     * @param dir   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return the surviving fraction of sunlight, 0..1
+     */
+    fn sunRayTransmit(self, cell : IVec3, dir : Vec3, ceil : i32) : f64 {
+        const s : i32 = World::CHUNK_SIZE;
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
+        let through : f64 = 1.0;
+        let t : f64 = 0.5;
+
+        // The chunk the last step landed in, and what it took to find it. A step
+        // is six tenths of a block and a chunk is sixteen across, so twenty-odd
+        // consecutive steps share a chunk: asking the ring which slot holds it
+        // once per chunk instead of once per step is the same answer, found far
+        // less often. An impossible column to start, so the first step resolves.
+        let ccx : i32 = -1000000;
+        let ccz : i32 = -1000000;
+        let cslot : i32 = 0;
+        let cowns : bool = false;
+        let ctop : i32 = 0;
+
+        while (t < Daylight::SUN_SHADOW_REACH) {
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            if (cy > ceil) {
+                return through;
+            }
+            if (cy >= 0 && cy < World::HEIGHT) {
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const bx : i32 = self.floorDiv(cx, s);
+                const bz : i32 = self.floorDiv(cz, s);
+                if (bx != ccx || bz != ccz) {
+                    ccx = bx;
+                    ccz = bz;
+                    cslot = self.slotFor(bx, bz);
+                    cowns = self.owns(cslot, bx, bz);
+                    ctop = self.store.faceTop(cslot);
+                }
+                // A chunk the ring does not hold reads as air, and so does
+                // everything above a chunk's own watermark — nothing solid was
+                // ever written up there. Air passes the whole ray, so neither
+                // case is worth a fetch.
+                if (cowns && cy <= ctop) {
+                    const hit : Block = self.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s));
+                    const tr : f64 = lightTransmit(hit);
+                    if (tr < 1.0) {
+                        through *= tr;
+                        if (through < 0.02) {
+                            return 0.0;
+                        }
+                    }
+                }
+            }
+            t += 0.6;
+        }
+        return through;
+    }
+
+    /**
+     * Soft sun visibility (penumbra): cast Daylight::SUN_SHADOW_SAMPLES rays over the
+     * sun's angular disc and return the average share of the sun that survives
+     * the trip (0..255) — the disc gives the edge of a shadow its penumbra, the
+     * per-ray transmittance gives a canopy its dapple.
+     * @param cell  origin air cell
+     * @param dir   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return soft visibility 0..255
+     */
+    fn sunRaySoft(self, cell : IVec3, dir : Vec3, ceil : i32) : i32 {
+        let n : i32 = Daylight::SUN_SHADOW_SAMPLES;
+        if (n < 1) {
+            n = 1;
+        }
+        let total : f64 = self.sunRayTransmit(cell, dir, ceil);
+        if (n == 1) {
+            return (total * 255.0).floorToInt() as i32;
+        }
+
+        let ux : f64 = 0.0;
+        let uy : f64 = 1.0;
+        let uz : f64 = 0.0;
+        if (dir.y > 0.9 || dir.y < -0.9) {
+            ux = 1.0;
+            uy = 0.0;
+            uz = 0.0;
+        }
+
+        let tx : f64 = uy * dir.z - uz * dir.y;
+        let ty : f64 = uz * dir.x - ux * dir.z;
+        let tz : f64 = ux * dir.y - uy * dir.x;
+        let tl : f64 = (tx * tx + ty * ty + tz * tz).sqrt();
+        if (tl < 0.000001) {
+            tl = 0.000001;
+        }
+        tx /= tl;
+        ty /= tl;
+        tz /= tl;
+
+        const bx : f64 = dir.y * tz - dir.z * ty;
+        const by : f64 = dir.z * tx - dir.x * tz;
+        const bz : f64 = dir.x * ty - dir.y * tx;
+
+        // The disc is sampled over its AREA, on a golden-angle spiral, and the
+        // SAME pattern in every cell. It used to be a ring, rotated by a hash of
+        // the cell — which decorrelates neighbours, and with six rays over a
+        // penumbra two cells wide that is not dithering, it is noise: adjacent
+        // cells disagree by a sixth for no reason in the world. One fixed
+        // pattern makes the penumbra a gradient again, and an even spread over
+        // the disc weights the middle of the sun like the sun does.
+        const r : f64 = Daylight::SUN_DISC_ANGLE;
+        let cnt : i32 = 1;
+        for (i of 1..n) {
+            const u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
+            const ang : f64 = (i as f64) * 2.399963;
+            const ox : f64 = ang.cos() * r * u;
+            const oy : f64 = ang.sin() * r * u;
+            const dx : f64 = dir.x + tx * ox + bx * oy;
+            const dy : f64 = dir.y + ty * ox + by * oy;
+            const dz : f64 = dir.z + tz * ox + bz * oy;
+            let dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
+            if (dl < 0.000001) {
+                dl = 0.000001;
+            }
+            const ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
+            total += self.sunRayTransmit(cell, ray, ceil);
+            cnt++;
+        }
+        return (total * 255.0 / (cnt as f64)).floorToInt() as i32;
+    }
+
+    /**
+     * Whether any of a cell's 26 neighbours holds a block.
+     *
+     * The gate on the shadow bake. Sun visibility is only ever READ at a face's
+     * probe cell and at the four cells meeting at each of its corners, and all
+     * of those touch a block — so a cell with nothing but air around it is a ray
+     * cast for no one. Most of a chunk's column is exactly that, and the ray is
+     * four hundred voxel reads while this is at most twenty-six and usually
+     * stops on the first.
+     *
+     * Twenty-six rather than six because a corner reads DIAGONAL neighbours: at
+     * six, the cell off the lip of a cliff would go unbaked and stay at full sun,
+     * and a bright fringe would run along every edge inside a shadow.
+     * @param slot  the slot index
+     * @param lx    local x (the skirt makes -1 and CHUNK_SIZE readable)
+     * @param y     the world y
+     * @param lz    local z
+     * @param wx    the world x of the same cell
+     * @param wz    the world z of the same cell
+     * @return whether a block sits within the cell's 3×3×3 neighbourhood
+     */
+    fn nearSolid(
+        self,
+        slot : i32,
+        lx : i32,
+        y : i32,
+        lz : i32,
+        wx : i32,
+        wz : i32
+    ) : bool {
+        // Inside the chunk the neighbours are this slot's own cells; on its
+        // border one step crosses into another chunk, and only then is the
+        // slot lookup paid.
+        const s : i32 = World::CHUNK_SIZE;
+        const inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
+
+        for (dz of -1..=1) {
+            for (dx of -1..=1) {
+                for (dy of -1..=1) {
+                    let b : Block = Block::Air;
+                    if (inner) {
+                        b = self.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz));
+                    } else {
+                        b = self.worldGet(ivec3(wx + dx, y + dy, wz + dz));
+                    }
+                    if (b != Block::Air) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Recompute sun visibility for one chunk: every sky-lit air cell that
+     * borders a block gets a ray cast toward the sun.
+     *
+     * `snap` says whether the measurement REPLACES what is stored or is glided
+     * toward. A slot being tracked as the sun moves glides, because a cell is
+     * only looked at once per sweep of the ring and a full replacement makes the
+     * shadow tick forward a sweep at a time; a slot that has just arrived or just
+     * been edited snaps, because it has nothing to glide from.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @param sun   sun direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @param snap  write the measurement outright rather than gliding toward it
+     */
+    fn computeChunkSun(
+        mut self,
+        slot : i32,
+        cx : i32,
+        cz : i32,
+        sun : Vec3,
+        ceil : i32,
+        snap : bool
+    ) : void {
+        self.markSunBaked(slot, sun);
+
+        const s : i32 = World::CHUNK_SIZE;
+        let top : i32 = self.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                // What the cloud deck leaves of the sun over this column. Once
+                // per column, not per cell: the deck is a hundred blocks up, so
+                // it shades a whole column alike.
+                const cloudT : f64 = self.clouds.transmit(
+                    (cx * s + lx) as f64,
+                    (cz * s + lz) as f64
+                );
+                for (y of 0..=top) {
+                    const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
+                        && nibGet(self.lights.vols.sky(), off) > 0
+                        && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                        const cell : IVec3 = ivec3(cx * s + lx, y, cz * s + lz);
+                        const soft : i32 = self.sunRaySoft(cell, sun, ceil);
+                        let v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
+                        if (!snap) {
+                            v = self.glideTo(Mem::byteAt(self.lights.vols.sunlit, off), v);
+                        }
+                        Mem::putByte(self.lights.vols.sunlit, off, v);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Record the direction this slot was just baked under.
+     * @param slot  the slot index
+     * @param sun   the light direction the bake used (unit)
+     */
+    fn markSunBaked(mut self, slot : i32, sun : Vec3) : void {
+        const o : i64 = (slot as i64) * 3;
+        putFloatOf(self.lights.sunBaked, o, sun.x);
+        putFloatOf(self.lights.sunBaked, o + 1, sun.y);
+        putFloatOf(self.lights.sunBaked, o + 2, sun.z);
+    }
+
+    /**
+     * Whether the light has turned far enough since this slot's last bake for a
+     * fresh one to be able to land anywhere else.
+     *
+     * Both directions are unit, so their dot product is the cosine of the angle
+     * between them, and a slot that has never been baked holds the zero vector —
+     * a dot of zero, which no threshold passes.
+     * @param slot  the slot index
+     * @param sun   the light direction now (unit)
+     * @return true when the slot is worth baking again
+     */
+    fn sunMovedFor(self, slot : i32, sun : Vec3) : bool {
+        const o : i64 = (slot as i64) * 3;
+        const dot : f64 = floatOf(self.lights.sunBaked, o) * sun.x
+            + floatOf(self.lights.sunBaked, o + 1) * sun.y
+            + floatOf(self.lights.sunBaked, o + 2) * sun.z;
+        return dot < Daylight::SUN_STILL_COS;
+    }
+
+    /**
+     * One sweep's worth of movement from a stored sun visibility toward a fresh
+     * measurement: `Daylight::SUN_GLIDE` of the way, but never less than a whole
+     * level, or a difference of one would never be paid off and the shadow would
+     * settle a step short of where the sun put it.
+     * @param old  the stored visibility 0..255
+     * @param v    the freshly measured visibility 0..255
+     * @return where the cell moves to this sweep
+     */
+    fn glideTo(self, old : i32, v : i32) : i32 {
+        const dv : i32 = v - old;
+        if (dv == 0) {
+            return v;
+        }
+
+        let stepv : i32 = ((dv as f64) * Daylight::SUN_GLIDE).floorToInt() as i32;
+        if (dv > 0 && stepv < 1) {
+            stepv = 1;
+        }
+        if (dv < 0 && stepv > -1) {
+            stepv = -1;
+        }
+        return old + stepv;
+    }
+
+    /**
+     * The tallest terrain over the loaded ring — where a ray that has climbed
+     * past it is certainly in the open, and can stop.
+     * @return the highest recorded face Y of any loaded slot
+     */
+    fn terrainCeil(self) : i32 {
+        let ceil : i32 = 0;
+        for (j of 0..World::SPAN * World::SPAN) {
+            if (self.cols.loaded[j] == 1 && self.store.faceTop(j) > ceil) {
+                ceil = self.store.faceTop(j);
+            }
+        }
+        return ceil;
+    }
+
+    /**
+     * How many loaded slots carry a per-slot flag — what separates "the ring just
+     * filled" from "the player stepped into a chunk", and so whether a bake is
+     * worth a crew or belongs on this thread.
+     * @param flags  the per-slot flag array
+     * @return the number of loaded slots flagged
+     */
+    fn dirtyCount(self, flags : i8[]) : i32 {
+        let n : i32 = 0;
+        for (j of 0..World::SPAN * World::SPAN) {
+            if (self.cols.loaded[j] == 1 && flags[j] == 1) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /**
+     * One worker's share of the priority bake: every dirty loaded slot whose
+     * index is `first` modulo `stride`, written outright and un-flagged. The
+     * shares never overlap, so each clears its own flags as it goes.
+     * @param first   the first slot of this share
+     * @param stride  the number of shares
+     * @param sun     sun direction (unit)
+     * @param ceil    tallest terrain Y over loaded chunks
+     */
+    pub(file) fn bakeDirtySun(mut self, first : i32, stride : i32, sun : Vec3, ceil : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        let d : i32 = first;
+        while (d < slots) {
+            if (self.cols.loaded[d] == 1 && self.lights.sunDirty[d] == 1) {
+                self.computeChunkSun(
+                    d,
+                    self.cols.cxs[d],
+                    self.cols.czs[d],
+                    sun,
+                    ceil,
+                    true
+                );
+                self.lights.sunDirty[d] = 0;
+            }
+            d += stride;
+        }
+    }
+
+    /**
+     * Directional-shadow bake, in two passes over the ring.
+     *
+     * FIRST every slot that has never been baked — a chunk that just streamed
+     * in, or one the player just edited. Those are not throttled: a slot whose
+     * sun map is still the `clearLight` default reads as FULL SUN everywhere,
+     * so leaving it to the round-robin is not "a shadow that is slightly late",
+     * it is a lit chunk sitting among shaded ones until the cursor happens by.
+     * That is the chunk-by-chunk reveal you see for the first second of a run.
+     *
+     * THEN the round-robin, `budget` slots a call, which is only there to track
+     * the sun as it moves — and the sun moves a fraction of a degree per sweep,
+     * so that pass has nothing urgent to do and can stay cheap.
+     *
+     * The direction is whichever body is up, asked of `shade::daymodel` — the
+     * same function the renderer shades with. It has to be the same one: a bake
+     * that decided for itself where the light was would put the shadows
+     * somewhere the shading does not agree with, and at night it would leave the
+     * moon casting none at all.
+     * @param dayTime  time of day (0..1)
+     * @param budget   max already-baked chunks to refresh this call
+     */
+    fn stepSunShadows(mut self, dayTime : f64, budget : i32) : void {
+        const body : SkyBodyLight = activeBody(dayTime);
+
+        // Nothing is casting anything worth baking — the handover at the horizon.
+        // The maps keep whatever they last held, which is what the light they are
+        // about is doing too.
+        if (body.strength < 0.002) {
+            return;
+        }
+
+        const sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = self.terrainCeil();
+        const fresh : i32 = self.dirtyCount(self.lights.sunDirty);
+        if (fresh > SUN_BAKE_WORKERS) {
+            // A whole ring at once — the start of a run, or a teleport — is about
+            // a second of rays. Done on this one thread, that second is exactly
+            // how long the world stands there unshaded before the shadows drop
+            // in, which is the arrival you can see. Split over a crew it is a
+            // fraction of a frame.
+            //
+            // The shares are disjoint by slot, and a slot's bake WRITES only its
+            // own volume while it READS the neighbours' voxels, which nothing
+            // here changes: no lock, nothing shared but the world itself.
+            // Seven spawned and one run here: an array size has to be a literal,
+            // so the 7 and `SUN_BAKE_WORKERS` move together.
+            let crew : Task<i32>[7];
+            for (i of 0..7) {
+                crew[i] = spawn sunBakeJob(self, i + 1, SUN_BAKE_WORKERS, sun, ceil);
+            }
+            self.bakeDirtySun(0, SUN_BAKE_WORKERS, sun, ceil);
+            for (i of 0..7) {
+                const r : i32 = crew[i].join();
+            }
+        } else if (fresh > 0) {
+            // A chunk or two walked into: less work than starting the threads
+            // that would share it.
+            self.bakeDirtySun(0, 1, sun, ceil);
+        }
+
+        // A ring that just filled has already cost a full bake this call; the
+        // refresh can wait for the next one rather than doubling that spike.
+        if (fresh >= budget) {
+            return;
+        }
+
+        let done : i32 = 0;
+        let guard : i32 = 0;
+        while (done < budget && guard < slots) {
+            const slot : i32 = self.lights.sunCursor;
+            self.lights.sunCursor++;
+            if (self.lights.sunCursor >= slots) {
+                self.lights.sunCursor = 0;
+            }
+            guard++;
+            if (self.cols.loaded[slot] == 1 && self.sunMovedFor(slot, sun)) {
+                self.computeChunkSun(
+                    slot,
+                    self.cols.cxs[slot],
+                    self.cols.czs[slot],
+                    sun,
+                    ceil,
+                    false
+                );
+                done++;
+            }
+        }
+    }
+
+    // ── Hemispherical sky-access (ambient occlusion / GI) ────────
+
+    /**
+     * Sky access 0..255 at a world voxel: 255 = fully open, lower = occluded.
+     * Out of range / unloaded reads fully open.
+     * @param cell  the world voxel
+     * @return the sky access 0..255
+     */
+    fn skyaccessGet(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 255;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 255;
+        }
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return Mem::byteAt(self.lights.vols.skyaccess, off);
+    }
+
+    /**
+     * All three baked light volumes at ONE cell, resolved once.
+     *
+     * The walk from a world cell to a chunk slot to a voxel index is the
+     * expensive part — three bytes at the end of it are not — so the three
+     * volumes are read together rather than a seam at a time.
+     * @param cell  the world voxel
+     * @return its sun visibility, sky access and packed bounce tint
+     */
+    fn cellSample(self, cell : IVec3) : CornerSample {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
+        }
+        return self.cellIn(slot, cell.x - cx * s, cell.y, cell.z - cz * s);
+    }
+
+    /**
+     * The same three volumes at a cell whose chunk is already known.
+     * @param slot  the slot that owns the cell
+     * @param lx    local x inside that chunk
+     * @param y     the world y
+     * @param lz    local z inside that chunk
+     * @return the three terms at that cell
+     */
+    fn cellIn(self, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
+        if (y < 0 || y >= World::HEIGHT) {
+            return CornerSample {
+                sun: 255,
+                sky: 255,
+                bounce: 0x808080,
+            };
+        }
+
+        const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+        return CornerSample {
+            sun: Mem::byteAt(self.lights.vols.sunlit, off),
+            sky: Mem::byteAt(self.lights.vols.skyaccess, off),
+            bounce: (Mem::byteAt(self.lights.vols.bnR, off) << 16)
+                | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
+                | Mem::byteAt(self.lights.vols.bnB, off),
+        };
+    }
+
+    /**
+     * The chunk all four cells of a corner sit in, and where its origin is.
+     *
+     * The two in-plane steps are along different axes, so no axis has two
+     * contributors and the four cells' spread on each axis is exactly the gap
+     * between the near corner and the far one. If those two land in the same
+     * chunk, so does everything between them.
+     * @param b   the corner's own cell
+     * @param c3  the diagonal cell, one step along each axis
+     * @return the shared chunk, its slot -1 if the corner straddles a border or
+     *         the chunk is not loaded
+     */
+    fn cornerSlot(self, b : IVec3, c3 : IVec3) : CornerChunk {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(b.x, s);
+        const cz : i32 = self.floorDiv(b.z, s);
+        const miss : CornerChunk = CornerChunk {
+            slot: -1,
+            ox: 0,
+            oz: 0,
+        };
+        if (cx != self.floorDiv(c3.x, s) || cz != self.floorDiv(c3.z, s)) {
+            return miss;
+        }
+
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return miss;
+        }
+        return CornerChunk {
+            slot,
+            ox: cx * s,
+            oz: cz * s,
+        };
+    }
+
+    /**
+     * The same three volumes averaged over the 4 air cells meeting at a face
+     * corner, which is what makes smooth lighting smooth: a term taken once per
+     * FACE is constant over the whole quad, and a greedy quad is up to
+     * `MESH_MAX_RUN` cells of surface — that is the tiling the shading showed.
+     * The bounce tint averages per channel; packed, its channels would bleed
+     * into each other.
+     * @param probe  the corner's cell and its two in-plane tangent steps
+     * @return the averaged sample at that corner
+     */
+    fn cornerSample(self, probe : CornerProbe) : CornerSample {
+        const b : IVec3 = probe.base;
+        const t1 : IVec3 = probe.t1;
+        const t2 : IVec3 = probe.t2;
+        const c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
+        const c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
+        const c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+
+        // Four cells one step apart are in one chunk unless the corner sits on
+        // a border, and this is read at every corner of every quad in the
+        // frame. Finding the chunk once, where they share it, is the same four
+        // reads without four walks down the ring to reach them.
+        const cc : CornerChunk = self.cornerSlot(b, c3);
+        if (cc.slot < 0) {
+            return blend4(
+                self.cellSample(b),
+                self.cellSample(c1),
+                self.cellSample(c2),
+                self.cellSample(c3)
+            );
+        }
+        return blend4(
+            self.cellIn(cc.slot, b.x - cc.ox, b.y, b.z - cc.oz),
+            self.cellIn(cc.slot, c1.x - cc.ox, c1.y, c1.z - cc.oz),
+            self.cellIn(cc.slot, c2.x - cc.ox, c2.y, c2.z - cc.oz),
+            self.cellIn(cc.slot, c3.x - cc.ox, c3.y, c3.z - cc.oz)
+        );
+    }
+
+    /**
+     * Encode a bounce tint channel: normalised colour ratio `ratio` blended
+     * toward neutral by `occ`, stored as a byte where 128 = ×1.0.
+     * @param ratio  the channel's colour ratio (1.0 = neutral grey)
+     * @param occ    occlusion weight 0..1
+     * @return the packed byte (0..255, 128 = ×1.0)
+     */
+    fn bounceByte(self, ratio : f64, occ : f64) : i32 {
+        const f : f64 = 1.0 + (ratio - 1.0) * occ;
+        let v : i32 = (f * 128.0).floorToInt() as i32;
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 255) {
+            v = 255;
+        }
+        return v;
+    }
+
+    /**
+     * Packed one-bounce coloured tint (r<<16|g<<8|b, each 128 = ×1.0) at a world
+     * voxel; neutral grey (0x808080) out of range / unloaded.
+     * @param cell  the world voxel
+     * @return the packed bounce tint (0xRRGGBB)
+     */
+    fn bounceGet(self, cell : IVec3) : i32 {
+        if (cell.y < 0 || cell.y >= World::HEIGHT) {
+            return 0x808080;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(cell.x, s);
+        const cz : i32 = self.floorDiv(cell.z, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (!self.owns(slot, cx, cz)) {
+            return 0x808080;
+        }
+
+        const off : i64 = self.store.voxIdx(slot, cell.x - cx * s, cell.y, cell.z - cz * s) as i64;
+        return (Mem::byteAt(self.lights.vols.bnR, off) << 16)
+            | (Mem::byteAt(self.lights.vols.bnG, off) << 8)
+            | Mem::byteAt(self.lights.vols.bnB, off);
+    }
+
+    /**
+     * March one hemisphere ray from a cell toward the sky: how much of the sky
+     * it still sees at the end, and the colour of the first surface that dimmed
+     * it. A wall takes all of it; a block of canopy takes its share and the ray
+     * carries on, so a cell under one layer of leaves is shaded rather than
+     * sealed, and it takes the leaves' green with it as the bounce hue.
+     * @param cell  origin air cell
+     * @param dir   ray direction (unit)
+     * @param ceil  tallest terrain Y over loaded chunks
+     * @return the surviving sky fraction and the packed albedo that dimmed it (-1 if none)
+     */
+    fn skyHemiHit(self, cell : IVec3, dir : Vec3, ceil : i32) : HemiHit {
+        const ox : f64 = (cell.x as f64) + 0.5;
+        const oy : f64 = (cell.y as f64) + 0.5;
+        const oz : f64 = (cell.z as f64) + 0.5;
+        let through : f64 = 1.0;
+        let col : i32 = -1;
+        let t : f64 = 0.6;
+
+        while (t < Light::SKY_AO_REACH) {
+            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            if (cy > ceil) {
+                return HemiHit { open: through, albedo: col };
+            }
+            if (cy >= 0 && cy < World::HEIGHT) {
+                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                const hb : Block = self.worldGet(ivec3(cx, cy, cz));
+                const tr : f64 = lightTransmit(hb);
+                if (tr < 1.0) {
+                    if (col < 0) {
+                        col = albedoFor(hb);
+                    }
+                    through *= tr;
+                    if (through < 0.02) {
+                        return HemiHit { open: 0.0, albedo: col };
+                    }
+                }
+            }
+            t += 0.7;
+        }
+        return HemiHit { open: through, albedo: col };
+    }
+
+    /**
+     * Bake hemispherical sky access for one chunk: every open, sky-lit air cell
+     * in the active band casts the M precomputed hemisphere rays and stores the
+     * escaped fraction (0..255) plus the one-bounce coloured tint.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     * @param ceil  tallest terrain Y over loaded chunks
+     */
+    fn computeChunkSkyAO(mut self, slot : i32, cx : i32, cz : i32, ceil : i32) : void {
+        const s : i32 = World::CHUNK_SIZE;
+        const m : i32 = Light::SKY_AO_SAMPLES;
+        let top : i32 = self.store.faceTop(slot) + 1;
+        if (top > World::HEIGHT - 1) {
+            top = World::HEIGHT - 1;
+        }
+
+        for (lz of 0..s) {
+            for (lx of 0..s) {
+                for (y of 0..=top) {
+                    const off : i64 = self.store.voxIdx(slot, lx, y, lz) as i64;
+                    if (self.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
+                        && nibGet(self.lights.vols.sky(), off) > 0
+                        && self.nearSolid(slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
+                        const wx : i32 = cx * s + lx;
+                        const wz : i32 = cz * s + lz;
+                        // A ray now comes back with a FRACTION of the sky rather
+                        // than a yes or no, so the escaped share and the bounce
+                        // weight are both sums of what each ray lost, not counts
+                        // of the rays that were stopped.
+                        let esc : f64 = 0.0;
+                        let shut : f64 = 0.0;
+                        let ar : f64 = 0.0;
+                        let ag : f64 = 0.0;
+                        let ab : f64 = 0.0;
+                        for (r of 0..m) {
+                            const dir : Vec3 = vec3(
+                                Mem::realOf(self.lights.rays.hemiX, r),
+                                Mem::realOf(self.lights.rays.hemiY, r),
+                                Mem::realOf(self.lights.rays.hemiZ, r)
+                            );
+                            const hit : HemiHit = self.skyHemiHit(ivec3(wx, y, wz), dir, ceil);
+                            esc += hit.open;
+                            if (hit.albedo >= 0) {
+                                const w : f64 = 1.0 - hit.open;
+                                ar += w * (((hit.albedo >> 16) & 0xFF) as f64);
+                                ag += w * (((hit.albedo >> 8) & 0xFF) as f64);
+                                ab += w * ((hit.albedo & 0xFF) as f64);
+                                shut += w;
+                            }
+                        }
+
+                        const access : i32 = (esc * 255.0 / (m as f64)).floorToInt() as i32;
+                        Mem::putByte(self.lights.vols.skyaccess, off, access);
+
+                        if (Light::BOUNCE_ON && shut > 0.001) {
+                            const avr : f64 = ar / shut;
+                            const avg : f64 = ag / shut;
+                            const avb : f64 = ab / shut;
+                            let lum : f64 = 0.299 * avr + 0.587 * avg + 0.114 * avb;
+                            if (lum < 1.0) {
+                                lum = 1.0;
+                            }
+                            const occ : f64 = shut / (m as f64) * Light::BOUNCE_STRENGTH;
+                            Mem::putByte(self.lights.vols.bnR, off, self.bounceByte(avr / lum, occ));
+                            Mem::putByte(self.lights.vols.bnG, off, self.bounceByte(avg / lum, occ));
+                            Mem::putByte(self.lights.vols.bnB, off, self.bounceByte(avb / lum, occ));
+                        } else {
+                            Mem::putByte(self.lights.vols.bnR, off, 128);
+                            Mem::putByte(self.lights.vols.bnG, off, 128);
+                            Mem::putByte(self.lights.vols.bnB, off, 128);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Throttled sky-access bake: process up to `budget` dirty loaded chunks per
+     * call (round-robin). Idles once every loaded chunk is baked.
+     * @param budget  max chunks to bake this call
+     */
+    fn stepSkyAO(mut self, budget : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        const ceil : i32 = self.terrainCeil();
+
+        // A backlog this size is a ring that just filled, not a chunk the player
+        // walked into, and dribbling it out `budget` at a time is the ambient
+        // occlusion visibly settling in over the first seconds of a run. Drain it
+        // over the crew instead; the trickle is for the one or two chunks that
+        // arrive as you walk.
+        if (self.dirtyCount(self.lights.skyAOdirty) > SUN_BAKE_WORKERS) {
+            let crew : Task<i32>[7];
+            for (i of 0..7) {
+                crew[i] = spawn skyAOBakeJob(self, i + 1, SUN_BAKE_WORKERS, ceil);
+            }
+            self.bakeDirtySkyAO(0, SUN_BAKE_WORKERS, ceil);
+            for (i of 0..7) {
+                const r : i32 = crew[i].join();
+            }
+            return;
+        }
+
+        let done : i32 = 0;
+        let guard : i32 = 0;
+        while (done < budget && guard < slots) {
+            const slot : i32 = self.lights.skyAOcursor;
+            self.lights.skyAOcursor++;
+            if (self.lights.skyAOcursor >= slots) {
+                self.lights.skyAOcursor = 0;
+            }
+            guard++;
+            if (self.cols.loaded[slot] == 1 && self.lights.skyAOdirty[slot] == 1) {
+                self.computeChunkSkyAO(slot, self.cols.cxs[slot], self.cols.czs[slot], ceil);
+                self.lights.skyAOdirty[slot] = 0;
+                done++;
+            }
+        }
+    }
+
+    /**
+     * One worker's share of the sky-access backlog: every dirty loaded slot whose
+     * index is `first` modulo `stride`. Shares never overlap, so each clears its
+     * own flags.
+     * @param first   the first slot of this share
+     * @param stride  the number of shares
+     * @param ceil    tallest terrain Y over loaded chunks
+     */
+    pub(file) fn bakeDirtySkyAO(mut self, first : i32, stride : i32, ceil : i32) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        let d : i32 = first;
+        while (d < slots) {
+            if (self.cols.loaded[d] == 1 && self.lights.skyAOdirty[d] == 1) {
+                self.computeChunkSkyAO(d, self.cols.cxs[d], self.cols.czs[d], ceil);
+                self.lights.skyAOdirty[d] = 0;
+            }
+            d += stride;
+        }
+    }
+
+    /**
+     * Light the whole loaded ring NOW, and do not come back until it is lit.
+     *
+     * The world is generated before the first frame; this is the other half of
+     * that. Left to the light thread, the ring is lit over the first tenth of a
+     * second of play, and a tenth of a second is long enough to watch the shadows
+     * and the ambient occlusion arrive — the world appears, and THEN it is lit.
+     * Called once from the startup path, where the cost is a load and not a
+     * stutter.
+     *
+     * ONE pass is the whole ring: both bakes see a backlog the size of the ring
+     * and take their crew path, which drains it rather than budgeting it. The
+     * light thread then only ever has the sun's own movement to keep up with.
+     */
+    pub(crate) fn primeLight(mut self) : void {
+        self.stepBake();
+    }
+
+    /**
+     * One pass of the whole lighting system: refresh the directional sun-shadow
+     * map and bake any pending hemispherical sky-access / colour-bounce. Run by
+     * the dedicated light thread, reading the time of day the main loop publishes.
+     */
+    fn stepBake(mut self) : void {
+        // The clouds move on their own clock and the shadows are cast through
+        // them, so the deck is re-marched before the ring is: a shadow bake
+        // reading last pass's cloud would put the dark patch where the cloud has
+        // already left.
+        const body : SkyBodyLight = activeBody(self.moment.dayTime);
+        self.clouds.rebake(
+            cloudFieldAt(self.moment.seconds),
+            vec3(body.dirX, body.dirY, body.dirZ),
+            self.moment.camX,
+            self.moment.camZ
+        );
+        self.stepSunShadows(self.moment.dayTime, Daylight::SUN_CHUNKS_PER_TICK);
+        self.stepSkyAO(Light::SKY_AO_CHUNKS_PER_TICK);
+    }
+
+    /**
+     * Publish the moment the background light thread bakes against.
+     * @param m  the hour, clock and camera column to bake for
+     */
+    pub(crate) fn setMoment(mut self, m : LightMoment) : void {
+        self.moment = m;
+    }
+
+    /** Tell the background light thread to stop (call before joining it). */
+    pub(crate) fn stopLight(mut self) : void {
+        self.lightRunning.set(false);
+    }
+
+    /**
+     * Whether the background light thread should keep running.
+     * @return false once `stopLight` has been called
+     */
+    pub(crate) fn lightAlive(self) : bool {
+        return self.lightRunning.get();
+    }
+}
+
+/**
+ * Worker job: cast one share of the ring's never-shadowed slots.
+ * @param leng    the light engine whose ring is baked
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param sun     sun direction (unit)
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
+fn sunBakeJob(
+    leng : LightEngine,
+    first : i32,
+    stride : i32,
+    sun : Vec3,
+    ceil : i32
+) : i32 {
+    leng.bakeDirtySun(first, stride, sun, ceil);
+    return 0;
+}
+
+/**
+ * Worker job: bake one share of the ring's pending sky-access slots.
+ * @param leng    the light engine whose ring is baked
+ * @param first   the first slot of this share
+ * @param stride  the number of shares
+ * @param ceil    tallest terrain Y over loaded chunks
+ * @return always 0, for the task to join on
+ */
+fn skyAOBakeJob(leng : LightEngine, first : i32, stride : i32, ceil : i32) : i32 {
+    leng.bakeDirtySkyAO(first, stride, ceil);
+    return 0;
+}

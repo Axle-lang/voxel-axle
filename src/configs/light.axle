@@ -51,7 +51,7 @@ class Light {
 
     // ── The colour space light is done in ───────────────────────
     // The world pass decodes texels to linear light, lights them there, and
-    // encodes the result through a tone curve (`klight::gamma`). The curve is the
+    // encodes the result through a tone curve (`shade::gamma`). The curve is the
     // IDENTITY below `Light::TONE_KNEE` — so a fully lit surface still renders as
     // the byte its texture was painted with — and rolls the excess off toward
     // white above it, which is what lets a torch add onto sunlight without

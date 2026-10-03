@@ -1,0 +1,228 @@
+// cli — what the command line asks of a run.
+//
+// The game is played with a mouse, but it is also DRIVEN: by a capture
+// script, by a check that must mean the same thing twice, by someone
+// comparing two builds. Every one of those needs the run to be pinned —
+// same world, same view, same hour — because two images of different
+// places compare nothing.
+//
+// So each flag here removes one source of variation:
+//
+//   --snap [ms]            play that long, write voxel.bmp, quit
+//   --size <w> <h>         open the window at that size
+//   --at <x> <z>           start around a named column instead of a random one
+//   --look <yaw> <pitch>   pin the view and ignore the mouse for the run
+//   --daytime <0..1>       start the day clock at a named hour
+//   --walk <blocks>        hold forward for that many blocks, then stop
+//   --torch                stand a torch on the ground ahead of the spawn
+//   --physics-check        run the headless physics assertions and exit
+//   --light-check          run the headless coloured-light assertions and exit
+//   --biome-scan           count the biome of a wide grid of columns and exit
+//   --cull-check           run the headless chunk-visibility assertions and exit
+//
+// A reader per flag, each answering with a value rather than setting
+// state, so `main` reads the command line once at the top and never
+// consults it again.
+
+use std::sys::process::{argc, argAt};
+use std::lang::{IndexOutOfBoundsException, ParseException};
+use smalt::Clock;
+use crate::game::rules::start::randomColumn;
+use crate::configs::time::{ Daylight };
+use crate::configs::screen::{ Screen };
+
+/**
+ * The instant a scripted capture is due, in milliseconds after the first
+ * frame, or `0` when `--snap` was not asked for.
+ *
+ * `--snap` on its own waits three seconds, which is long enough for the
+ * spawn view to have streamed in; `--snap <ms>` says how long instead.
+ * @return the capture deadline in milliseconds, 0 when no capture is due
+ */
+fn snapDeadline() : i64 {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--snap") {
+                if (i + 1 < argc()) {
+                    const ms : i64 = argAt(i + 1).toI64();
+                    if (ms > 0) {
+                        return ms;
+                    }
+                }
+                return 3000;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return 0;
+        } catch e : ParseException {
+            return 3000;
+        }
+    }
+    return 0;
+}
+
+/**
+ * The view a scripted capture is framed with, as (pinned, yaw, pitch) in
+ * radians.
+ *
+ * `--look <yaw°> <pitch°>` pins it: the spawn's own yaw is overridden and the
+ * mouse is ignored for the rest of the run, which is the only way two captures
+ * can be compared as images. Yaw 0 faces +Z and grows counter-clockwise;
+ * pitch is positive upward. Without the flag the spawn picks the view and the
+ * mouse drives it, as it always did.
+ * @return whether the view is pinned, and the yaw / pitch it is pinned to
+ */
+fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
+    const toRad : f64 = 3.14159265358979 / 180.0;
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--look" && i + 2 < argc()) {
+                const yaw : f64 = argAt(i + 1).toF64() * toRad;
+                const pitch : f64 = argAt(i + 2).toF64() * toRad;
+                return (true, yaw, pitch);
+            }
+        } catch e : IndexOutOfBoundsException {
+            break;
+        } catch e : ParseException {
+            Console::println("--look wants two angles in degrees; leaving the view free");
+            break;
+        }
+    }
+    return (false, 0.0, 0.0);
+}
+
+/**
+ * The time of day the run starts at, in 0..1 over a full day.
+ *
+ * `--daytime <t>` names one — 0.42 is mid-morning, 0.75 sunset, 0.9 night —
+ * so a capture can be taken at the hour that shows what it is about, instead
+ * of waiting four real minutes for the sky to come round. Anything else keeps
+ * `Daylight::START`.
+ * @return the day phase to start the clock at
+ */
+fn dayTimeArg() : f64 {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--daytime" && i + 1 < argc()) {
+                return argAt(i + 1).toF64();
+            }
+        } catch e : IndexOutOfBoundsException {
+            break;
+        } catch e : ParseException {
+            Console::println("--daytime wants a number in 0..1; starting where the config says");
+            break;
+        }
+    }
+    return Daylight::START;
+}
+
+/**
+ * The column this run starts around.
+ *
+ * `--at <x> <z>` names one, so a world worth keeping can be returned to;
+ * anything else is a draw from the monotonic counter, which differs
+ * between runs. The counter rather than the wall clock because it is what
+ * this program already holds, and because a wall clock read twice in the
+ * same second answers twice the same.
+ * @param clock  the monotonic clock, read once for entropy
+ * @return the (x, z) block column to search for a start around
+ */
+fn startColumn(clock : Clock) : (x: i32, z: i32) {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--at" && i + 2 < argc()) {
+                const x : i32 = argAt(i + 1).toI64() as i32;
+                const z : i32 = argAt(i + 2).toI64() as i32;
+                return (x, z);
+            }
+        } catch e : IndexOutOfBoundsException {
+            break;
+        } catch e : ParseException {
+            Console::println("--at wants two whole numbers; picking a random start");
+            break;
+        }
+    }
+    return randomColumn(clock.counter());
+}
+
+/**
+ * The window this run opens at, as (w, h) in pixels.
+ *
+ * `--size <w> <h>` names it. The overlay is laid out against the framebuffer,
+ * and the framebuffer now takes the window's shape — so "does the HUD hold its
+ * size at another resolution" is a question that cannot be asked at all without
+ * being able to name the window, and it is a question a screenshot answers.
+ * @return the window size, the configured one if the flag is absent
+ */
+fn windowSize() : (w: i32, h: i32) {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--size" && i + 2 < argc()) {
+                const w : i32 = argAt(i + 1).toI64() as i32;
+                const h : i32 = argAt(i + 2).toI64() as i32;
+                if (w >= 320 && h >= 240) {
+                    return (w, h);
+                }
+                Console::println("--size wants at least 320x240; using the configured window");
+                break;
+            }
+        } catch e : IndexOutOfBoundsException {
+            break;
+        } catch e : ParseException {
+            Console::println("--size wants two whole numbers; using the configured window");
+            break;
+        }
+    }
+    return (Screen::WINDOW_W, Screen::WINDOW_H);
+}
+
+/**
+ * How far a scripted run walks forward before it stops, in blocks.
+ *
+ * Standing still exercises nothing that streams: a chunk border is twenty
+ * blocks away at most, and everything that loads a chunk — the generator, the
+ * light clear, the sky seed, the mesher, the face arrays — only runs when one
+ * is crossed. A crash on the far side of that line cannot be reproduced by a
+ * capture that never walks to it.
+ * @return the distance to walk, 0 to stand still
+ */
+fn walkBlocks() : f64 {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == "--walk" && i + 1 < argc()) {
+                return argAt(i + 1).toF64();
+            }
+        } catch e : IndexOutOfBoundsException {
+            break;
+        } catch e : ParseException {
+            Console::println("--walk wants a number of blocks; standing still");
+            break;
+        }
+    }
+    return 0.0;
+}
+
+/**
+ * Whether `--physics-check` was asked for.
+ * @return whether the flag was passed
+ */
+fn wantsPhysicsCheck() : bool {
+    return hasFlag("--physics-check");
+}
+
+/**
+ * Whether a bare flag is on the command line.
+ * @param flag  the flag to look for, leading dashes included
+ * @return whether it was passed
+ */
+fn hasFlag(flag : string) : bool {
+    for (i of 1..argc()) {
+        try {
+            if (argAt(i) == flag) {
+                return true;
+            }
+        } catch e : IndexOutOfBoundsException {
+            return false;
+        }
+    }
+    return false;
+}

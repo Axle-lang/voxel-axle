@@ -8,15 +8,15 @@
 // is deterministic (treeHash), so a canopy straddling a chunk border is stamped
 // identically from both sides — seamless.
 
-use crate::kernel::kworld::manager::Generator;
-use crate::kernel::kworld::noise::{
+use crate::engine::world::chunks::Generator;
+use crate::game::world::terrain::{
     terrainHeight, temperature, humidity, treeHash, hashI, snowDepth
 };
 use crate::game::world::biomes::{ biomeAt, biomeDef, biomeSurface, BiomeDef };
-use crate::kernel::kblock::blocks::{ isLeaves, levelOfHeight };
-use crate::kernel::kworld::voxstore::VoxStore;
+use crate::engine::block::blocks::{ isLeaves, levelOfHeight };
+use crate::engine::world::voxstore::VoxStore;
 use crate::game::world::treegen::{ stampTree };
-use crate::kernel::kmath::vec3::{ IVec3, ivec3 };
+use crate::engine::math::vec3::{ IVec3, ivec3 };
 use crate::configs::biomes::{ BiomeId };
 use crate::configs::blocks::{ Block };
 use crate::configs::noise::{ Noise };

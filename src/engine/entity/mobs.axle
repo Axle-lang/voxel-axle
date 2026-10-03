@@ -1,0 +1,305 @@
+// mobs — the entity manager. Owns a SINGLE heterogeneous `dyn Actor[]`: every
+// creature, whatever its species, is stored and driven through the `Actor`
+// capability traits, so one dynamically-dispatched loop replaces the old
+// five-way per-species copy-paste. `think` steers each mob (calm wander vs.
+// hostile creeper) by dynamic dispatch; capability narrowing (`is Hostile`)
+// tells the hostile species apart where behaviour differs. The manager spawns
+// creatures onto solid land in a ring around the player (despawning the far
+// ones) and resolves the player's melee against the nearest mob in view. The
+// world has no RNG, so the manager threads its own counter through a hash.
+
+use crate::engine::math::vec3::{ Vec3, vec3 };
+use crate::engine::entity::mob::{ Mob, Actor, Hostile, MobSpawner };
+use crate::engine::entity::player::Player;
+use crate::engine::seams::ActorVisual;
+use crate::engine::world::chunks::ChunkManager;
+use crate::engine::world::sim::blocksim::BlockSim;
+use crate::game::world::terrain::hash2;
+use crate::engine::audio::sfx::AudioManager;
+use crate::configs::audio::{ Audio };
+use crate::configs::mobs::{ Mobs };
+use crate::configs::noise::{ Noise };
+use crate::configs::world::{ World };
+
+class MobManager {
+    actors : Mob[],             // every live creature, stored by its concrete base
+                                // (freeable pointers); driven through the Actor traits
+                                // by viewing each element as `dyn Actor`
+    n : i32,                    // live count (actors[0..n) are valid)
+    rc : f64,
+    spawner : dyn MobSpawner[], // app factory that builds the concrete species,
+                                // held in a one-slot array: a trait-typed field
+                                // cannot store a class implementer (E0709)
+
+    /** Create an empty mob manager with the single actor pool allocated. */
+    constructor() {
+        self.actors = malloc<Mob>(Mobs::CAP);
+        self.spawner = malloc<dyn MobSpawner>(1);
+        self.n = 0;
+        self.rc = 9.0;
+    }
+
+    /**
+     * Inject the mob spawner (a `dyn MobSpawner` seam). The app supplies the
+     * concrete factory (which species exist + their spawn weights); the manager
+     * calls it to populate the world, so the kernel never names a species.
+     * @param s  the spawner implementation (ownership taken)
+     */
+    pub(crate) fn attachSpawner(mut self, own s : dyn MobSpawner) : void {
+        self.spawner[0] = s;
+    }
+
+    // ── RNG (the world has no RNG of its own) ──
+    /**
+     * Next pseudo-random value in [0,1).
+     * @return the next pseudo-random value in [0,1)
+     */
+    pub(crate) fn rand(mut self) : f64 {
+        self.rc += 1.0;
+        return hash2(self.rc, self.rc * 1.3 + 7.0, Noise::SEED + 4242);
+    }
+
+    // ── Census & render access ──
+    /**
+     * Total live mob count.
+     * @return the number of live mobs
+     */
+    fn total(self) : i32 {
+        return self.n;
+    }
+
+    /**
+     * Live actor count, for the renderer's billboard pass.
+     * @return the number of live actors
+     */
+    pub(crate) fn actorCount(self) : i32 {
+        return self.n;
+    }
+
+    /**
+     * The actor at index i as its render-facing `ActorVisual` view (krender
+     * iterates these instead of the old per-species arrays).
+     * @param i  index into the actor pool
+     * @return the actor as an ActorVisual
+     */
+    pub(crate) fn actorAt(self, i : i32) : dyn ActorVisual {
+        return self.actors[i];
+    }
+
+    // ── Spawning ──
+    /**
+     * Try to place one creature on land in the spawn ring around the
+     * player. Returns whether it found a dry column.
+     * @param world   the chunk manager that provides column heights
+     * @param player  the player the spawn ring is centered on
+     * @return true if a dry column was found and a creature placed
+     */
+    fn spawnOne(mut self, world : ChunkManager, player : Player) : bool {
+        if (self.n >= Mobs::CAP) {
+            return false;
+        }
+        // Pick a random bearing on the spawn ring around the player (6.2831853 = 2π).
+        const angle : f64 = self.rand() * 6.2831853;
+        const cosA : f64 = angle.cos();
+        const sinA : f64 = angle.sin();
+
+        // Spawn out of sight: skip directions inside the camera's forward
+        // cone so creatures never pop into existence in front of the player.
+        const fwdx : f64 = 0.0 - player.siny;
+        const fwdz : f64 = player.cosy;
+        if (cosA * fwdx + sinA * fwdz > Mobs::SPAWN_FOV_DOT) {
+            return false;
+        }
+
+        // Distance out: a random radius within the [min, radius] ring band.
+        const ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
+        const ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
+        const worldX : f64 = player.pos.x + cosA * ringRadius;
+        const worldZ : f64 = player.pos.z + sinA * ringRadius;
+        const cellX : i32 = worldX.floorToInt() as i32;
+        const cellZ : i32 = worldZ.floorToInt() as i32;
+        const surfaceY : i32 = world.columnHeight(cellX, cellZ);
+        if (surfaceY <= World::SEA_LEVEL) {
+            return false;
+        }
+
+        // Only open, solid ground: reject columns carrying a tree trunk,
+        // cactus, giant mushroom or any placed block (the collision surface
+        // sits above the bare terrain there), so mobs never spawn up a tree.
+        if (world.collisionHeight(cellX, cellZ) > surfaceY) {
+            return false;
+        }
+        const spawnY : f64 = surfaceY as f64;
+
+        // The app spawner rolls a species (weighted toward the calm animals,
+        // creepers kept rare) and builds it. Newborns get a randomised first
+        // voice delay so a fresh herd doesn't all vocalise on the same frame (a
+        // hostile mob keeps it too but never vocalises, so it's harmless there).
+        let m : Mob = self.spawner[0].create(vec3(worldX, spawnY, worldZ), self.rand());
+        m.rearmVoice(self.nextVocalDelay());
+        self.actors[self.n] = m;
+        self.n++;
+        return true;
+    }
+
+    /**
+     * A fresh randomised delay (frames) until a mob's next idle voice, so a
+     * herd doesn't vocalise in unison.
+     * @return the delay in frames
+     */
+    fn nextVocalDelay(mut self) : i32 {
+        const extraFrames : i32 = (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
+        return Audio::MOB_VOCAL_MIN + extraFrames;
+    }
+
+    // ── Population upkeep (cull + respawn) ──
+    /**
+     * Cull a mob: remove a finished corpse, or a live one that wandered out
+     * of range (a dying one stays so its animation plays through).
+     * @param a       the actor to test
+     * @param player  the player whose position bounds the keep range
+     * @return true if the mob should be removed
+     */
+    fn cull(self, a : dyn Actor, player : Player) : bool {
+        const dx : f64 = a.pos().x - player.pos.x;
+        const dz : f64 = a.pos().z - player.pos.z;
+        const despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
+        return a.deathDone() || (!a.isDying() && dx * dx + dz * dz > despawn2);
+    }
+
+    // ── AI step (per physics tick) ──
+    /**
+     * Step every mob's AI for one tick through the single dispatched `think`
+     * entry (calm wander / graze / flee, or the creeper's hunt-and-detonate),
+     * then run idle voices. Runs every physics tick so movement stays smooth and
+     * frame-rate independent. Population upkeep (cull + respawn) is separate —
+     * see `maintain`, which the scheduler runs on a coarser cadence.
+     * @param world   the chunk manager the mobs live in (upcast to VoxelQuery)
+     * @param player  the player driving creeper AI and the voice listener
+     * @param sfx     the audio manager for mob voices / creeper sounds
+     * @param sim     the block-update sim a creeper blast wakes around its crater
+     */
+    pub(crate) fn update(
+        mut self,
+        world : ChunkManager,
+        player : Player,
+        sfx : AudioManager,
+        sim : BlockSim
+    ) : void {
+        for (i of 0..self.n) {
+            let a : dyn Actor = self.actors[i];
+
+            // ONE virtual call: the concrete species (calm Mob vs. Creeper)
+            // supplies its own `think` by dynamic dispatch.
+            const roll = self.rand();
+            a.think(world, player, sfx, sim, roll);
+
+            // Calm creatures idle-chatter; the hostile creeper (the one species
+            // with the Hostile disposition) stays silent while it hunts.
+            if (!(a is Hostile) && a.wantsVoice()) {
+                sfx.mobSay(a.kind(), a.pos(), self.rand());
+                a.rearmVoice(self.nextVocalDelay());
+            }
+        }
+    }
+
+    /**
+     * Cull distant / finished mobs and top the population back up. Cheap but
+     * not urgent: the scheduler calls this every `World::MAINTAIN_TICKS`
+     * ticks rather than every tick — spawning is random and out of view, so
+     * a few times per second is indistinguishable from per-tick while cutting
+     * the spawn-ring probing ~`World::MAINTAIN_TICKS`×.
+     * @param world   the chunk manager that provides column heights
+     * @param player  the player whose position bounds spawn / cull ranges
+     */
+    pub(crate) fn maintain(mut self, world : ChunkManager, player : Player) : void {
+        // Swap-with-last compaction over the single pool. The evicted mob's heap
+        // object is freed before its slot is overwritten — otherwise every
+        // despawn / death would leak one Mob for the whole session.
+        let j : i32 = 0;
+        while (j < self.n) {
+            if (self.cull(self.actors[j], player)) {
+                free(self.actors[j]);
+                self.n--;
+                self.actors[j] = self.actors[self.n];
+            } else {
+                j++;
+            }
+        }
+
+        let tries : i32 = 0;
+        while (self.n < Mobs::TARGET_COUNT && tries < 16) {
+            self.spawnOne(world, player);
+            tries++;
+        }
+    }
+
+    // ── Combat (melee) ──
+    /**
+     * Consider one mob as a melee candidate; returns whether it beats the
+     * current best (closer, in front, alive).
+     * @param a       the candidate actor
+     * @param player  the attacking player
+     * @param fwdx    x component of the player's forward direction
+     * @param fwdz    z component of the player's forward direction
+     * @param bestD   the current best squared distance to beat
+     * @return true if this mob is a closer, in-front, living candidate
+     */
+    fn better(
+        self,
+        a : dyn Actor,
+        player : Player,
+        fwdx : f64,
+        fwdz : f64,
+        bestD : f64
+    ) : bool {
+        if (a.isDying()) {
+            return false;
+        }
+        const dx : f64 = a.pos().x - player.pos.x;
+        const dz : f64 = a.pos().z - player.pos.z;
+        const d2 : f64 = dx * dx + dz * dz;
+        if (d2 > bestD) {
+            return false;
+        }
+        return (dx * fwdx + dz * fwdz) > 0.0;
+    }
+
+    /**
+     * Melee the nearest living mob in front of the player within range.
+     * Returns the struck mob's kind, or -1 if nothing was hit.
+     * @param player  the attacking player
+     * @param sfx     the audio manager for the hurt sound
+     * @return the struck mob's kind, or -1 if nothing was hit
+     */
+    pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager) : i32 {
+        const fwdx : f64 = 0.0 - player.siny;
+        const fwdz : f64 = player.cosy;
+        let bestD : f64 = Mobs::ATTACK_RANGE * Mobs::ATTACK_RANGE;
+        let bestIdx : i32 = -1;
+        for (i of 0..self.n) {
+            const a : dyn Actor = self.actors[i];
+            if (self.better(a, player, fwdx, fwdz, bestD)) {
+                const dx : f64 = a.pos().x - player.pos.x;
+                const dz : f64 = a.pos().z - player.pos.z;
+                bestD = dx * dx + dz * dz;
+                bestIdx = i;
+            }
+        }
+
+        if (bestIdx < 0) {
+            return -1;
+        }
+        let target : dyn Actor = self.actors[bestIdx];
+        target.damage(Mobs::ATTACK_DAMAGE);
+        target.flashHurt();
+        sfx.mobHurt(target.kind(), target.pos(), self.rand());
+        const kind : i32 = target.kind() as i32;
+        if (target.isAlive()) {
+            target.panicFrom(player.pos.x, player.pos.z);
+        } else {
+            target.startDying();
+        }
+        return kind;
+    }
+}

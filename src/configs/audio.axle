@@ -1,11 +1,11 @@
 // configs::audio — step/dig material ids, audible ranges, per-channel master
 // volumes and the timing of footsteps / mob voices / ambience. The audio
-// engine (`kio::sfx`) reads everything here; `kblock::blocks::materialOf` maps a
+// engine (`audio::sfx`) reads everything here; `block::blocks::materialOf` maps a
 // block id to one of the `AudioMaterial` variants below.
 
 /**
  * How a block sounds underfoot and when dug — one bank of footstep / dig
- * clips per variant. The discriminants ARE the bank index in `kio::sfx`, so
+ * clips per variant. The discriminants ARE the bank index in `audio::sfx`, so
  * the order here matches the order the folders are loaded in.
  */
 enum AudioMaterial : i32 {

@@ -1,0 +1,640 @@
+// manager — the streaming voxel world (the kernel conductor).
+//
+// A fixed ring of `World::SPAN × World::SPAN` slots follows the camera: a chunk keeps its
+// slot (addressed by chunk-coord modulo `World::SPAN`) as the player moves, so crossing
+// a chunk border only regenerates the newly-entered ones. Each slot stores a
+// FULL voxel field, one chunk per slot, with border reads going to the neighbouring
+// chunks' edge columns, so the mesher culls seam faces without touching another
+// slot.
+//
+// ChunkManager is now a THIN CONDUCTOR that composes four focused leaves and
+// delegates into them, keeping the kernel seams' public surface unchanged:
+//   * VoxStore     (voxstore.axle)    — raw voxel storage + face-Y watermark
+//   * LightEngine  (lightstore.axle)  — the whole lighting engine (block/sky/sun
+//                                       flood + shadows + sky-AO/GI), owns the
+//                                       LightStore + the day-cycle / light thread
+//   * ChunkMesher  (chunkmesher.axle) — turns a slot's voxels into render faces +
+//                                       torches + the per-column collision top
+//   * TerrainGen   (terraingen.axle)  — heightmap + voxel + tree generation
+// The conductor keeps only streaming (ensureLoaded/regen), the world-edit path
+// (setVoxel/break/place), the mesh-flush that bridges light→mesh, and thin
+// delegators for every seams method — so the surface downstream depends
+// on (VoxelQuery / VoxelEdit / LightSample) never moved.
+
+use std::sys::sleep;
+use crate::engine::block::blocks::{ isSolid, isCollidable, boxOf, BlockBox };
+use crate::engine::world::voxstore::{ VoxStore, VoxData };
+use crate::engine::world::mesh::meshbuf::{ ColumnRing };
+use crate::engine::world::light::lightstore::{ LightEngine };
+use crate::engine::world::mesh::mesher::{ ChunkMesher, MeshSource };
+use crate::engine::math::vec3::{ IVec3, ivec3 };
+use crate::engine::seams::{
+    VoxelQuery, VoxelEdit, LightSample, CornerProbe, CornerSample, ChannelLevels
+};
+use crate::configs::blocks::{ Block };
+use crate::configs::world::{ World };
+
+/**
+ * The world-generation INJECTION seam: fill a freshly-streamed slot with terrain
+ * and read back a column's surface height. ChunkManager (below) holds a
+ * `dyn Generator` and drives it; the concrete generator (biome tables, ore / tree
+ * rules — all game content) lives in the app and is injected at startup via
+ * `ChunkManager.attachGenerator`, so kworld never names a concrete generator.
+ *
+ * Declared here (not in seams) because it is an app→kernel seam owned by
+ * this kernel — kept beside its consumer so kworld stays self-contained, mirroring
+ * `MobSpawner` in entity::mob. seams.axle holds only the kernel↔kernel contracts.
+ */
+trait Generator {
+    /**
+     * Fill a freshly-streamed slot with the terrain of chunk (cx, cz).
+     * @param store  the voxel store the terrain is written into
+     * @param slot   the slot index
+     * @param cx     the chunk x coordinate
+     * @param cz     the chunk z coordinate
+     */
+    fn generate(mut self, store : VoxStore, slot : i32, cx : i32, cz : i32) : void;
+
+    /**
+     * The terrain surface height of one column of a generated slot.
+     * @param slot  the slot index
+     * @param lx    the chunk-local x coordinate
+     * @param lz    the chunk-local z coordinate
+     * @return the surface Y, trees excluded
+     */
+    fn heightAt(self, slot : i32, lx : i32, lz : i32) : i32;
+}
+
+// ChunkManager provides three of the inter-kernel seams (seams):
+//   * VoxelQuery  — read-only voxel + collision surface (entities, picker, render)
+//   * VoxelEdit   — the voxel write path + world/light lifecycle (interaction)
+//   * LightSample — baked per-voxel light reads the renderer samples per corner
+// It composes the components and delegates; the seam signatures are verbatim.
+class ChunkManager : VoxelQuery, VoxelEdit, LightSample {
+    pub(crate) cols : Shared<ColumnRing>, // per-slot chunk ownership
+    pub(crate) store : VoxStore,     // raw voxel storage (block field + face-Y watermark)
+    pub(crate) leng : LightEngine,   // the lighting engine (owns the per-voxel light volumes)
+    gen : dyn Generator[],           // terrain generation seam (concrete impl injected by
+                                     // the app), held in a one-slot array: a trait-typed
+                                     // field cannot store a class implementer (E0709)
+    pub(crate) mesher : ChunkMesher, // voxel → face/torch/collision-top mesher; owns the
+                                     // mesh the renderer and the physics read
+
+    /**
+     * Compose the slot ring, the voxel store, light engine, generator and
+     * mesher, then mark every slot unloaded.
+     */
+    constructor() {
+        const slots : i32 = World::SPAN * World::SPAN;
+
+        // The voxel field and the ring are co-owned with the light engine, which
+        // reads both from its own thread; each side takes its own handle. The
+        // generator and the mesher are lent them per call instead.
+        const field : Shared<VoxData> = new shared VoxData(slots);
+        self.cols = new shared ColumnRing(slots);
+        self.store = new VoxStore(field);
+        self.gen = malloc<dyn Generator>(1);
+        self.leng = new LightEngine(new VoxStore(field), self.cols, slots);
+
+        for (i of 0..slots) {
+            self.cols.loaded[i] = 0;
+        }
+        self.mesher = new ChunkMesher(slots);
+    }
+
+    /**
+     * Inject the terrain generator (a `dyn Generator` seam). The app builds the
+     * concrete generator, which fills the `store` lent to it, and attaches it once,
+     * at startup, before the first `ensureLoaded` — so the kernel never names a
+     * concrete generator.
+     * @param g  the generator implementation (ownership taken)
+     */
+    pub(crate) fn attachGenerator(mut self, own g : dyn Generator) : void {
+        self.gen[0] = g;
+    }
+
+    // ── Grid math ───────────────────────────────────────────────
+
+    /**
+     * Wrap a chunk coordinate into [0, span) for slot addressing.
+     * @param v  the chunk coordinate
+     * @return the wrapped index
+     */
+    fn wrap(self, v : i32) : i32 {
+        const s : i32 = World::SPAN;
+        let m : i32 = v - (v / s) * s;
+        if (m < 0) {
+            m += s;
+        }
+        return m;
+    }
+
+    /**
+     * Slot index for chunk coords (cx, cz).
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     * @return the slot index
+     */
+    fn slotFor(self, cx : i32, cz : i32) : i32 {
+        return self.wrap(cz) * World::SPAN + self.wrap(cx);
+    }
+
+    /**
+     * Floor division of `a` by `b` (toward negative infinity).
+     * @param a  the dividend
+     * @param b  the divisor
+     * @return the floored quotient
+     */
+    fn floorDiv(self, a : i32, b : i32) : i32 {
+        let q : i32 = a / b;
+        if (a - q * b < 0) {
+            q--;
+        }
+        return q;
+    }
+
+    // ── Voxel access (delegates to the store) ───────────────────
+
+    /**
+     * Flat voxel-array index for a local coordinate.
+     * @param slot  the slot index
+     * @param lx    the local x coordinate
+     * @param ly    the local y coordinate
+     * @param lz    the local z coordinate
+     * @return the flat array index
+     */
+    fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
+        return self.store.voxIdx(slot, lx, ly, lz);
+    }
+
+    /**
+     * Block id at a local voxel; bedrock below 0, air above.
+     * @param slot   the slot index
+     * @param local  the local voxel coordinate
+     * @return the block id
+     */
+    fn getVox(self, slot : i32, local : IVec3) : Block {
+        return self.store.getVox(slot, local);
+    }
+
+    /**
+     * Write block `id` at a local voxel (no bounds check).
+     * @param slot   the slot index
+     * @param local  the local voxel coordinate
+     * @param id     the block id to write
+     */
+    fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
+        self.store.setVoxLocal(slot, local, id);
+    }
+
+    /**
+     * Raise the slot's highest-face Y watermark to include `y`.
+     * @param slot  the slot index
+     * @param y     the candidate Y
+     */
+    fn bumpFY(mut self, slot : i32, y : i32) : void {
+        self.store.bumpFY(slot, y);
+    }
+
+    // ── World queries (unchanged interfaces) ────────────────────
+
+    /**
+     * Terrain surface Y at world column (wx, wz): the heightmap top, excluding
+     * trees. Sea level for an unloaded column.
+     * @param wx  the world x coordinate
+     * @param wz  the world z coordinate
+     * @return the terrain surface height
+     */
+    fn columnHeight(self, wx : i32, wz : i32) : i32 {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (self.cols.loaded[slot] == 0
+            || self.cols.cxs[slot] != cx
+            || self.cols.czs[slot] != cz) {
+            return World::SEA_LEVEL;
+        }
+        return self.gen[0].heightAt(slot, wx - cx * s, wz - cz * s);
+    }
+
+    /**
+     * Solid collision surface Y at (wx, wz): the highest collidable voxel + 1.
+     * Used by entity physics.
+     * @param wx  the world x coordinate
+     * @param wz  the world z coordinate
+     * @return the collision surface height
+     */
+    fn collisionHeight(self, wx : i32, wz : i32) : i32 {
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        const slot : i32 = self.slotFor(cx, cz);
+        if (self.cols.loaded[slot] == 0
+            || self.cols.cxs[slot] != cx
+            || self.cols.czs[slot] != cz) {
+            return World::SEA_LEVEL;
+        }
+        const column : i32 = slot * s * s + (wz - cz * s) * s + (wx - cx * s);
+        return self.mesher.ctop[column] as i32;
+    }
+
+    /**
+     * Block id at a world voxel; bedrock below 0, air above / unloaded.
+     * @param cell the world voxel
+     * @return the block id
+     */
+    fn worldGet(self, cell : IVec3) : Block {
+        return self.leng.worldGet(cell);
+    }
+
+    /**
+     * Does a world voxel stop the look-ray (a targetable solid block)?
+     * @param cell  the world voxel
+     * @return whether the voxel is a solid target
+     */
+    fn solidTarget(self, cell : IVec3) : bool {
+        return isSolid(self.worldGet(cell));
+    }
+
+    /**
+     * Is the voxel a block an entity collides with (per-voxel physics)?
+     * @param cell  the world voxel
+     * @return whether the voxel is collidable
+     */
+    fn solidAt(self, cell : IVec3) : bool {
+        return isCollidable(self.worldGet(cell));
+    }
+
+    /**
+     * REAL per-type collision box for one cell against the body at foot height
+     * `py`. Full blocks are solid the whole cube; a thin SnowLayer is solid only
+     * up to its real partial top. Used for ALL axes.
+     * @param cell  the world voxel
+     * @param py          the body's foot height being tested
+     * @param bodyHeight  the body's height, so its head counts as well as its feet
+     * @return true if the cell's real box blocks the body at `py`
+     */
+    fn collideFloorCell(self, cell : IVec3, py : f64, bodyHeight : f64) : bool {
+        const b : BlockBox = self.blockBox(cell);
+        if (b.isEmpty()) {
+            return false;
+        }
+        const cy : f64 = cell.y as f64;
+        // Two intervals overlap when each starts before the other ends.
+        // The old test was only the first half — the body's feet below the
+        // box's top — which is right for a box resting on the cell floor
+        // and wrong for any other, because it says a body standing on a
+        // top slab's roof is inside it. Asking the whole question is what
+        // lets a box have a bottom at all.
+        return py < b.topAt(cy) && py + bodyHeight > b.bottomAt(cy);
+    }
+
+    /**
+     * Real standable top height of one cell: full blocks → cell.y+1, a thin
+     * SnowLayer → its partial top, nothing → a very low value.
+     * @param cell  the world voxel
+     * @return the standable top Y of the cell, or a very low value if none
+     */
+    fn supportHeight(self, cell : IVec3) : f64 {
+        const b : BlockBox = self.blockBox(cell);
+        if (b.isEmpty()) {
+            return 0.0 - 1000000.0;
+        }
+        return b.topAt(cell.y as f64);
+    }
+
+    /**
+     * THE cell's box, resolved from the stored voxel: its id and its level.
+     *
+     * Every system that needs geometry — collision, the auto-step, the
+     * mesher, the look-ray picker, the selection wireframe, the renderer's
+     * water surface — comes through here, so the hitbox, the visual and
+     * the thing you aim at cannot disagree. It reads the world and nothing
+     * else: no coordinates, no noise.
+     * @param cell  the world voxel
+     * @return the cell's box within its cell
+     */
+    fn blockBox(self, cell : IVec3) : BlockBox {
+        return boxOf(self.worldGet(cell), self.leng.worldLevel(cell));
+    }
+
+    /**
+     * The cell box's vertical extent, for a caller that only wants a
+     * height — the renderer's water surface, the selection wireframe.
+     * @param cell  the world voxel
+     * @return the box's height in cell units
+     */
+    fn blockBoxHeight(self, cell : IVec3) : f64 {
+        return self.blockBox(cell).height();
+    }
+
+    /**
+     * The cell's stored level, 1..8 for a layered block and 0 otherwise.
+     *
+     * The other half of a voxel, published so a tool can read what is
+     * actually stored rather than infer it back out of a height.
+     * @param cell  the world voxel
+     * @return the stored level
+     */
+    pub(crate) fn blockLevel(self, cell : IVec3) : i32 {
+        return self.leng.worldLevel(cell);
+    }
+
+    /**
+     * Extra vertical cells the auto-step / floor scan is padded by (the one knob
+     * the step logic reads).
+     * @return the pad in whole cells
+     */
+    fn floorScanPad(self) : i32 {
+        return 1;
+    }
+
+    // ── Streaming ───────────────────────────────────────────────
+
+    /**
+     * Regenerate any slot in view radius of the camera chunk that is unloaded or
+     * holds a different chunk, NEAREST FIRST and budgeted per call. Meshing is
+     * deferred to a second pass (flushLightMesh) once this batch's neighbours all
+     * exist, so border faces bake real neighbour light — no black seams.
+     * @param camCX  the camera chunk x coordinate
+     * @param camCZ  the camera chunk z coordinate
+     * @return the number of chunks (re)generated by this call
+     */
+    fn ensureLoaded(mut self, camCX : i32, camCZ : i32) : i32 {
+        const r : i32 = World::VIEW_RADIUS;
+        const budget : i32 = World::CHUNK_LOADS_PER_FRAME < 1 ? 1 : World::CHUNK_LOADS_PER_FRAME;
+
+        let built : i32 = 0;
+        let d : i32 = 0;
+        while (d <= r && built < budget) {
+            let dz : i32 = -d;
+            while (dz <= d && built < budget) {
+                let dx : i32 = -d;
+                while (dx <= d && built < budget) {
+                    // Only the cells on this ring (Chebyshev distance == d).
+                    const ad : i32 = dx < 0 ? -dx : dx;
+                    const az : i32 = dz < 0 ? -dz : dz;
+                    const cheb : i32 = az > ad ? az : ad;
+                    if (cheb == d) {
+                        const cx : i32 = camCX + dx;
+                        const cz : i32 = camCZ + dz;
+                        const slot : i32 = self.slotFor(cx, cz);
+                        if (self.cols.loaded[slot] == 0
+                            || self.cols.cxs[slot] != cx
+                            || self.cols.czs[slot] != cz) {
+                            self.regen(slot, cx, cz);
+                            built++;
+                        }
+                    }
+                    dx++;
+                }
+                dz++;
+            }
+            d++;
+        }
+
+        if (built > 0) {
+            self.flushLightMesh();
+        }
+        return built;
+    }
+
+    /**
+     * Flag a chunk for (re)mesh, but only if it is currently loaded at (cx, cz)
+     * — used to re-bake a neighbour's shared border faces after an edit / load.
+     * @param cx  the chunk x coordinate
+     * @param cz  the chunk z coordinate
+     */
+    fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
+        self.leng.markDirtyAt(cx, cz);
+    }
+
+    /**
+     * Fully (re)build a slot for chunk (cx, cz): terrain, then clear + seed its
+     * light, then flag it (and its 4 neighbours) for the deferred mesh pass.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn regen(mut self, slot : i32, cx : i32, cz : i32) : void {
+        self.cols.cxs[slot] = cx;
+        self.cols.czs[slot] = cz;
+        self.cols.loaded[slot] = 1;
+        self.gen[0].generate(self.store, slot, cx, cz);
+        self.leng.clearLight(slot);
+        self.leng.seedSky(slot, cx, cz);
+        // Don't mesh here — ensureLoaded meshes in a second pass once every
+        // neighbour is generated. Flag this chunk + its 4 horizontal neighbours.
+        self.leng.markDirty(slot);
+        self.markDirtyAt(cx + 1, cz);
+        self.markDirtyAt(cx - 1, cz);
+        self.markDirtyAt(cx, cz + 1);
+        self.markDirtyAt(cx, cz - 1);
+    }
+
+    /**
+     * (Re)mesh one slot from its voxels + current light.
+     * @param slot  the slot index
+     * @param cx    the chunk x coordinate
+     * @param cz    the chunk z coordinate
+     */
+    fn buildMesh(mut self, slot : i32, cx : i32, cz : i32) : void {
+        self.mesher.buildSlot(
+            MeshSource { store: self.store, leng: self.leng },
+            slot,
+            cx,
+            cz
+        );
+    }
+
+    /** Re-mesh every slot whose light changed, then re-flag it for a sky-AO bake. */
+    fn flushLightMesh(mut self) : void {
+        const slots : i32 = World::SPAN * World::SPAN;
+        for (i of 0..slots) {
+            if (self.leng.takeDirty(i)) {
+                if (self.cols.loaded[i] == 1) {
+                    self.buildMesh(i, self.cols.cxs[i], self.cols.czs[i]);
+                    self.leng.flagSkyAO(i);
+                }
+            }
+        }
+    }
+
+    // ── Editing (dig / place) ───────────────────────────────────
+
+    /**
+     * Write `id` at a world voxel into the chunk that owns it, then re-mesh
+     * that chunk and every neighbour whose faces look at the cell — the
+     * edge and corner neighbours when the cell sits on a border. The
+     * neighbours read the cell across the border rather than from a copy, so
+     * the write happens once; the re-mesh is what makes them see it.
+     * @param cell  the world voxel
+     * @param id    the block id to write
+     */
+    fn setVoxel(mut self, cell : IVec3, id : Block) : void {
+        const wx : i32 = cell.x;
+        const wy : i32 = cell.y;
+        const wz : i32 = cell.z;
+        if (wy < 0 || wy >= World::HEIGHT) {
+            return;
+        }
+
+        const s : i32 = World::CHUNK_SIZE;
+        const cx : i32 = self.floorDiv(wx, s);
+        const cz : i32 = self.floorDiv(wz, s);
+        for (dcz of -1..2) {
+            for (dcx of -1..2) {
+                const ccx : i32 = cx + dcx;
+                const ccz : i32 = cz + dcz;
+                const lx : i32 = wx - ccx * s;
+                const lz : i32 = wz - ccz * s;
+                if (lx >= -1 && lx <= s && lz >= -1 && lz <= s) {
+                    const slot : i32 = self.slotFor(ccx, ccz);
+                    if (self.cols.loaded[slot] == 1
+                        && self.cols.cxs[slot] == ccx
+                        && self.cols.czs[slot] == ccz) {
+                        if (dcx == 0 && dcz == 0) {
+                            let v : Block = id;
+                            self.setVoxLocal(slot, ivec3(lx, wy, lz), v);
+                            if (id != Block::Air) {
+                                self.bumpFY(slot, wy);
+                            }
+                        }
+                        self.buildMesh(slot, ccx, ccz);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Dig (set to air) a world voxel.
+     * @param cell the world voxel
+     */
+    fn breakAt(mut self, cell : IVec3) : void {
+        self.setVoxel(cell, Block::Air);
+    }
+
+    /**
+     * Place `block` at a world voxel.
+     * @param cell   the world voxel
+     * @param block  the block id to place
+     */
+    fn placeAt(mut self, cell : IVec3, block : Block) : void {
+        self.setVoxel(cell, block);
+    }
+
+    // ── Light seam + lifecycle (delegated to the LightEngine) ────
+
+    /**
+     * Recompute block + sky light after an edit at a world voxel, then flush the
+     * re-mesh of every slot the light engine flagged.
+     * @param cell the edited world voxel
+     */
+    fn lightUpdate(mut self, cell : IVec3) : void {
+        self.leng.lightUpdate(cell);
+        self.flushLightMesh();
+    }
+
+    /**
+     * Block light per channel (0..15 each) at a world voxel.
+     * @param cell  the world voxel
+     * @return the red, green and blue block-light levels
+     */
+    fn blGetW(self, cell : IVec3) : ChannelLevels {
+        return self.leng.blGetW(cell);
+    }
+
+    /**
+     * Sky-light level (0..15) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sky-light level
+     */
+    fn skGetW(self, cell : IVec3) : i32 {
+        return self.leng.skGetW(cell);
+    }
+
+    /**
+     * Hemispherical sky access (0..255) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sky access
+     */
+    fn skyaccessGet(self, cell : IVec3) : i32 {
+        return self.leng.skyaccessGet(cell);
+    }
+
+    /**
+     * Soft directional sun visibility (0..255) at a world voxel.
+     * @param cell  the world voxel
+     * @return the sun visibility
+     */
+    fn sunlitGet(self, cell : IVec3) : i32 {
+        return self.leng.sunlitGet(cell);
+    }
+
+    /**
+     * Packed one-bounce coloured tint (0xRRGGBB) at a world voxel.
+     * @param cell  the world voxel
+     * @return the packed bounce tint
+     */
+    fn bounceGet(self, cell : IVec3) : i32 {
+        return self.leng.bounceGet(cell);
+    }
+
+    /**
+     * Sun, sky access and bounce averaged over the 4 air cells at a face corner.
+     * @param probe  the face corner to sample
+     * @return the averaged corner sample
+     */
+    fn cornerSample(self, probe : CornerProbe) : CornerSample {
+        return self.leng.cornerSample(probe);
+    }
+
+    /** One pass of the whole lighting system (sun shadows + sky-AO / bounce). */
+    pub(file) fn stepLight(mut self) : void {
+        self.leng.stepBake();
+    }
+
+    /**
+     * Publish the moment the background light thread bakes against.
+     * @param m  the hour, clock and player column to bake against
+     */
+    fn setMoment(mut self, m : LightMoment) : void {
+        self.leng.setMoment(m);
+    }
+
+    /** Light the whole loaded ring before the first frame, and block until it is. */
+    fn primeLight(mut self) : void {
+        self.leng.primeLight();
+    }
+
+    /** Tell the background light thread to stop (call before joining it). */
+    fn stopLight(mut self) : void {
+        self.leng.stopLight();
+    }
+
+    /**
+     * Whether the background light thread should keep running.
+     * @return false once stopLight() has been called
+     */
+    pub(file) fn lightAlive(self) : bool {
+        return self.leng.lightAlive();
+    }
+}
+
+/**
+ * The light thread body: continuously refresh the sun-shadow map and bake sky
+ * access / colour bounce, decoupled from the render thread. Reads the time of
+ * day the main loop publishes via setDayTime; paced by a short sleep. Runs on its
+ * own OS thread (spawned in main); exits when stopLight() is called.
+ * @param man  the chunk manager owning the light engine
+ * @return 0 (Task result unused)
+ */
+fn lightLoop(man : ChunkManager) : i32 {
+    while (man.lightAlive()) {
+        man.stepLight();
+        sleep(8);
+    }
+    return 0;
+}
