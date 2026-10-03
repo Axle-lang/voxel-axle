@@ -28,7 +28,7 @@ use crate::engine::block::blocks::{ materialOf };
 use crate::engine::math::vec3::{ Vec3, IVec3, vec3 };
 use crate::configs::audio::{ Audio, AudioMaterial };
 use crate::configs::blocks::{ Block };
-use crate::configs::mobs::{ MobKind };
+use crate::configs::mobs::{ MobKind, Mobs };
 
 /**
  * Folder name under `step/` and `dig/` for the material with discriminant `m`
@@ -351,71 +351,22 @@ class AudioManager : Listener, Closeable {
             range: 0.0,
         };
 
-        // One positional voice (idle say + hurt cry) per MobKind, at mob gain /
-        // range. Sheep / pig / creeper have no dedicated hurt clip, so their hurt
-        // cue reuses the shared player-hurt bank; the creeper has no idle voice,
-        // so its say cue wraps an empty bank (a silent no-op).
-        self.voices = malloc<MobVoice>(5);
-        self.voices[MobKind::Chicken as i32] = MobVoice {
-            say: Cue {
-                bank: self.banks.dir("mob/chicken/say"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-            hurt: Cue {
-                bank: self.banks.dir("mob/chicken/hurt"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-        };
-        self.voices[MobKind::Sheep as i32] = MobVoice {
-            say: Cue {
-                bank: self.banks.dir("mob/sheep/say"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-            hurt: Cue {
-                bank: self.playerHurtCue.bank,
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-        };
-        self.voices[MobKind::Cow as i32] = MobVoice {
-            say: Cue {
-                bank: self.banks.dir("mob/cow/say"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-            hurt: Cue {
-                bank: self.banks.dir("mob/cow/hurt"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-        };
-        self.voices[MobKind::Creeper as i32] = MobVoice {
-            say: Cue {
-                bank: self.banks.empty(),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-            hurt: Cue {
-                bank: self.playerHurtCue.bank,
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-        };
-        self.voices[MobKind::Pig as i32] = MobVoice {
-            say: Cue {
-                bank: self.banks.dir("mob/pig/say"),
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-            hurt: Cue {
-                bank: self.playerHurtCue.bank,
-                gain: Audio::VOL_MOB,
-                range: Audio::MOB_DIST,
-            },
-        };
+        // One positional voice (idle say + hurt cry) per MobKind, from the
+        // species' `mob/<species>/say` and `mob/<species>/hurt` folders. Every
+        // slot is first given a voiceless entry, so a species added to MobKind
+        // and not listed here is silent rather than reading a voice nobody
+        // wrote. A missing folder is an empty bank: the creeper has no idle
+        // voice, and sheep / pig / creeper fall back to the player's hurt clip
+        // at play time (`mobHurt`).
+        self.voices = malloc<MobVoice>(Mobs::KIND_COUNT);
+        for (k of 0..Mobs::KIND_COUNT) {
+            self.voices[k] = self.mobVoice("none");
+        }
+        self.voices[MobKind::Chicken as i32] = self.mobVoice("chicken");
+        self.voices[MobKind::Sheep as i32] = self.mobVoice("sheep");
+        self.voices[MobKind::Cow as i32] = self.mobVoice("cow");
+        self.voices[MobKind::Creeper as i32] = self.mobVoice("creeper");
+        self.voices[MobKind::Pig as i32] = self.mobVoice("pig");
 
         // The creeper's charge / blast are single bespoke files (not numbered
         // variant folders), so load them directly.
@@ -428,6 +379,27 @@ class AudioManager : Listener, Closeable {
             bank: self.banks.file("mob/creeper/exploded.wav"),
             gain: Audio::VOL_CREEPER,
             range: Audio::CREEPER_DIST,
+        };
+    }
+
+    /**
+     * A species' voice, loaded from its folders under `mob/` at mob gain and
+     * range. Either cue is an empty bank where its folder has no clips.
+     * @param species  the species' folder name
+     * @return the voice
+     */
+    fn mobVoice(mut self, species : string) : MobVoice {
+        return MobVoice {
+            say: Cue {
+                bank: self.banks.dir("mob/" + species + "/say"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
+            hurt: Cue {
+                bank: self.banks.dir("mob/" + species + "/hurt"),
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            },
         };
     }
 
@@ -552,7 +524,15 @@ class AudioManager : Listener, Closeable {
      * @param rnd   variant selector in [0, 1)
      */
     pub(crate) fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
-        self.emitAt(self.voices[kind as i32].hurt, rnd, pos);
+        let c : Cue = self.voices[kind as i32].hurt;
+        if (!c.bank.loaded()) {
+            c = Cue {
+                bank: self.playerHurtCue.bank,
+                gain: Audio::VOL_MOB,
+                range: Audio::MOB_DIST,
+            };
+        }
+        self.emitAt(c, rnd, pos);
     }
 
     /**

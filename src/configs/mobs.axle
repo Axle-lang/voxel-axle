@@ -5,8 +5,8 @@
 // overhead is out of range: `Mobs::CREEPER_MAX_VERTICAL` is an extra hard cap on the
 // vertical gap so hovering above a creeper never trips its fuse.
 
-// The creature species. Discriminants double as the per-species array selector
-// in the manager's melee path, so keep this order in sync there.
+// The creature species. The discriminants index the per-species voice table in
+// engine::audio::sfx, which is sized by `Mobs::KIND_COUNT`.
 enum MobKind : i32 {
     Chicken,
     Sheep,
@@ -17,6 +17,7 @@ enum MobKind : i32 {
 
 /** Population, per-species hit points and speeds, the wander AI, melee, and the creeper. */
 class Mobs {
+    static KIND_COUNT : i32 = 5;   // variants in MobKind — raise it with the enum
     static CAP : i32 = 32;
 
     static CHICKEN_HP : i32 = 4;
