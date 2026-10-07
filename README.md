@@ -93,7 +93,7 @@ No engine. Every pixel of terrain, sky, water and mobs is shaded by the game's o
 ```bash
 git clone --recurse-submodules <repo-url>   # the platform layer is a submodule
 cd voxel-axle
-axle --version                              # must print 0.14.1 or newer
+axle --version                              # 0.14.1 or newer; built and checked on 0.15.0
 axle run -O 3                               # compile and play
 ```
 
@@ -112,7 +112,7 @@ It also draws the overlay now. The HUD, the heart row, the hotbar and the pause 
 
 ## 📦 Prerequisites
 
-Two things: the **Axle compiler** (v0.14.1+) and this repo **with its
+Two things: the **Axle compiler** (v0.14.1+; last built and checked on v0.15.0) and this repo **with its
 submodule**.
 
 ### Clone the repo and its platform submodule
