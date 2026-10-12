@@ -121,7 +121,7 @@ fn chunkOf(p : f64) : i32 {
 fn openBackend(display : Display, choice : RendererChoice) : dyn RenderBackend ! PlatformError {
     if (choice != RendererChoice::Cpu) {
         try {
-            return new GpuBackend(display.win)?;
+            return new GpuBackend(display.win);
         } catch e : PlatformError {
             if (choice == RendererChoice::Gpu) {
                 throw PlatformError(e.message);

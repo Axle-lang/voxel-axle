@@ -121,7 +121,7 @@ class Game {
      */
     constructor() ! PlatformError {
         let size = windowSize();
-        self.display = new Display(size.w, size.h)?;
+        self.display = new Display(size.w, size.h);
         self.events = new Events();
         self.events.setRelativeMouse(true);
         // Before the world: the random start column is drawn from its counter.
@@ -161,7 +161,7 @@ class Game {
         self.mobs.attachSpawner(new Fauna());
         self.frames.setViewport(self.display.width(), self.display.height());
         self.backend = malloc<dyn RenderBackend>(1);
-        self.backend[0] = openBackend(self.display, rendererChoice())?;
+        self.backend[0] = openBackend(self.display, rendererChoice());
         Console::println("renderer: ${self.backend[0].name()}");
 
         // The device is fed from a task of its own, on another carrier, so a

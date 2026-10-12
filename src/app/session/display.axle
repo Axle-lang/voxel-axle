@@ -29,8 +29,8 @@ class Display {
             resizable: true,
         };
 
-        self.platform = new Platform()?;
-        self.win = self.platform.open(desc)?;
+        self.platform = new Platform();
+        self.win = self.platform.open(desc);
         self.vp = viewportFor(w, h);
     }
 

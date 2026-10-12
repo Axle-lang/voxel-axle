@@ -82,9 +82,9 @@ class GpuBackend : RenderBackend {
             vsync: false,
             maxMeshes: 2 * World::SPAN * World::SPAN + 16,
             appName: "voxel",
-        })?;
+        });
         self.scene = new Scene(SCENE_DRAWS);
-        self.shaders = uploadShaders(self.gfx)?;
+        self.shaders = uploadShaders(self.gfx);
 
         self.atlasImage = new Image(Atlas::TILE_PX, Atlas::TILE_PX, Atlas::TILE_COUNT);
         if (Assets::loadAtlas(self.atlasImage.base(), self.atlasImage.byteCount()) != self.atlasImage.byteCount()) {
