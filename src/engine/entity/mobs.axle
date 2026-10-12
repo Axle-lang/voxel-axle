@@ -99,26 +99,26 @@ class MobManager {
             return false;
         }
         // Pick a random bearing on the spawn ring around the player (6.2831853 = 2π).
-        const angle : f64 = self.rand() * 6.2831853;
-        const cosA : f64 = angle.cos();
-        const sinA : f64 = angle.sin();
+        let angle : f64 = self.rand() * 6.2831853;
+        let cosA : f64 = angle.cos();
+        let sinA : f64 = angle.sin();
 
         // Spawn out of sight: skip directions inside the camera's forward
         // cone so creatures never pop into existence in front of the player.
-        const fwdx : f64 = 0.0 - player.siny;
-        const fwdz : f64 = player.cosy;
+        let fwdx : f64 = 0.0 - player.siny;
+        let fwdz : f64 = player.cosy;
         if (cosA * fwdx + sinA * fwdz > Mobs::SPAWN_FOV_DOT) {
             return false;
         }
 
         // Distance out: a random radius within the [min, radius] ring band.
-        const ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
-        const ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
-        const worldX : f64 = player.pos.x + cosA * ringRadius;
-        const worldZ : f64 = player.pos.z + sinA * ringRadius;
-        const cellX : i32 = worldX.floorToInt() as i32;
-        const cellZ : i32 = worldZ.floorToInt() as i32;
-        const surfaceY : i32 = world.columnHeight(cellX, cellZ);
+        let ringSpan : f64 = (Mobs::SPAWN_RADIUS - Mobs::SPAWN_MIN) as f64;
+        let ringRadius : f64 = (Mobs::SPAWN_MIN as f64) + self.rand() * ringSpan;
+        let worldX : f64 = player.pos.x + cosA * ringRadius;
+        let worldZ : f64 = player.pos.z + sinA * ringRadius;
+        let cellX : i32 = worldX.floorToInt() as i32;
+        let cellZ : i32 = worldZ.floorToInt() as i32;
+        let surfaceY : i32 = world.columnHeight(cellX, cellZ);
         if (surfaceY <= World::SEA_LEVEL) {
             return false;
         }
@@ -129,7 +129,7 @@ class MobManager {
         if (world.collisionHeight(cellX, cellZ) > surfaceY) {
             return false;
         }
-        const spawnY : f64 = surfaceY as f64;
+        let spawnY : f64 = surfaceY as f64;
 
         // The app spawner rolls a species (weighted toward the calm animals,
         // creepers kept rare) and builds it. Newborns get a randomised first
@@ -148,7 +148,7 @@ class MobManager {
      * @return the delay in frames
      */
     fn nextVocalDelay(mut self) : i32 {
-        const extraFrames : i32 = (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
+        let extraFrames : i32 = (self.rand() * (Audio::MOB_VOCAL_RAND as f64)).floorToInt() as i32;
         return Audio::MOB_VOCAL_MIN + extraFrames;
     }
 
@@ -161,9 +161,9 @@ class MobManager {
      * @return true if the mob should be removed
      */
     fn cull(self, a : dyn Actor, player : Player) : bool {
-        const dx : f64 = a.pos().x - player.pos.x;
-        const dz : f64 = a.pos().z - player.pos.z;
-        const despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
+        let dx : f64 = a.pos().x - player.pos.x;
+        let dz : f64 = a.pos().z - player.pos.z;
+        let despawn2 : f64 = Mobs::DESPAWN_DIST * Mobs::DESPAWN_DIST;
         return a.deathDone() || (!a.isDying() && dx * dx + dz * dz > despawn2);
     }
 
@@ -191,7 +191,7 @@ class MobManager {
 
             // ONE virtual call: the concrete species (calm Mob vs. Creeper)
             // supplies its own `think` by dynamic dispatch.
-            const roll = self.rand();
+            let roll = self.rand();
             a.think(world, player, sfx, sim, roll);
 
             // Calm creatures idle-chatter; the hostile creeper (the one species
@@ -216,7 +216,7 @@ class MobManager {
         // Swap-with-last compaction over the single pool. The evicted mob's heap
         // object is freed before its slot is overwritten — otherwise every
         // despawn / death would leak one Mob for the whole session.
-        let j : i32 = 0;
+        let mut j : i32 = 0;
         while (j < self.n) {
             if (self.cull(self.actors[j], player)) {
                 free(self.actors[j]);
@@ -227,7 +227,7 @@ class MobManager {
             }
         }
 
-        let tries : i32 = 0;
+        let mut tries : i32 = 0;
         while (self.n < Mobs::TARGET_COUNT && tries < 16) {
             self.spawnOne(world, player);
             tries++;
@@ -247,17 +247,17 @@ class MobManager {
         if (a.isDying()) {
             return -1.0;
         }
-        const fx : f64 = (0.0 - player.siny) * player.cosp;
-        const fy : f64 = player.sinp;
-        const fz : f64 = player.cosy * player.cosp;
-        const vx : f64 = a.pos().x - player.eye.x;
-        const vy : f64 = a.pos().y + Mobs::ATTACK_AIM_HEIGHT - player.eye.y;
-        const vz : f64 = a.pos().z - player.eye.z;
-        const along : f64 = vx * fx + vy * fy + vz * fz;
+        let fx : f64 = (0.0 - player.siny) * player.cosp;
+        let fy : f64 = player.sinp;
+        let fz : f64 = player.cosy * player.cosp;
+        let vx : f64 = a.pos().x - player.eye.x;
+        let vy : f64 = a.pos().y + Mobs::ATTACK_AIM_HEIGHT - player.eye.y;
+        let vz : f64 = a.pos().z - player.eye.z;
+        let along : f64 = vx * fx + vy * fy + vz * fz;
         if (along <= 0.0) {
             return -1.0;
         }
-        const off2 : f64 = vx * vx + vy * vy + vz * vz - along * along;
+        let off2 : f64 = vx * vx + vy * vy + vz * vz - along * along;
         if (off2 > Mobs::ATTACK_AIM_RADIUS * Mobs::ATTACK_AIM_RADIUS) {
             return -1.0;
         }
@@ -279,10 +279,10 @@ class MobManager {
      * @return whether a mob was struck
      */
     pub(crate) fn attackNearest(mut self, player : Player, sfx : AudioManager, reach : f64) : bool {
-        let best : f64 = reach.min(Mobs::ATTACK_RANGE);
-        let bestIdx : i32 = -1;
+        let mut best : f64 = reach.min(Mobs::ATTACK_RANGE);
+        let mut bestIdx : i32 = -1;
         for (i of 0..self.n) {
-            const along : f64 = self.aimedAt(self.actors[i], player);
+            let along : f64 = self.aimedAt(self.actors[i], player);
             if (along >= 0.0 && along <= best) {
                 best = along;
                 bestIdx = i;

@@ -6,7 +6,7 @@
 // never been baked go first and on a crew; the rest are refreshed round-robin as
 // the sun turns, gliding toward the new answer so the shadow never ticks.
 //
-// Runs on the light thread.
+// Runs on the light task.
 
 use smalt::Mem;
 use crate::engine::math::vec3::{ IVec3, Vec3, vec3, ivec3 };
@@ -42,7 +42,6 @@ class SunShadows {
                              // holds, so it is skipped; the all-zero a slot starts
                              // with matches nothing, so a fresh slot always bakes
     clouds : CloudMap,       // the sun's transmittance through the deck, per column
-    crew : Task<i32>[],      // the spawned shares of a priority bake
 
     /**
      * The bake's bookkeeping over a ring of `slots`.
@@ -59,7 +58,6 @@ class SunShadows {
         self.queue = new BakeQueue(slots);
         self.baked = Mem::takeZeroed((slots as i64) * 3 * FLOAT_BYTES);
         self.clouds = new CloudMap();
-        self.crew = malloc<Task<i32>>(BAKE_WORKERS - 1);
     }
 
     /**
@@ -99,34 +97,34 @@ class SunShadows {
      * @return the surviving fraction of sunlight, 0..1
      */
     fn rayTransmit(self, cell : IVec3, dir : Vec3, ceil : i32) : f64 {
-        const s : i32 = World::CHUNK_SIZE;
-        const ox : f64 = (cell.x as f64) + 0.5;
-        const oy : f64 = (cell.y as f64) + 0.5;
-        const oz : f64 = (cell.z as f64) + 0.5;
-        let through : f64 = 1.0;
-        let t : f64 = 0.5;
+        let s : i32 = World::CHUNK_SIZE;
+        let ox : f64 = (cell.x as f64) + 0.5;
+        let oy : f64 = (cell.y as f64) + 0.5;
+        let oz : f64 = (cell.z as f64) + 0.5;
+        let mut through : f64 = 1.0;
+        let mut t : f64 = 0.5;
 
         // The chunk the last step landed in, and what it took to find it. A step
         // is six tenths of a block and a chunk is sixteen across, so twenty-odd
         // consecutive steps share a chunk: asking the ring which slot holds it
         // once per chunk instead of once per step is the same answer, found far
         // less often. An impossible column to start, so the first step resolves.
-        let ccx : i32 = -1000000;
-        let ccz : i32 = -1000000;
-        let cslot : i32 = 0;
-        let cowns : bool = false;
-        let ctop : i32 = 0;
+        let mut ccx : i32 = -1000000;
+        let mut ccz : i32 = -1000000;
+        let mut cslot : i32 = 0;
+        let mut cowns : bool = false;
+        let mut ctop : i32 = 0;
 
         while (t < Daylight::SUN_SHADOW_REACH) {
-            const cy : i32 = (oy + dir.y * t).floorToInt() as i32;
+            let cy : i32 = (oy + dir.y * t).floorToInt() as i32;
             if (cy > ceil) {
                 return through;
             }
             if (cy >= 0 && cy < World::HEIGHT) {
-                const cx : i32 = (ox + dir.x * t).floorToInt() as i32;
-                const cz : i32 = (oz + dir.z * t).floorToInt() as i32;
-                const bx : i32 = self.ring.floorDiv(cx, s);
-                const bz : i32 = self.ring.floorDiv(cz, s);
+                let cx : i32 = (ox + dir.x * t).floorToInt() as i32;
+                let cz : i32 = (oz + dir.z * t).floorToInt() as i32;
+                let bx : i32 = self.ring.floorDiv(cx, s);
+                let bz : i32 = self.ring.floorDiv(cz, s);
                 if (bx != ccx || bz != ccz) {
                     ccx = bx;
                     ccz = bz;
@@ -139,8 +137,8 @@ class SunShadows {
                 // ever written up there. Air passes the whole ray, so neither
                 // case is worth a fetch.
                 if (cowns && cy <= ctop) {
-                    const hit : Block = self.ring.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s));
-                    const tr : f64 = lightTransmit(hit);
+                    let hit : Block = self.ring.store.getVox(cslot, ivec3(cx - bx * s, cy, cz - bz * s));
+                    let tr : f64 = lightTransmit(hit);
                     if (tr < 1.0) {
                         through *= tr;
                         if (through < 0.02) {
@@ -165,28 +163,28 @@ class SunShadows {
      * @return soft visibility 0..255
      */
     fn raySoft(self, cell : IVec3, dir : Vec3, ceil : i32) : i32 {
-        let n : i32 = Daylight::SUN_SHADOW_SAMPLES;
+        let mut n : i32 = Daylight::SUN_SHADOW_SAMPLES;
         if (n < 1) {
             n = 1;
         }
-        let total : f64 = self.rayTransmit(cell, dir, ceil);
+        let mut total : f64 = self.rayTransmit(cell, dir, ceil);
         if (n == 1) {
             return (total * 255.0).floorToInt() as i32;
         }
 
-        let ux : f64 = 0.0;
-        let uy : f64 = 1.0;
-        let uz : f64 = 0.0;
+        let mut ux : f64 = 0.0;
+        let mut uy : f64 = 1.0;
+        let mut uz : f64 = 0.0;
         if (dir.y > 0.9 || dir.y < -0.9) {
             ux = 1.0;
             uy = 0.0;
             uz = 0.0;
         }
 
-        let tx : f64 = uy * dir.z - uz * dir.y;
-        let ty : f64 = uz * dir.x - ux * dir.z;
-        let tz : f64 = ux * dir.y - uy * dir.x;
-        let tl : f64 = (tx * tx + ty * ty + tz * tz).sqrt();
+        let mut tx : f64 = uy * dir.z - uz * dir.y;
+        let mut ty : f64 = uz * dir.x - ux * dir.z;
+        let mut tz : f64 = ux * dir.y - uy * dir.x;
+        let mut tl : f64 = (tx * tx + ty * ty + tz * tz).sqrt();
         if (tl < 0.000001) {
             tl = 0.000001;
         }
@@ -194,9 +192,9 @@ class SunShadows {
         ty /= tl;
         tz /= tl;
 
-        const bx : f64 = dir.y * tz - dir.z * ty;
-        const by : f64 = dir.z * tx - dir.x * tz;
-        const bz : f64 = dir.x * ty - dir.y * tx;
+        let bx : f64 = dir.y * tz - dir.z * ty;
+        let by : f64 = dir.z * tx - dir.x * tz;
+        let bz : f64 = dir.x * ty - dir.y * tx;
 
         // The disc is sampled over its AREA, on a golden-angle spiral, and the
         // SAME pattern in every cell. It used to be a ring, rotated by a hash of
@@ -205,21 +203,21 @@ class SunShadows {
         // cells disagree by a sixth for no reason in the world. One fixed
         // pattern makes the penumbra a gradient again, and an even spread over
         // the disc weights the middle of the sun like the sun does.
-        const r : f64 = Daylight::SUN_DISC_ANGLE;
-        let cnt : i32 = 1;
+        let r : f64 = Daylight::SUN_DISC_ANGLE;
+        let mut cnt : i32 = 1;
         for (i of 1..n) {
-            const u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
-            const ang : f64 = (i as f64) * 2.399963;
-            const ox : f64 = ang.cos() * r * u;
-            const oy : f64 = ang.sin() * r * u;
-            const dx : f64 = dir.x + tx * ox + bx * oy;
-            const dy : f64 = dir.y + ty * ox + by * oy;
-            const dz : f64 = dir.z + tz * ox + bz * oy;
-            let dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
+            let u : f64 = (((i as f64) - 0.5) / ((n - 1) as f64)).sqrt();
+            let ang : f64 = (i as f64) * 2.399963;
+            let ox : f64 = ang.cos() * r * u;
+            let oy : f64 = ang.sin() * r * u;
+            let dx : f64 = dir.x + tx * ox + bx * oy;
+            let dy : f64 = dir.y + ty * ox + by * oy;
+            let dz : f64 = dir.z + tz * ox + bz * oy;
+            let mut dl : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
             if (dl < 0.000001) {
                 dl = 0.000001;
             }
-            const ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
+            let ray : Vec3 = vec3(dx / dl, dy / dl, dz / dl);
             total += self.rayTransmit(cell, ray, ceil);
             cnt++;
         }
@@ -253,29 +251,29 @@ class SunShadows {
     ) : void {
         self.markBaked(slot, sun);
 
-        const s : i32 = World::CHUNK_SIZE;
-        let top : i32 = self.ring.store.faceTop(slot) + 1;
+        let s : i32 = World::CHUNK_SIZE;
+        let mut top : i32 = self.ring.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
 
-        const scan : ShellScan = scanShell(self.ring, self.vols.sky(), slot, cx, cz, top);
-        const draft : SurfaceDraft = self.surface.open(slot, scan);
-        let changed : bool = false;
+        let scan : ShellScan = scanShell(self.ring, self.vols.sky(), slot, cx, cz, top);
+        let draft : SurfaceDraft = self.surface.open(slot, scan);
+        let mut changed : bool = false;
         for (lz of 0..s) {
             for (lx of 0..s) {
                 // What the cloud deck leaves of the sun over this column. Once
                 // per column, not per cell: the deck is a hundred blocks up, so
                 // it shades a whole column alike.
-                const cloudT : f64 = self.clouds.transmit(
+                let cloudT : f64 = self.clouds.transmit(
                     (cx * s + lx) as f64,
                     (cz * s + lz) as f64
                 );
                 for (y of 0..=top) {
                     if (inShell(scan, lx, y, lz)) {
-                        const at : i64 = draftCell(draft, lx, y, lz);
-                        const soft : i32 = self.raySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil);
-                        let v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
+                        let at : i64 = draftCell(draft, lx, y, lz);
+                        let soft : i32 = self.raySoft(ivec3(cx * s + lx, y, cz * s + lz), sun, ceil);
+                        let mut v : i32 = ((soft as f64) * cloudT).floorToInt() as i32;
                         if (!snap) {
                             v = glideTo(draftSun(draft, at), v);
                         }
@@ -296,7 +294,7 @@ class SunShadows {
      * @param sun   the light direction the bake used (unit)
      */
     fn markBaked(mut self, slot : i32, sun : Vec3) : void {
-        const o : i64 = (slot as i64) * 3;
+        let o : i64 = (slot as i64) * 3;
         putFloatOf(self.baked, o, sun.x);
         putFloatOf(self.baked, o + 1, sun.y);
         putFloatOf(self.baked, o + 2, sun.z);
@@ -314,8 +312,8 @@ class SunShadows {
      * @return true when the slot is worth baking again
      */
     fn movedFor(self, slot : i32, sun : Vec3) : bool {
-        const o : i64 = (slot as i64) * 3;
-        const dot : f64 = floatOf(self.baked, o) * sun.x
+        let o : i64 = (slot as i64) * 3;
+        let dot : f64 = floatOf(self.baked, o) * sun.x
             + floatOf(self.baked, o + 1) * sun.y
             + floatOf(self.baked, o + 2) * sun.z;
         return dot < Daylight::SUN_STILL_COS;
@@ -331,11 +329,11 @@ class SunShadows {
      * @param ceil    tallest terrain Y over loaded chunks
      */
     pub(file) fn bakeDirty(mut self, first : i32, stride : i32, sun : Vec3, ceil : i32) : void {
-        const slots : i32 = World::SPAN * World::SPAN;
-        let d : i32 = first;
+        let slots : i32 = World::SPAN * World::SPAN;
+        let mut d : i32 = first;
         while (d < slots) {
             if (self.ring.cols.loaded[d] == 1 && self.queue.owed(d)) {
-                const claimed : i32 = self.queue.claim(d);
+                let claimed : i32 = self.queue.claim(d);
                 self.bakeChunk(
                     d,
                     self.ring.cols.cxs[d],
@@ -348,6 +346,15 @@ class SunShadows {
             }
             d += stride;
         }
+    }
+
+    /**
+     * Whether any loaded slot still waits for its shadow map — the light loop's
+     * pacing question, and the same one `step` asks of its queue.
+     * @return true while a slot is owed a bake
+     */
+    pub(crate) fn owed(self) : bool {
+        return self.queue.owedCount(self.ring) > 0;
     }
 
     /**
@@ -373,7 +380,7 @@ class SunShadows {
      * @param budget   max already-baked chunks to refresh this call
      */
     pub(crate) fn step(mut self, dayTime : f64, budget : i32) : void {
-        const body : SkyBodyLight = activeBody(dayTime);
+        let body : SkyBodyLight = activeBody(dayTime);
 
         // Nothing is casting anything worth baking — the handover at the horizon.
         // The maps keep whatever they last held, which is what the light they are
@@ -382,10 +389,10 @@ class SunShadows {
             return;
         }
 
-        const sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
-        const slots : i32 = World::SPAN * World::SPAN;
-        const ceil : i32 = terrainCeil(self.ring);
-        const fresh : i32 = self.queue.owedCount(self.ring);
+        let sun : Vec3 = vec3(body.dirX, body.dirY, body.dirZ);
+        let slots : i32 = World::SPAN * World::SPAN;
+        let ceil : i32 = terrainCeil(self.ring);
+        let fresh : i32 = self.queue.owedCount(self.ring);
         if (fresh > BAKE_WORKERS) {
             // A whole ring at once — the start of a run, or a teleport — is about
             // a second of rays. Done on this one thread, that second is exactly
@@ -396,13 +403,14 @@ class SunShadows {
             // The shares are disjoint by slot, and a slot's bake WRITES only its
             // own volume while it READS the neighbours' voxels, which nothing
             // here changes: no lock, nothing shared but the world itself.
+            // A local, not a field: the shares are handed `self`, and an object
+            // holding their handles could carry them to another carrier (E0729).
+            let mut crew : Future<void>[] = malloc<Future<void>>(BAKE_WORKERS - 1);
             for (i of 0..BAKE_WORKERS - 1) {
-                self.crew[i] = spawn sunBakeJob(self, i + 1, BAKE_WORKERS, sun, ceil);
+                crew[i] = spawn self.bakeDirty(i + 1, BAKE_WORKERS, sun, ceil);
             }
             self.bakeDirty(0, BAKE_WORKERS, sun, ceil);
-            for (i of 0..BAKE_WORKERS - 1) {
-                const r : i32 = self.crew[i].join();
-            }
+            await all crew;
         } else if (fresh > 0) {
             // A chunk or two walked into: less work than starting the threads
             // that would share it.
@@ -415,10 +423,10 @@ class SunShadows {
             return;
         }
 
-        let done : i32 = 0;
-        let guard : i32 = 0;
+        let mut done : i32 = 0;
+        let mut guard : i32 = 0;
         while (done < budget && guard < slots) {
-            const slot : i32 = self.cursor;
+            let slot : i32 = self.cursor;
             self.cursor++;
             if (self.cursor >= slots) {
                 self.cursor = 0;
@@ -449,12 +457,12 @@ class SunShadows {
  * @return where the cell moves to this sweep
  */
 fn glideTo(old : i32, v : i32) : i32 {
-    const dv : i32 = v - old;
+    let dv : i32 = v - old;
     if (dv == 0) {
         return v;
     }
 
-    let stepv : i32 = ((dv as f64) * Daylight::SUN_GLIDE).floorToInt() as i32;
+    let mut stepv : i32 = ((dv as f64) * Daylight::SUN_GLIDE).floorToInt() as i32;
     if (dv > 0 && stepv < 1) {
         stepv = 1;
     }
@@ -464,22 +472,3 @@ fn glideTo(old : i32, v : i32) : i32 {
     return old + stepv;
 }
 
-/**
- * Worker job: cast one share of the ring's never-shadowed slots.
- * @param sun     the bake whose ring is cast
- * @param first   the first slot of this share
- * @param stride  the number of shares
- * @param dir     sun direction (unit)
- * @param ceil    tallest terrain Y over loaded chunks
- * @return always 0, for the task to join on
- */
-fn sunBakeJob(
-    sun : SunShadows,
-    first : i32,
-    stride : i32,
-    dir : Vec3,
-    ceil : i32
-) : i32 {
-    sun.bakeDirty(first, stride, dir, ceil);
-    return 0;
-}

@@ -10,7 +10,7 @@
 //   PROVIDER                 BUNDLE (fine-grained capabilities)
 //   world (ChunkManager) ->  VoxelQuery  : VoxelReader + CollisionField + Heightfield
 //                            VoxelEdit   : VoxelWriter + ChunkStreamer + DayCycle
-//                                          + LightPrime + LightThread
+//                                          + LightPrime + LightTask
 //                            LightSample : BlockLightField + SkyLightField
 //                                          + SunLightField + BounceLightField
 //                            TerrainView : ChunkMeshes + LightSample
@@ -161,7 +161,7 @@ trait ChunkStreamer {
 }
 
 /**
- * What the light thread needs to know about the moment it is baking for: the
+ * What the light task needs to know about the moment it is baking for: the
  * hour (where the sun is), the clock (where the wind has carried the clouds) and
  * where the player is standing (what square of world the cloud map should cover).
  *
@@ -176,7 +176,7 @@ struct LightMoment {
     pub(crate) camZ : i32,
 }
 
-/** Publish the moment the light thread bakes against. */
+/** Publish the moment the light task bakes against. */
 trait DayCycle {
     /**
      * Publish the moment the next light bake is for.
@@ -191,9 +191,9 @@ trait LightPrime {
     fn primeLight(mut self) : void;
 }
 
-/** Stop + join the background light thread at shutdown. */
-trait LightThread {
-    /** Stop the background light thread and wait for it to finish. */
+/** Stop + await the background light task at shutdown. */
+trait LightTask {
+    /** Stop the background light task and wait for it to finish. */
     fn stopLight(mut self) : void;
 }
 
@@ -203,7 +203,7 @@ trait VoxelEdit :
     ChunkStreamer,
     DayCycle,
     LightPrime,
-    LightThread {
+    LightTask {
 }
 
 // ─── Baked light-sample capabilities (read by the renderer per face corner) ──

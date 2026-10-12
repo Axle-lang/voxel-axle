@@ -26,7 +26,7 @@ use crate::engine::render::cpu::bloom::Bloom;
 use crate::engine::render::cpu::sky::skyengine::{ SkyEngine };
 use crate::engine::render::cpu::postfx::{ GodRayFX, UnderwaterFX, SunScreen };
 use crate::engine::render::cpu::atlas::{ TextureAtlas };
-use crate::engine::render::cpu::world::chunkview::{ ChunkRenderer, buildSlotsJob };
+use crate::engine::render::cpu::world::chunkview::{ ChunkRenderer };
 use crate::engine::shade::daymodel::{ DayState };
 use crate::engine::render::cpu::mobs::mobview::{ MobView, MobScene };
 use crate::engine::render::cpu::selection::Selection;
@@ -62,7 +62,11 @@ const RASTER_BANDS : i32 = 12;
  */
 class RasterCrew {
     members : ChunkRenderer[],
-    builders : Task<i32>[], // one slot per member but the first, which runs on the caller
+    // One slot per member but the first, which runs on the caller. A field and
+    // not a local, unlike the bake crews: no crew is ever handed to a `spawn`
+    // (the jobs take one member each), so no handle of this object can reach
+    // another carrier — the hazard the locals elsewhere are avoiding (E0729).
+    builders : Future<void>[],
 
     /** Build every member of the crew. */
     constructor() {
@@ -70,7 +74,7 @@ class RasterCrew {
         for (i of 0..BUILD_WORKERS) {
             self.members[i as i64] = new ChunkRenderer();
         }
-        self.builders = malloc<Task<i32>>(BUILD_WORKERS - 1);
+        self.builders = malloc<Future<void>>(BUILD_WORKERS - 1);
     }
 
     /**
@@ -109,8 +113,7 @@ class RasterCrew {
      */
     pub(crate) fn build(mut self, world : dyn TerrainView, cam : Camera, phase : f64) : void {
         for (i of 0..BUILD_WORKERS - 1) {
-            self.builders[i] = spawn buildSlotsJob(
-                self.members[(i + 1) as i64],
+            self.builders[i] = spawn self.members[(i + 1) as i64].buildSlots(
                 world,
                 cam,
                 phase,
@@ -119,17 +122,9 @@ class RasterCrew {
             );
         }
 
-        self.members[0].buildSlots(
-            world,
-            cam,
-            phase,
-            0,
-            BUILD_WORKERS
-        );
+        self.members[0].buildSlots(world, cam, phase, 0, BUILD_WORKERS);
 
-        for (i of 0..BUILD_WORKERS - 1) {
-            const d : i32 = self.builders[i].join();
-        }
+        await all self.builders;
     }
 
     /**
@@ -149,7 +144,7 @@ class RasterCrew {
      * @return the queued triangle count summed over every member
      */
     pub(crate) fn triCount(self) : i32 {
-        let n : i32 = 0;
+        let mut n : i32 = 0;
         for (i of 0..BUILD_WORKERS) {
             n += self.members[i as i64].queuedTris;
         }
@@ -188,10 +183,10 @@ class BandFill : Job {
      * @param shares  how many bands the frame was cut into
      */
     fn run(mut self, share : i32, shares : i32) : void {
-        const fb : FrameBuf = self.frame[0];
-        const bw : i32 = (fb.w + shares - 1) / shares;
-        const x0 : i32 = (bw * share).min(fb.w);
-        const x1 : i32 = (bw * (share + 1)).min(fb.w);
+        let fb : FrameBuf = self.frame[0];
+        let bw : i32 = (fb.w + shares - 1) / shares;
+        let x0 : i32 = (bw * share).min(fb.w);
+        let x1 : i32 = (bw * (share + 1)).min(fb.w);
         self.crew.fillBand(fb, x0, x1);
     }
 }
@@ -331,7 +326,7 @@ class SoftRenderer {
         );
         self.crew.build(world, cam, phase);
 
-        const tFill : i64 = monotonicNanos();
+        let tFill : i64 = monotonicNanos();
         self.frame[0] = fb;
         self.pool.run(self.fillPass, RASTER_BANDS);
         self.fillUs += (monotonicNanos() - tFill) / 1000;
@@ -371,7 +366,7 @@ class SoftRenderer {
         // pixel the world left empty, so a colour clear is a whole frame
         // written and then thrown away.
         if (frame.clock.underwater) {
-            const deep : i32 = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
+            let deep : i32 = Color::packBytes(Water::DEEP_R, Water::DEEP_G, Water::DEEP_B);
             clearFrame(fb, deep);
         } else {
             clearDepth(fb);
@@ -482,7 +477,7 @@ class SoftRenderer {
      * @param fb     the render target (framebuffer + z-buffer + size)
      */
     pub(crate) fn renderTorches(self, frame : FrameDesc, fb : FrameBuf) : void {
-        const scene : MobScene = self.mobScene(frame.day);
+        let scene : MobScene = self.mobScene(frame.day);
         for (ti of 0..frame.torchCount) {
             self.mobs.drawBox(self.cam, fb, torchBox(frame.torches[ti]), scene);
         }

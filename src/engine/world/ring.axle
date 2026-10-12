@@ -37,7 +37,7 @@ class RingView {
      * @return the floored quotient
      */
     pub(crate) fn floorDiv(self, a : i32, b : i32) : i32 {
-        let q : i32 = a / b;
+        let mut q : i32 = a / b;
         if (a - q * b < 0) {
             q--;
         }
@@ -50,8 +50,8 @@ class RingView {
      * @return the coordinate wrapped into [0, span)
      */
     pub(crate) fn wrap(self, v : i32) : i32 {
-        const s : i32 = World::SPAN;
-        let m : i32 = v - (v / s) * s;
+        let s : i32 = World::SPAN;
+        let mut m : i32 = v - (v / s) * s;
         if (m < 0) {
             m += s;
         }
@@ -94,10 +94,10 @@ class RingView {
             return Block::Air;
         }
 
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(cell.x, s);
-        const cz : i32 = self.floorDiv(cell.z, s);
-        const slot : i32 = self.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return Block::Air;
         }
@@ -126,10 +126,10 @@ class RingView {
             return Block::Air;
         }
 
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(cell.x, s);
-        const cz : i32 = self.floorDiv(cell.z, s);
-        const slot : i32 = self.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return Block::Stone;
         }
@@ -151,10 +151,10 @@ class RingView {
             return 0;
         }
 
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(cell.x, s);
-        const cz : i32 = self.floorDiv(cell.z, s);
-        const slot : i32 = self.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return 0;
         }
@@ -172,10 +172,10 @@ class RingView {
             return -1;
         }
 
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.floorDiv(cell.x, s);
-        const cz : i32 = self.floorDiv(cell.z, s);
-        const slot : i32 = self.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.floorDiv(cell.x, s);
+        let cz : i32 = self.floorDiv(cell.z, s);
+        let slot : i32 = self.slotFor(cx, cz);
         if (!self.owns(slot, cx, cz)) {
             return -1;
         }

@@ -43,8 +43,8 @@ const START_HASH_OFFSET : i64 = 2685821657736338717;
  * @return the (x, z) block column to search around
  */
 fn randomColumn(entropy : i64) : (x: i32, z: i32) {
-    const a : i64 = (entropy * START_HASH_MUL) >> 17;
-    const b : i64 = ((entropy + START_HASH_OFFSET) * START_HASH_MUL) >> 29;
+    let a : i64 = (entropy * START_HASH_MUL) >> 17;
+    let b : i64 = ((entropy + START_HASH_OFFSET) * START_HASH_MUL) >> 29;
     return (spread(a), spread(b));
 }
 
@@ -60,7 +60,7 @@ fn randomColumn(entropy : i64) : (x: i32, z: i32) {
  * @return the block offset it folds to on one axis
  */
 fn spread(v : i64) : i32 {
-    let m : i64 = v % (START_SPREAD * 2);
+    let mut m : i64 = v % (START_SPREAD * 2);
     if (m < 0) {
         m = -m;
     }
@@ -77,16 +77,16 @@ fn spread(v : i64) : i32 {
  * @return true if the 3×3 area is open and roughly flat
  */
 fn openSpot(man : dyn VoxelQuery, gx : i32, gz : i32) : bool {
-    const h0 : i32 = man.columnHeight(gx, gz);
+    let h0 : i32 = man.columnHeight(gx, gz);
     for (dz of -1..=1) {
         for (dx of -1..=1) {
-            const cx : i32 = gx + dx;
-            const cz : i32 = gz + dz;
-            const hc : i32 = man.columnHeight(cx, cz);
+            let cx : i32 = gx + dx;
+            let cz : i32 = gz + dz;
+            let hc : i32 = man.columnHeight(cx, cz);
             if (man.collisionHeight(cx, cz) != hc) {
                 return false;
             }
-            let d : i32 = hc - h0;
+            let mut d : i32 = hc - h0;
             if (d < 0) {
                 d = -d;
             }
@@ -109,19 +109,19 @@ fn openSpot(man : dyn VoxelQuery, gx : i32, gz : i32) : bool {
  * @return the yaw (radians) with the most open forward view
  */
 fn openYaw(man : dyn VoxelQuery, sx : i32, sz : i32, baseH : i32) : f64 {
-    let best : f64 = 0.0;
-    let bestScore : i32 = -1;
+    let mut best : f64 = 0.0;
+    let mut bestScore : i32 = -1;
     for (k of 0..8) {
-        const yaw : f64 = (k as f64) * 0.7853981634;
-        const fwx : f64 = 0.0 - yaw.sin();
-        const fwz : f64 = yaw.cos();
-        let score : i32 = 0;
-        let blocked : bool = false;
-        let d : f64 = 1.5;
+        let yaw : f64 = (k as f64) * 0.7853981634;
+        let fwx : f64 = 0.0 - yaw.sin();
+        let fwz : f64 = yaw.cos();
+        let mut score : i32 = 0;
+        let mut blocked : bool = false;
+        let mut d : f64 = 1.5;
         while (d < 8.0 && !blocked) {
-            const cx : i32 = ((sx as f64) + 0.5 + fwx * d).floorToInt() as i32;
-            const cz : i32 = ((sz as f64) + 0.5 + fwz * d).floorToInt() as i32;
-            const hc : i32 = man.columnHeight(cx, cz);
+            let cx : i32 = ((sx as f64) + 0.5 + fwx * d).floorToInt() as i32;
+            let cz : i32 = ((sz as f64) + 0.5 + fwz * d).floorToInt() as i32;
+            let hc : i32 = man.columnHeight(cx, cz);
             if (man.collisionHeight(cx, cz) != hc || hc > baseH + 1) {
                 blocked = true;
             } else {
@@ -164,10 +164,10 @@ class Spawn {
     pub(crate) fn find(mut self, man : dyn VoxelQuery, cx : i32, cz : i32) : void {
         self.sx = cx;
         self.sz = cz;
-        let bestH : i32 = -1;
+        let mut bestH : i32 = -1;
         for (gz of cz - 40..=cz + 40) {
             for (gx of cx - 40..=cx + 40) {
-                const hh : i32 = man.columnHeight(gx, gz);
+                let hh : i32 = man.columnHeight(gx, gz);
                 if (hh > World::SEA_LEVEL + 2 && hh > bestH && openSpot(man, gx, gz)) {
                     bestH = hh;
                     self.sx = gx;

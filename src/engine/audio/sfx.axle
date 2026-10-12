@@ -16,9 +16,9 @@
 // `assets/sounds/` (next to the binary or one dir up — the prefix is resolved
 // once). Missing files are silent.
 //
-// The device is pumped on its own OS thread so a slow render/bake frame
-// can't starve the queue and stutter the sound. That loop, the flag that
-// ends it and the lock that makes it safe are all smalt's now
+// The device is pumped by a task of its own, on another carrier, so a slow
+// render/bake frame can't starve the queue and stutter the sound. That loop,
+// the flag that ends it and the lock that makes it safe are all smalt's now
 // (`smalt::mixerLoop`); this file used to carry a spinlock and a
 // thirty-line pump loop of its own for them.
 
@@ -110,8 +110,8 @@ class BankLoader : Closeable {
         if (self.count < self.cap) {
             return;
         }
-        const grown : i32 = self.cap * 2;
-        let wider : SoundBank[] = malloc<SoundBank>(grown as i64);
+        let grown : i32 = self.cap * 2;
+        let mut wider : SoundBank[] = malloc<SoundBank>(grown as i64);
         for (i of 0..self.count) {
             wider[i] = self.banks[i];
         }
@@ -143,7 +143,7 @@ class BankLoader : Closeable {
      * @return the loaded bank, owned by this loader
      */
     pub(file) fn dir(mut self, rel : string) : SoundBank {
-        const slot : i32 = self.keepNew(BankLoader::VARIANTS);
+        let slot : i32 = self.keepNew(BankLoader::VARIANTS);
         for (i of 1..=BankLoader::VARIANTS) {
             self.banks[slot].add(self.base + rel + "/" + i + ".wav");
         }
@@ -157,7 +157,7 @@ class BankLoader : Closeable {
      * @return the loaded bank, owned by this loader
      */
     pub(file) fn file(mut self, rel : string) : SoundBank {
-        const slot : i32 = self.keepNew(1);
+        let slot : i32 = self.keepNew(1);
         self.banks[slot].add(self.base + rel);
         return self.banks[slot];
     }
@@ -292,7 +292,7 @@ trait Listener {
 class AudioManager : Listener, Closeable {
     /**
      * The device and the voices. Public to the crate because `main`
-     * hands it to `smalt::mixerLoop` — the pump thread takes the mixer,
+     * hands it to `smalt::mixerLoop` — the pump task takes the mixer,
      * not this manager, and the mixer takes its own lock.
      */
     pub(crate) mixer : Mixer,
@@ -414,7 +414,7 @@ class AudioManager : Listener, Closeable {
     /**
      * Emit a non-positional cue.
      *
-     * No lock here any more: `Mixer` takes its own, so the pump thread
+     * No lock here any more: `Mixer` takes its own, so the pump task
      * and this one are serialised inside the library rather than by an
      * agreement between two files that both had to remember it.
      * @param cue  the cue to play
@@ -434,7 +434,7 @@ class AudioManager : Listener, Closeable {
         cue.playAt(self.mixer, rnd, pos);
     }
 
-    /** Ask the pump thread to finish (call before joining it on quit). */
+    /** Ask the pump task to finish (call before awaiting it on quit). */
     pub(crate) fn stop(self) : void {
         self.mixer.requestStop();
     }
@@ -461,7 +461,7 @@ class AudioManager : Listener, Closeable {
      * @return the cue to play
      */
     fn stepCue(self, mat : AudioMaterial) : Cue {
-        let c : Cue = self.materials[mat as i32].step;
+        let mut c : Cue = self.materials[mat as i32].step;
         if (!c.bank.loaded()) {
             c = self.materials[AudioMaterial::Stone as i32].step;
         }
@@ -475,7 +475,7 @@ class AudioManager : Listener, Closeable {
      * @return the cue to play
      */
     fn digCue(self, mat : AudioMaterial) : Cue {
-        let c : Cue = self.materials[mat as i32].dig;
+        let mut c : Cue = self.materials[mat as i32].dig;
         if (!c.bank.loaded()) {
             c = self.materials[AudioMaterial::Stone as i32].dig;
         }
@@ -498,7 +498,7 @@ class AudioManager : Listener, Closeable {
      * @param rnd      variant selector in [0, 1)
      */
     pub(crate) fn blockEdit(self, blockId : Block, cell : IVec3, rnd : f64) : void {
-        const center : Vec3 = vec3(
+        let center : Vec3 = vec3(
             (cell.x as f64) + 0.5,
             (cell.y as f64) + 0.5,
             (cell.z as f64) + 0.5
@@ -524,7 +524,7 @@ class AudioManager : Listener, Closeable {
      * @param rnd   variant selector in [0, 1)
      */
     pub(crate) fn mobHurt(self, kind : MobKind, pos : Vec3, rnd : f64) : void {
-        let c : Cue = self.voices[kind as i32].hurt;
+        let mut c : Cue = self.voices[kind as i32].hurt;
         if (!c.bank.loaded()) {
             c = Cue {
                 bank: self.playerHurtCue.bank,

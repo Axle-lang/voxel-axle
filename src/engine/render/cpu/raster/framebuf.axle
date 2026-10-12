@@ -41,8 +41,8 @@ trait PostEffect {
  * @param fb  the render target (framebuffer + z-buffer + size).
  */
 fn clearDepth(fb : FrameBuf) : void {
-    const zbuf : i64 = fb.zbuf;
-    const n : i32 = fb.w * fb.h;
+    let zbuf : i64 = fb.zbuf;
+    let n : i32 = fb.w * fb.h;
     for (i of 0..n) {
         putFloatOf(zbuf, i, 0.0);
     }
@@ -58,8 +58,8 @@ fn clearDepth(fb : FrameBuf) : void {
  * @param bg  background colour.
  */
 fn clearFrame(fb : FrameBuf, bg : i32) : void {
-    const pixels : i64 = fb.pixels;
-    const n : i32 = fb.w * fb.h;
+    let pixels : i64 = fb.pixels;
+    let n : i32 = fb.w * fb.h;
     for (i of 0..n) {
         Mem::putWordOf(pixels, i, bg);
     }

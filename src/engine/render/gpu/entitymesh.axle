@@ -91,14 +91,14 @@ class EntityMesh {
      * @param ds  the hour's light
      */
     fn addBox(mut self, b : MobBox, ds : DayState) : void {
-        const p : BoxPose = poseOf(b);
+        let p : BoxPose = poseOf(b);
         for (ci of 0..8) {
-            const c : Vec3 = boxCorner(b, p, ci);
+            let c : Vec3 = boxCorner(b, p, ci);
             self.corners[ci] = self.local(c.x, c.y, c.z);
         }
         for (i of 0..boxFaceCount(b)) {
-            const f : BoxFace = boxFaceOf(p, i);
-            const lit : BoxFaceLight = boxFaceLight(f.normal, b.light, b.hurt, ds);
+            let f : BoxFace = boxFaceOf(p, i);
+            let lit : BoxFaceLight = boxFaceLight(f.normal, b.light, b.hurt, ds);
             self.addQuad(
                 Quad {
                     a: self.corners[f.a],
@@ -119,12 +119,12 @@ class EntityMesh {
      * @param look  its word and light
      */
     fn addQuad(mut self, q : Quad, n : Vec3, look : FaceLook) : void {
-        const mid : Vec3 = q.a.add(q.b).add(q.c).add(q.d).scale(0.25);
+        let mid : Vec3 = q.a.add(q.b).add(q.c).add(q.d).scale(0.25);
         if (self.eye.sub(mid).dot(n) <= 0.0) {
             return;
         }
-        const color : i32 = lightColor(look.light);
-        const first : i32 = self.corner(q.a, n, Vec2::make(0.0, 1.0), color, look.word);
+        let color : i32 = lightColor(look.light);
+        let first : i32 = self.corner(q.a, n, Vec2::make(0.0, 1.0), color, look.word);
         self.corner(q.b, n, Vec2::make(1.0, 1.0), color, look.word);
         self.corner(q.c, n, Vec2::make(1.0, 0.0), color, look.word);
         self.corner(q.d, n, Vec2::make(0.0, 0.0), color, look.word);
@@ -158,9 +158,9 @@ class EntityMesh {
      * @param focal  the lens's pixels per unit at unit depth
      */
     fn addOutline(mut self, aim : AimBox, focal : f64) : void {
-        const lo : f64 = 0.0 - OUTLINE_LIFT;
-        const hi : f64 = 1.0 + OUTLINE_LIFT;
-        const top : f64 = aim.topH + OUTLINE_LIFT;
+        let lo : f64 = 0.0 - OUTLINE_LIFT;
+        let hi : f64 = 1.0 + OUTLINE_LIFT;
+        let top : f64 = aim.topH + OUTLINE_LIFT;
         for (k of 0..8) {
             self.corners[k] = self.local(
                 (aim.cell.x as f64) + ((k & 1) != 0 ? hi : lo),
@@ -168,7 +168,7 @@ class EntityMesh {
                 (aim.cell.z as f64) + ((k & 4) != 0 ? hi : lo)
             );
         }
-        const look : FaceLook = FaceLook {
+        let look : FaceLook = FaceLook {
             word: flatWord(Color::packBytes(36, 38, 44)),
             light: vec3(1.0, 1.0, 1.0),
         };
@@ -176,7 +176,7 @@ class EntityMesh {
         // corners that differ in one bit.
         for (k of 0..8) {
             for (bit of 0..3) {
-                const other : i32 = k | (1 << bit);
+                let other : i32 = k | (1 << bit);
                 if (other != k) {
                     self.addStroke(self.corners[k], self.corners[other], focal, look);
                 }
@@ -192,18 +192,18 @@ class EntityMesh {
      * @param look   the outline's word and light
      */
     fn addStroke(mut self, a : Vec3, b : Vec3, focal : f64, look : FaceLook) : void {
-        const mid : Vec3 = a.add(b).scale(0.5);
-        const toEye : Vec3 = self.eye.sub(mid);
-        const across : Vec3 = b.sub(a).cross(toEye);
-        const len : f64 = across.length();
+        let mid : Vec3 = a.add(b).scale(0.5);
+        let toEye : Vec3 = self.eye.sub(mid);
+        let across : Vec3 = b.sub(a).cross(toEye);
+        let len : f64 = across.length();
         if (len < 0.000001) {
             return;
         }
-        const half : f64 = OUTLINE_HALF_PX * toEye.length() / focal;
-        const side : Vec3 = across.scale(half / len);
-        const n : Vec3 = toEye.normalize();
-        const color : i32 = lightColor(look.light);
-        const first : i32 = self.corner(a.sub(side), n, Vec2::zero(), color, look.word);
+        let half : f64 = OUTLINE_HALF_PX * toEye.length() / focal;
+        let side : Vec3 = across.scale(half / len);
+        let n : Vec3 = toEye.normalize();
+        let color : i32 = lightColor(look.light);
+        let first : i32 = self.corner(a.sub(side), n, Vec2::zero(), color, look.word);
         self.corner(b.sub(side), n, Vec2::zero(), color, look.word);
         self.corner(b.add(side), n, Vec2::zero(), color, look.word);
         self.corner(a.add(side), n, Vec2::zero(), color, look.word);

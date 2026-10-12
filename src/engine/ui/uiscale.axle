@@ -42,7 +42,7 @@ struct UiScale {
         if (n <= 0) {
             return 0;
         }
-        let v : i32 = ((n as f64) * self.k + 0.5).floorToInt() as i32;
+        let mut v : i32 = ((n as f64) * self.k + 0.5).floorToInt() as i32;
         if (v < 1) {
             v = 1;
         }
@@ -56,14 +56,14 @@ struct UiScale {
  * @return the scale to lay the overlay out at
  */
 fn uiScaleFor(frameH : i32) : UiScale {
-    let k : f64 = (frameH as f64) / (Ui::REF_HEIGHT as f64);
+    let mut k : f64 = (frameH as f64) / (Ui::REF_HEIGHT as f64);
     if (k < 1.0) {
         k = 1.0;
     }
     if (k > Ui::MAX_SCALE) {
         k = Ui::MAX_SCALE;
     }
-    let t : i32 = (k + 0.5).floorToInt() as i32;
+    let mut t : i32 = (k + 0.5).floorToInt() as i32;
     if (t < 1) {
         t = 1;
     }

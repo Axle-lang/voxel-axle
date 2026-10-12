@@ -41,7 +41,7 @@ fn ditherAt(px : i32, py : i32) : f64 {
  * @return the packed colour
  */
 fn packSky(c : SkyColour, px : i32, py : i32) : i32 {
-    const d : f64 = ditherAt(px, py);
+    let d : f64 = ditherAt(px, py);
     return clampI32((shoulder(c.r) + d).floorToInt() as i32, 0, 255) * 65536
         + clampI32((shoulder(c.g) + d).floorToInt() as i32, 0, 255) * 256
         + clampI32((shoulder(c.b) + d).floorToInt() as i32, 0, 255);
@@ -80,7 +80,7 @@ struct ViewRays {
      * @return the row-constant terms
      */
     pub(crate) fn row(self, py : f64) : ViewRow {
-        const ndcy : f64 = (self.hh - py) / self.focal;
+        let ndcy : f64 = (self.hh - py) / self.focal;
         return ViewRow {
             rz0c: self.cosp - ndcy * self.sinp,
             dyw: ndcy * self.cosp + self.sinp,
@@ -95,10 +95,10 @@ struct ViewRays {
      * @return the direction, and 1 / its length
      */
     pub(crate) fn dir(self, r : ViewRow, px : f64) : ViewRay {
-        const ndcx : f64 = (px - self.hw) / self.focal;
-        const dx : f64 = ndcx * self.cosy - r.rz0c * self.siny;
-        const dz : f64 = ndcx * self.siny + r.rz0c * self.cosy;
-        let len : f64 = (dx * dx + r.dyw * r.dyw + dz * dz).sqrt();
+        let ndcx : f64 = (px - self.hw) / self.focal;
+        let dx : f64 = ndcx * self.cosy - r.rz0c * self.siny;
+        let dz : f64 = ndcx * self.siny + r.rz0c * self.cosy;
+        let mut len : f64 = (dx * dx + r.dyw * r.dyw + dz * dz).sqrt();
         if (len < 0.0001) {
             len = 0.0001;
         }

@@ -49,8 +49,8 @@ fn verdict(name : string, parts : i32) : i32 {
  * @return the failure count, 0 when green
  */
 fn runModelCheck() : i32 {
-    const model : BoxModel = new BoxModel();
-    let fails : i32 = 0;
+    let model : BoxModel = new BoxModel();
+    let mut fails : i32 = 0;
     fails += verdict("chicken", partsOf(new Chicken(0.0, 64.0, 0.0), model));
     fails += verdict("cow", partsOf(new Cow(0.0, 64.0, 0.0), model));
     fails += verdict("pig", partsOf(new Pig(0.0, 64.0, 0.0), model));

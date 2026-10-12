@@ -58,17 +58,17 @@ class Picker : RayCaster {
      */
     fn cast(mut self, man : dyn VoxelQuery, p : Player) : void {
         self.hit = 0;
-        const ox : f64 = p.eye.x;
-        const oy : f64 = p.eye.y;
-        const oz : f64 = p.eye.z;
-        const dx : f64 = (0.0 - p.siny) * p.cosp;
-        const dy : f64 = p.sinp;
-        const dz : f64 = p.cosy * p.cosp;
-        const big : f64 = 1.0e30;
+        let ox : f64 = p.eye.x;
+        let oy : f64 = p.eye.y;
+        let oz : f64 = p.eye.z;
+        let dx : f64 = (0.0 - p.siny) * p.cosp;
+        let dy : f64 = p.sinp;
+        let dz : f64 = p.cosy * p.cosp;
+        let big : f64 = 1.0e30;
 
-        let x : i32 = ox.floorToInt() as i32;
-        let y : i32 = oy.floorToInt() as i32;
-        let z : i32 = oz.floorToInt() as i32;
+        let mut x : i32 = ox.floorToInt() as i32;
+        let mut y : i32 = oy.floorToInt() as i32;
+        let mut z : i32 = oz.floorToInt() as i32;
 
         // The eye's own cell first. The walk below steps before it tests, so a
         // block that ended up in the player's head — sand that fell on them —
@@ -84,9 +84,9 @@ class Picker : RayCaster {
             return;
         }
 
-        let stepX : i32 = 0;
-        let tMaxX : f64 = big;
-        let tDeltaX : f64 = big;
+        let mut stepX : i32 = 0;
+        let mut tMaxX : f64 = big;
+        let mut tDeltaX : f64 = big;
         if (dx > 0.0) {
             stepX = 1;
             tMaxX = (((x + 1) as f64) - ox) / dx;
@@ -97,9 +97,9 @@ class Picker : RayCaster {
             tDeltaX = -1.0 / dx;
         }
 
-        let stepY : i32 = 0;
-        let tMaxY : f64 = big;
-        let tDeltaY : f64 = big;
+        let mut stepY : i32 = 0;
+        let mut tMaxY : f64 = big;
+        let mut tDeltaY : f64 = big;
         if (dy > 0.0) {
             stepY = 1;
             tMaxY = (((y + 1) as f64) - oy) / dy;
@@ -110,9 +110,9 @@ class Picker : RayCaster {
             tDeltaY = -1.0 / dy;
         }
 
-        let stepZ : i32 = 0;
-        let tMaxZ : f64 = big;
-        let tDeltaZ : f64 = big;
+        let mut stepZ : i32 = 0;
+        let mut tMaxZ : f64 = big;
+        let mut tDeltaZ : f64 = big;
         if (dz > 0.0) {
             stepZ = 1;
             tMaxZ = (((z + 1) as f64) - oz) / dz;
@@ -123,10 +123,10 @@ class Picker : RayCaster {
             tDeltaZ = -1.0 / dz;
         }
 
-        let prevx : i32 = x;
-        let prevy : i32 = y;
-        let prevz : i32 = z;
-        let t : f64 = 0.0;
+        let mut prevx : i32 = x;
+        let mut prevy : i32 = y;
+        let mut prevz : i32 = z;
+        let mut t : f64 = 0.0;
         while (t <= Gameplay::REACH_DIST && self.hit == 0) {
             prevx = x;
             prevy = y;
@@ -146,7 +146,7 @@ class Picker : RayCaster {
             }
 
             if (man.solidTarget(ivec3(x, y, z))) {
-                const boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
+                let boxH : f64 = man.blockBoxHeight(ivec3(x, y, z));
                 if (boxH >= 1.0) {
                     // Full cube: the DDA's step-from cell IS the place cell.
                     self.hit = 1;
@@ -162,7 +162,7 @@ class Picker : RayCaster {
                     // and the place cell is derived from the FACE actually struck,
                     // not the coarse DDA step-from cell (which for a thin box is
                     // usually a side cell, so the block popped out sideways).
-                    const face : i32 = rayCellBoxFace(
+                    let face : i32 = rayCellBoxFace(
                         p.eye,
                         vec3(dx, dy, dz),
                         x,
@@ -223,23 +223,23 @@ fn rayCellBoxFace(
     boxHeight : f64,
     reach : f64
 ) : i32 {
-    const boxMinX : f64 = cx as f64;
-    const boxMaxX : f64 = boxMinX + 1.0;
-    const boxMinY : f64 = cy as f64;
-    const boxMaxY : f64 = boxMinY + boxHeight;
-    const boxMinZ : f64 = cz as f64;
-    const boxMaxZ : f64 = boxMinZ + 1.0;
-    let tEntry : f64 = 0.0;
-    let tExit : f64 = reach;
-    let entryAxis : i32 = -1;   // 0=X 1=Y 2=Z; -1 = origin already inside
+    let boxMinX : f64 = cx as f64;
+    let boxMaxX : f64 = boxMinX + 1.0;
+    let boxMinY : f64 = cy as f64;
+    let boxMaxY : f64 = boxMinY + boxHeight;
+    let boxMinZ : f64 = cz as f64;
+    let boxMaxZ : f64 = boxMinZ + 1.0;
+    let mut tEntry : f64 = 0.0;
+    let mut tExit : f64 = reach;
+    let mut entryAxis : i32 = -1;   // 0=X 1=Y 2=Z; -1 = origin already inside
 
     // X slab
     if (dir.x != 0.0) {
-        const invDirX : f64 = 1.0 / dir.x;
-        const tAtMinX : f64 = (boxMinX - origin.x) * invDirX;
-        const tAtMaxX : f64 = (boxMaxX - origin.x) * invDirX;
-        let tNearX : f64 = tAtMinX;
-        let tFarX : f64 = tAtMaxX;
+        let invDirX : f64 = 1.0 / dir.x;
+        let tAtMinX : f64 = (boxMinX - origin.x) * invDirX;
+        let tAtMaxX : f64 = (boxMaxX - origin.x) * invDirX;
+        let mut tNearX : f64 = tAtMinX;
+        let mut tFarX : f64 = tAtMaxX;
         if (tAtMinX > tAtMaxX) {
             tNearX = tAtMaxX;
             tFarX = tAtMinX;
@@ -257,11 +257,11 @@ fn rayCellBoxFace(
 
     // Y slab
     if (dir.y != 0.0) {
-        const invDirY : f64 = 1.0 / dir.y;
-        const tAtMinY : f64 = (boxMinY - origin.y) * invDirY;
-        const tAtMaxY : f64 = (boxMaxY - origin.y) * invDirY;
-        let tNearY : f64 = tAtMinY;
-        let tFarY : f64 = tAtMaxY;
+        let invDirY : f64 = 1.0 / dir.y;
+        let tAtMinY : f64 = (boxMinY - origin.y) * invDirY;
+        let tAtMaxY : f64 = (boxMaxY - origin.y) * invDirY;
+        let mut tNearY : f64 = tAtMinY;
+        let mut tFarY : f64 = tAtMaxY;
         if (tAtMinY > tAtMaxY) {
             tNearY = tAtMaxY;
             tFarY = tAtMinY;
@@ -279,11 +279,11 @@ fn rayCellBoxFace(
 
     // Z slab
     if (dir.z != 0.0) {
-        const invDirZ : f64 = 1.0 / dir.z;
-        const tAtMinZ : f64 = (boxMinZ - origin.z) * invDirZ;
-        const tAtMaxZ : f64 = (boxMaxZ - origin.z) * invDirZ;
-        let tNearZ : f64 = tAtMinZ;
-        let tFarZ : f64 = tAtMaxZ;
+        let invDirZ : f64 = 1.0 / dir.z;
+        let tAtMinZ : f64 = (boxMinZ - origin.z) * invDirZ;
+        let tAtMaxZ : f64 = (boxMaxZ - origin.z) * invDirZ;
+        let mut tNearZ : f64 = tAtMinZ;
+        let mut tFarZ : f64 = tAtMaxZ;
         if (tAtMinZ > tAtMaxZ) {
             tNearZ = tAtMaxZ;
             tFarZ = tAtMinZ;
@@ -325,16 +325,16 @@ fn rayCellBoxFace(
  * @return true if the cell overlaps the player's body box
  */
 fn cellInPlayer(p : Player, cell : IVec3) : bool {
-    const r : f64 = Motion::PLAYER_RADIUS;
-    const minX : f64 = p.pos.x - r;
-    const maxX : f64 = p.pos.x + r;
-    const minZ : f64 = p.pos.z - r;
-    const maxZ : f64 = p.pos.z + r;
-    const minY : f64 = p.pos.y;
-    const maxY : f64 = p.pos.y + Motion::PLAYER_HEIGHT;
-    const fx : f64 = cell.x as f64;
-    const fy : f64 = cell.y as f64;
-    const fz : f64 = cell.z as f64;
+    let r : f64 = Motion::PLAYER_RADIUS;
+    let minX : f64 = p.pos.x - r;
+    let maxX : f64 = p.pos.x + r;
+    let minZ : f64 = p.pos.z - r;
+    let maxZ : f64 = p.pos.z + r;
+    let minY : f64 = p.pos.y;
+    let maxY : f64 = p.pos.y + Motion::PLAYER_HEIGHT;
+    let fx : f64 = cell.x as f64;
+    let fy : f64 = cell.y as f64;
+    let fz : f64 = cell.z as f64;
     return fx < maxX && fx + 1.0 > minX
         && fz < maxZ && fz + 1.0 > minZ
         && fy < maxY && fy + 1.0 > minY;

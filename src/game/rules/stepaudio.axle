@@ -48,16 +48,16 @@ fn stepAudio(
     sprint : bool,
     timers : StepTimers
 ) : StepTimers {
-    let foot : i32 = timers.foot;
-    let ambient : i32 = timers.ambient;
+    let mut foot : i32 = timers.foot;
+    let mut ambient : i32 = timers.ambient;
 
     if (p.mode == GameMode::Survival && p.onGround && moving && !p.isUnderwater()) {
         foot--;
         if (foot <= 0) {
-            const fx : i32 = p.pos.x.floorToInt() as i32;
-            const fy : i32 = (p.pos.y.floorToInt() as i32) - 1;
-            const fz : i32 = p.pos.z.floorToInt() as i32;
-            const under : Block = man.worldGet(ivec3(fx, fy, fz));
+            let fx : i32 = p.pos.x.floorToInt() as i32;
+            let fy : i32 = (p.pos.y.floorToInt() as i32) - 1;
+            let fz : i32 = p.pos.z.floorToInt() as i32;
+            let under : Block = man.worldGet(ivec3(fx, fy, fz));
             if (under != Block::Air && under != Block::Water) {
                 sfx.footstep(under, mobs.rand());
             }
@@ -71,7 +71,7 @@ fn stepAudio(
         ambient--;
         if (ambient <= 0) {
             sfx.ambientUnderwater(mobs.rand());
-            const jitter : i32 = (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
+            let jitter : i32 = (mobs.rand() * (Audio::AMBIENT_RAND as f64)).floorToInt() as i32;
             ambient = Audio::AMBIENT_MIN + jitter;
         }
     } else {

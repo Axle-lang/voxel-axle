@@ -60,8 +60,8 @@ fn maxf(a : f64, b : f64) : f64 {
  * @return the low and high column, in that order.
  */
 pub(crate) fn columnSpan(sa : f64, sb : f64, sc : f64) : (i16, i16) {
-    const lo : i32 = (minf(sa, minf(sb, sc))).floorToInt() as i32;
-    const hi : i32 = (maxf(sa, maxf(sb, sc))).floorToInt() as i32;
+    let lo : i32 = (minf(sa, minf(sb, sc))).floorToInt() as i32;
+    let hi : i32 = (maxf(sa, maxf(sb, sc))).floorToInt() as i32;
     return (
         clampI32(lo, -1, 32000) as i16,
         clampI32(hi, -1, 32000) as i16
@@ -178,62 +178,62 @@ fn rasterTriTex(
 ) : void {
     // The three vertices, widened once: the queue keeps them at 32 bits, the
     // edge functions and the perspective divide run at 64.
-    const asx : f64 = tri.a.sx as f64;
-    const asy : f64 = tri.a.sy as f64;
-    const aiz : f64 = tri.a.iz as f64;
-    const au : f64 = tri.a.u as f64;
-    const av : f64 = tri.a.v as f64;
-    const atr : f64 = tri.a.tr as f64;
-    const atg : f64 = tri.a.tg as f64;
-    const atb : f64 = tri.a.tb as f64;
+    let asx : f64 = tri.a.sx as f64;
+    let asy : f64 = tri.a.sy as f64;
+    let aiz : f64 = tri.a.iz as f64;
+    let au : f64 = tri.a.u as f64;
+    let av : f64 = tri.a.v as f64;
+    let atr : f64 = tri.a.tr as f64;
+    let atg : f64 = tri.a.tg as f64;
+    let atb : f64 = tri.a.tb as f64;
 
-    const bsx : f64 = tri.b.sx as f64;
-    const bsy : f64 = tri.b.sy as f64;
-    const biz : f64 = tri.b.iz as f64;
-    const bu : f64 = tri.b.u as f64;
-    const bv : f64 = tri.b.v as f64;
-    const btr : f64 = tri.b.tr as f64;
-    const btg : f64 = tri.b.tg as f64;
-    const btb : f64 = tri.b.tb as f64;
+    let bsx : f64 = tri.b.sx as f64;
+    let bsy : f64 = tri.b.sy as f64;
+    let biz : f64 = tri.b.iz as f64;
+    let bu : f64 = tri.b.u as f64;
+    let bv : f64 = tri.b.v as f64;
+    let btr : f64 = tri.b.tr as f64;
+    let btg : f64 = tri.b.tg as f64;
+    let btb : f64 = tri.b.tb as f64;
 
-    const csx : f64 = tri.c.sx as f64;
-    const csy : f64 = tri.c.sy as f64;
-    const ciz : f64 = tri.c.iz as f64;
-    const cu : f64 = tri.c.u as f64;
-    const cv : f64 = tri.c.v as f64;
-    const ctr : f64 = tri.c.tr as f64;
-    const ctg : f64 = tri.c.tg as f64;
-    const ctb : f64 = tri.c.tb as f64;
+    let csx : f64 = tri.c.sx as f64;
+    let csy : f64 = tri.c.sy as f64;
+    let ciz : f64 = tri.c.iz as f64;
+    let cu : f64 = tri.c.u as f64;
+    let cv : f64 = tri.c.v as f64;
+    let ctr : f64 = tri.c.tr as f64;
+    let ctg : f64 = tri.c.tg as f64;
+    let ctb : f64 = tri.c.tb as f64;
 
-    const tile : i32 = tri.tile as i32;
-    const pixels : i64 = fb.pixels;
-    const zbuf : i64 = fb.zbuf;
-    const w : i32 = fb.w;
-    const h : i32 = fb.h;
-    const wrap : bool = (tri.wrap as i32) != 0;
+    let tile : i32 = tri.tile as i32;
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let w : i32 = fb.w;
+    let h : i32 = fb.h;
+    let wrap : bool = (tri.wrap as i32) != 0;
 
     // The triangle, atlas, fog and band stay bundled — the rasteriser reads
     // vertices / UV / Gouraud straight off tri.a/tri.b/tri.c (RasterVert).
-    const area : f64 = edge(asx, asy, bsx, bsy, csx, csy);
+    let area : f64 = edge(asx, asy, bsx, bsy, csx, csy);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
-    const inv : f64 = 1.0 / area;
+    let inv : f64 = 1.0 / area;
 
     // Perspective-premultiplied UV (u/z, v/z) per vertex — the working set the
     // gradients and per-pixel sample interpolate.
-    const uw0 : f64 = au * aiz;
-    const vw0 : f64 = av * aiz;
-    const uw1 : f64 = bu * biz;
-    const vw1 : f64 = bv * biz;
-    const uw2 : f64 = cu * ciz;
-    const vw2 : f64 = cv * ciz;
+    let uw0 : f64 = au * aiz;
+    let vw0 : f64 = av * aiz;
+    let uw1 : f64 = bu * biz;
+    let vw1 : f64 = bv * biz;
+    let uw2 : f64 = cu * ciz;
+    let vw2 : f64 = cv * ciz;
 
     // Screen bounding box of the triangle.
-    let minx : i32 = (minf(asx, minf(bsx, csx))).floorToInt() as i32;
-    let maxx : i32 = (maxf(asx, maxf(bsx, csx))).floorToInt() as i32;
-    let miny : i32 = (minf(asy, minf(bsy, csy))).floorToInt() as i32;
-    let maxy : i32 = (maxf(asy, maxf(bsy, csy))).floorToInt() as i32;
+    let mut minx : i32 = (minf(asx, minf(bsx, csx))).floorToInt() as i32;
+    let mut maxx : i32 = (maxf(asx, maxf(bsx, csx))).floorToInt() as i32;
+    let mut miny : i32 = (minf(asy, minf(bsy, csy))).floorToInt() as i32;
+    let mut maxy : i32 = (maxf(asy, maxf(bsy, csy))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -263,8 +263,8 @@ fn rasterTriTex(
     // Incremental edge functions: the three edge values are linear in the
     // pixel centre, so we evaluate them once at the bbox corner and step
     // them by constant deltas instead of recomputing per pixel.
-    const cx0 : f64 = (minx as f64) + 0.5;
-    const cy0 : f64 = (miny as f64) + 0.5;
+    let cx0 : f64 = (minx as f64) + 0.5;
+    let cy0 : f64 = (miny as f64) + 0.5;
 
     // The winding, folded into the edges once instead of into three
     // multiplies at every candidate pixel. A triangle wound the other way
@@ -272,88 +272,88 @@ fn rasterTriTex(
     // sign of `e * inv` to cope; carrying the sign on the edges themselves
     // makes the test `e >= 0` and leaves the barycentrics to the magnitude.
     // Multiplying by ±1 is exact, so nothing about the result moves.
-    let sgn : f64 = 1.0;
+    let mut sgn : f64 = 1.0;
     if (inv < 0.0) {
         sgn = 0.0 - 1.0;
     }
-    const absInv : f64 = inv * sgn;
-    const ax0 : f64 = (csy - bsy) * sgn;
-    const ay0 : f64 = (bsx - csx) * sgn;
-    const ax1 : f64 = (asy - csy) * sgn;
-    const ay1 : f64 = (csx - asx) * sgn;
-    const ax2 : f64 = (bsy - asy) * sgn;
-    const ay2 : f64 = (asx - bsx) * sgn;
-    let e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0) * sgn;
-    let e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0) * sgn;
-    let e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0) * sgn;
+    let absInv : f64 = inv * sgn;
+    let ax0 : f64 = (csy - bsy) * sgn;
+    let ay0 : f64 = (bsx - csx) * sgn;
+    let ax1 : f64 = (asy - csy) * sgn;
+    let ay1 : f64 = (csx - asx) * sgn;
+    let ax2 : f64 = (bsy - asy) * sgn;
+    let ay2 : f64 = (asx - bsx) * sgn;
+    let mut e0row : f64 = edge(bsx, bsy, csx, csy, cx0, cy0) * sgn;
+    let mut e1row : f64 = edge(csx, csy, asx, asy, cx0, cy0) * sgn;
+    let mut e2row : f64 = edge(asx, asy, bsx, bsy, cx0, cy0) * sgn;
 
     // Triangle-constant screen-space gradients of the perspective attributes
     // (u/z, v/z, 1/z): linear in screen x/y, so they're constant per triangle.
     // Each pixel derives its UV footprint (du/dx … dv/dy) from these to choose
     // the mip level and the anisotropic tap count.
-    const guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * absInv;
-    const gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * absInv;
-    const gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * absInv;
-    const guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * absInv;
-    const gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * absInv;
-    const gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * absInv;
-    const tp : f64 = Atlas::TILE_PX as f64;
-    const maxMip : i32 = Atlas::MIP_LEVELS - 1;
+    let guwx : f64 = (ax0 * uw0 + ax1 * uw1 + ax2 * uw2) * absInv;
+    let gvwx : f64 = (ax0 * vw0 + ax1 * vw1 + ax2 * vw2) * absInv;
+    let gizx : f64 = (ax0 * aiz + ax1 * biz + ax2 * ciz) * absInv;
+    let guwy : f64 = (ay0 * uw0 + ay1 * uw1 + ay2 * uw2) * absInv;
+    let gvwy : f64 = (ay0 * vw0 + ay1 * vw1 + ay2 * vw2) * absInv;
+    let gizy : f64 = (ay0 * aiz + ay1 * biz + ay2 * ciz) * absInv;
+    let tp : f64 = Atlas::TILE_PX as f64;
+    let maxMip : i32 = Atlas::MIP_LEVELS - 1;
     // Magnification (near) path: crisp sharp-bilinear at mip 0.
-    const tf : f64 = tp;
-    const tbase : i32 = tile * Atlas::TILE_PX;
+    let tf : f64 = tp;
+    let tbase : i32 = tile * Atlas::TILE_PX;
 
     for (py of miny..=maxy) {
-        let e0 : f64 = e0row;
-        let e1 : f64 = e1row;
-        let e2 : f64 = e2row;
-        const rowbase : i32 = py * w;
+        let mut e0 : f64 = e0row;
+        let mut e1 : f64 = e1row;
+        let mut e2 : f64 = e2row;
+        let rowbase : i32 = py * w;
         // Where this scanline sits in the fog grid. Every fogged pixel reads
         // the sky behind it, and the row half of that read is the same all the
         // way across.
-        const fogRow : FogRow = fogT.rowAt(py);
+        let fogRow : FogRow = fogT.rowAt(py);
         for (px of minx..=maxx) {
             if (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) {
-                const b0 : f64 = e0 * absInv;
-                const b1 : f64 = e1 * absInv;
-                const b2 : f64 = e2 * absInv;
-                const izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
-                const idx : i64 = (rowbase + px) as i64;
+                let b0 : f64 = e0 * absInv;
+                let b1 : f64 = e1 * absInv;
+                let b2 : f64 = e2 * absInv;
+                let izp : f64 = b0 * aiz + b1 * biz + b2 * ciz;
+                let idx : i64 = (rowbase + px) as i64;
                 unsafe {
-                    let zp : ptr<f32> = (zbuf + idx * FLOAT_BYTES) as ptr<f32>;
+                    let mut zp : ptr<f32> = (zbuf + idx * FLOAT_BYTES) as ptr<f32>;
                     if (izp > ((*zp) as f64)) {
-                        const invz : f64 = 1.0 / izp;
-                        const u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
-                        const v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
+                        let invz : f64 = 1.0 / izp;
+                        let u : f64 = (b0 * uw0 + b1 * uw1 + b2 * uw2) * invz;
+                        let v : f64 = (b0 * vw0 + b1 * vw1 + b2 * vw2) * invz;
 
                         // Per-pixel UV footprint in full-res texels: the screen-x
                         // and screen-y derivatives of (u,v). Their lengths give
                         // texels-per-pixel along each screen axis; the smaller is
                         // the minor axis (sets the mip), the larger the major
                         // (sets the anisotropic tap count).
-                        const dudx : f64 = (guwx - u * gizx) * invz;
-                        const dvdx : f64 = (gvwx - v * gizx) * invz;
-                        const dudy : f64 = (guwy - u * gizy) * invz;
-                        const dvdy : f64 = (gvwy - v * gizy) * invz;
-                        const exx : f64 = dudx * tp;
-                        const eyx : f64 = dvdx * tp;
-                        const exy : f64 = dudy * tp;
-                        const eyy : f64 = dvdy * tp;
-                        const px2 : f64 = exx * exx + eyx * eyx;
-                        const py2 : f64 = exy * exy + eyy * eyy;
-                        let minor2 : f64 = px2;
-                        let major2 : f64 = py2;
+                        let dudx : f64 = (guwx - u * gizx) * invz;
+                        let dvdx : f64 = (gvwx - v * gizx) * invz;
+                        let dudy : f64 = (guwy - u * gizy) * invz;
+                        let dvdy : f64 = (gvwy - v * gizy) * invz;
+                        let exx : f64 = dudx * tp;
+                        let eyx : f64 = dvdx * tp;
+                        let exy : f64 = dudy * tp;
+                        let eyy : f64 = dvdy * tp;
+                        let px2 : f64 = exx * exx + eyx * eyx;
+                        let py2 : f64 = exy * exy + eyy * eyy;
+                        let mut minor2 : f64 = px2;
+                        let mut major2 : f64 = py2;
                         if (py2 < px2) {
                             minor2 = py2;
                             major2 = px2;
                         }
 
-                        let rf : f64 = 0.0;
-                        let gf : f64 = 0.0;
-                        let bf : f64 = 0.0;
+                        let mut rf : f64 = 0.0;
+                        let mut gf : f64 = 0.0;
+                        let mut bf : f64 = 0.0;
                         if (minor2 <= 1.0) {
                             // ── Magnification (near): crisp sharp-bilinear, mip 0 ──
-                            let sharp : f64 = 16.0;
+                            let mut sharp : f64 = 16.0;
                             if (minor2 > 0.0000001) {
                                 sharp = 1.0 / minor2.sqrt();
                             }
@@ -363,31 +363,31 @@ fn rasterTriTex(
                             if (sharp > 16.0) {
                                 sharp = 16.0;
                             }
-                            const rrs : f64 = 0.5 - 0.5 / sharp;
-                            const fu0 : f64 = u * tf;
-                            const fv0 : f64 = v * tf;
+                            let rrs : f64 = 0.5 - 0.5 / sharp;
+                            let fu0 : f64 = u * tf;
+                            let fv0 : f64 = v * tf;
 
-                            const flx : f64 = fu0.floorToInt() as f64;
-                            const cdx0 : f64 = fu0 - flx - 0.5;
-                            let ccx0 : f64 = cdx0;
+                            let flx : f64 = fu0.floorToInt() as f64;
+                            let cdx0 : f64 = fu0 - flx - 0.5;
+                            let mut ccx0 : f64 = cdx0;
                             if (ccx0 > rrs) {
                                 ccx0 = rrs;
                             } else if (ccx0 < 0.0 - rrs) {
                                 ccx0 = 0.0 - rrs;
                             }
-                            const fu : f64 = flx + (cdx0 - ccx0) * sharp;
+                            let fu : f64 = flx + (cdx0 - ccx0) * sharp;
 
-                            const fly : f64 = fv0.floorToInt() as f64;
-                            const cdy0 : f64 = fv0 - fly - 0.5;
-                            let ccy0 : f64 = cdy0;
+                            let fly : f64 = fv0.floorToInt() as f64;
+                            let cdy0 : f64 = fv0 - fly - 0.5;
+                            let mut ccy0 : f64 = cdy0;
                             if (ccy0 > rrs) {
                                 ccy0 = rrs;
                             } else if (ccy0 < 0.0 - rrs) {
                                 ccy0 = 0.0 - rrs;
                             }
-                            const fv : f64 = fly + (cdy0 - ccy0) * sharp;
+                            let fv : f64 = fly + (cdy0 - ccy0) * sharp;
 
-                            const c : LinRgb = bilinearLin(
+                            let c : LinRgb = bilinearLin(
                                 TileLevel {
                                     mips: atlas.mips,
                                     base: 0,
@@ -407,24 +407,24 @@ fn rasterTriTex(
                             // Mip from the minor axis (with a sharpening bias), then
                             // average N bilinear taps along the major axis so oblique
                             // distant surfaces stay sharp without shimmering.
-                            const m2 : f64 = minor2 * Atlas::MIP_BIAS;
-                            let mip : i32 = 0;
-                            let lim : f64 = 4.0;
+                            let m2 : f64 = minor2 * Atlas::MIP_BIAS;
+                            let mut mip : i32 = 0;
+                            let mut lim : f64 = 4.0;
                             while (mip < maxMip && m2 >= lim) {
                                 lim *= 4.0;
                                 mip++;
                             }
-                            const lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
-                            const lvl : TileLevel = TileLevel {
+                            let lvlSz : i32 = Mem::dwordAt(atlas.mipSz, (mip as i64) * 4);
+                            let lvl : TileLevel = TileLevel {
                                 mips: atlas.mips,
                                 base: Mem::dwordAt(atlas.mipOff, (mip as i64) * 4),
                                 size: lvlSz,
                                 row: tile * lvlSz,
                             };
-                            const lvlF : f64 = lvlSz as f64;
+                            let lvlF : f64 = lvlSz as f64;
 
-                            const ratio : f64 = (major2 / minor2).sqrt();
-                            let nN : i32 = (ratio + 0.5).floorToInt() as i32;
+                            let ratio : f64 = (major2 / minor2).sqrt();
+                            let mut nN : i32 = (ratio + 0.5).floorToInt() as i32;
                             if (nN < 1) {
                                 nN = 1;
                             }
@@ -432,19 +432,19 @@ fn rasterTriTex(
                                 nN = Atlas::MAX_ANISO;
                             }
 
-                            let mju : f64 = dudx;
-                            let mjv : f64 = dvdx;
+                            let mut mju : f64 = dudx;
+                            let mut mjv : f64 = dvdx;
                             if (py2 > px2) {
                                 mju = dudy;
                                 mjv = dvdy;
                             }
 
-                            let sr : f64 = 0.0;
-                            let sg : f64 = 0.0;
-                            let sb : f64 = 0.0;
+                            let mut sr : f64 = 0.0;
+                            let mut sg : f64 = 0.0;
+                            let mut sb : f64 = 0.0;
                             for (i of 0..nN) {
-                                const tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
-                                const c : LinRgb = bilinearLin(
+                                let tt : f64 = (((i as f64) + 0.5) / (nN as f64)) - 0.5;
+                                let c : LinRgb = bilinearLin(
                                     lvl,
                                     (u + mju * tt) * lvlF - 0.5,
                                     (v + mjv * tt) * lvlF - 0.5,
@@ -455,7 +455,7 @@ fn rasterTriTex(
                                 sg += c.g;
                                 sb += c.b;
                             }
-                            const invN : f64 = 1.0 / (nN as f64);
+                            let invN : f64 = 1.0 / (nN as f64);
                             rf = sr * invN;
                             gf = sg * invN;
                             bf = sb * invN;
@@ -464,27 +464,27 @@ fn rasterTriTex(
                         // Gouraud: per-vertex tint interpolated by the
                         // screen-space barycentrics (low-frequency light, so
                         // affine interpolation is fine and cheap).
-                        const trp : f64 = b0 * atr + b1 * btr + b2 * ctr;
-                        const tgp : f64 = b0 * atg + b1 * btg + b2 * ctg;
-                        const tbp : f64 = b0 * atb + b1 * btb + b2 * ctb;
-                        let r : i32 = gam.encode(rf * trp);
-                        let g : i32 = gam.encode(gf * tgp);
-                        let bl : i32 = gam.encode(bf * tbp);
+                        let trp : f64 = b0 * atr + b1 * btr + b2 * ctr;
+                        let tgp : f64 = b0 * atg + b1 * btg + b2 * ctg;
+                        let tbp : f64 = b0 * atb + b1 * btb + b2 * ctb;
+                        let mut r : i32 = gam.encode(rf * trp);
+                        let mut g : i32 = gam.encode(gf * tgp);
+                        let mut bl : i32 = gam.encode(bf * tbp);
 
                         // Aerial perspective: dissolve into the sky THAT IS
                         // THERE, behind this pixel — not into one average colour
                         // for the frame, which is grey against the sun's glow and
                         // too pale against the deep blue away from it.
-                        const fog : f64 = fogT.amount(invz);
+                        let fog : f64 = fogT.amount(invz);
                         if (fog > 0.002) {
-                            const sky : SkyColour = fogT.skyIn(fogRow, px);
-                            const keep : f64 = 1.0 - fog;
+                            let sky : SkyColour = fogT.skyIn(fogRow, px);
+                            let keep : f64 = 1.0 - fog;
                             r = ((r as f64) * keep + sky.r * fog).floorToInt() as i32;
                             g = ((g as f64) * keep + sky.g * fog).floorToInt() as i32;
                             bl = ((bl as f64) * keep + sky.b * fog).floorToInt() as i32;
                         }
                         *zp = izp as f32;
-                        let pp : ptr<i32> = (pixels + idx * 4) as ptr<i32>;
+                        let mut pp : ptr<i32> = (pixels + idx * 4) as ptr<i32>;
                         *pp = (r & 0xFF) * 65536 + (g & 0xFF) * 256 + (bl & 0xFF);
                     }
                 }
@@ -524,18 +524,18 @@ struct FlatTri {
  * @param fogT  the fog: the sky's colour behind each pixel, and its depth curve
  */
 fn rasterTri(fb : FrameBuf, tri : FlatTri, fogT : FogTable) : void {
-    const w : i32 = fb.w;
-    const h : i32 = fb.h;
-    const area : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy);
+    let w : i32 = fb.w;
+    let h : i32 = fb.h;
+    let area : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy);
     if (area > 0.0 - 0.0001 && area < 0.0001) {
         return;
     }
-    const inv : f64 = 1.0 / area;
+    let inv : f64 = 1.0 / area;
 
-    let minx : i32 = (minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
-    let maxx : i32 = (maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
-    let miny : i32 = (minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
-    let maxy : i32 = (maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
+    let mut minx : i32 = (minf(tri.a.sx, minf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let mut maxx : i32 = (maxf(tri.a.sx, maxf(tri.b.sx, tri.c.sx))).floorToInt() as i32;
+    let mut miny : i32 = (minf(tri.a.sy, minf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
+    let mut maxy : i32 = (maxf(tri.a.sy, maxf(tri.b.sy, tri.c.sy))).floorToInt() as i32;
     if (minx < 0) {
         minx = 0;
     }
@@ -550,16 +550,16 @@ fn rasterTri(fb : FrameBuf, tri : FlatTri, fogT : FogTable) : void {
     }
 
     for (py of miny..=maxy) {
-        const cy : f64 = (py as f64) + 0.5;
-        const fogRow : FogRow = fogT.rowAt(py);
+        let cy : f64 = (py as f64) + 0.5;
+        let fogRow : FogRow = fogT.rowAt(py);
         for (px of minx..=maxx) {
-            const cx : f64 = (px as f64) + 0.5;
-            const b0 : f64 = edge(tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy, cx, cy) * inv;
-            const b1 : f64 = edge(tri.c.sx, tri.c.sy, tri.a.sx, tri.a.sy, cx, cy) * inv;
-            const b2 : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, cx, cy) * inv;
+            let cx : f64 = (px as f64) + 0.5;
+            let b0 : f64 = edge(tri.b.sx, tri.b.sy, tri.c.sx, tri.c.sy, cx, cy) * inv;
+            let b1 : f64 = edge(tri.c.sx, tri.c.sy, tri.a.sx, tri.a.sy, cx, cy) * inv;
+            let b2 : f64 = edge(tri.a.sx, tri.a.sy, tri.b.sx, tri.b.sy, cx, cy) * inv;
             if (b0 >= 0.0 && b1 >= 0.0 && b2 >= 0.0) {
-                const iz : f64 = b0 * tri.a.iz + b1 * tri.b.iz + b2 * tri.c.iz;
-                const idx : i32 = py * w + px;
+                let iz : f64 = b0 * tri.a.iz + b1 * tri.b.iz + b2 * tri.c.iz;
+                let idx : i32 = py * w + px;
                 if (iz > floatOf(fb.zbuf, idx)) {
                     putFloatOf(fb.zbuf, idx, iz);
                     Mem::putWordOf(fb.pixels, idx, fogged(tri.color, fogT, fogRow, px, iz));
@@ -580,12 +580,12 @@ fn rasterTri(fb : FrameBuf, tri : FlatTri, fogT : FogTable) : void {
  * @return the fogged colour
  */
 fn fogged(color : i32, fogT : FogTable, fogRow : FogRow, px : i32, iz : f64) : i32 {
-    const fog : f64 = fogT.amount(1.0 / iz);
+    let fog : f64 = fogT.amount(1.0 / iz);
     if (fog <= 0.002) {
         return color;
     }
-    const sky : SkyColour = fogT.skyIn(fogRow, px);
-    const keep : f64 = 1.0 - fog;
+    let sky : SkyColour = fogT.skyIn(fogRow, px);
+    let keep : f64 = 1.0 - fog;
     return Color::packBytes(
         ((Color::red(color) as f64) * keep + sky.r * fog).floorToInt() as i32,
         ((Color::green(color) as f64) * keep + sky.g * fog).floorToInt() as i32,

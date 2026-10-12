@@ -79,7 +79,7 @@ struct DeckLight {
  * @return the relative brightness
  */
 fn phaseHG(mu : f64, g : f64) : f64 {
-    let k : f64 = 1.0 + g * g - 2.0 * g * mu;
+    let mut k : f64 = 1.0 + g * g - 2.0 * g * mu;
     if (k < 0.0001) {
         k = 0.0001;
     }
@@ -105,8 +105,8 @@ struct CubicW {
  * @return the four weights, summing to one
  */
 fn cubicW(t : f64) : CubicW {
-    const t2 : f64 = t * t;
-    const t3 : f64 = t2 * t;
+    let t2 : f64 = t * t;
+    let t3 : f64 = t2 * t;
     return CubicW {
         w0: 0.0 - 0.5 * t + t2 - 0.5 * t3,
         w1: 1.0 - 2.5 * t2 + 1.5 * t3,
@@ -146,7 +146,7 @@ struct CloudDome {
                 a: 0.0,
             };
         }
-        const c : CloudCell = domeRead(self.cov, self.lit, self.amb, ray);
+        let c : CloudCell = domeRead(self.cov, self.lit, self.amb, ray);
         if (c.cov <= 0.0005) {
             return CloudSample {
                 r: 0.0,
@@ -159,16 +159,16 @@ struct CloudDome {
         // How the water hands the body's light on toward the eye: a strong
         // forward lobe and a weak back one, so the rim toward the sun is bright
         // and the face away from it is lit by the sky alone.
-        const b : Vec3 = self.light.dir;
-        const mu : f64 = (ray.dx * b.x + ray.dy * b.y + ray.dz * b.z) * ray.inv;
-        let phase : f64 = Cloud::PHASE_FWD_W * phaseHG(mu, Cloud::PHASE_G)
+        let b : Vec3 = self.light.dir;
+        let mu : f64 = (ray.dx * b.x + ray.dy * b.y + ray.dz * b.z) * ray.inv;
+        let mut phase : f64 = Cloud::PHASE_FWD_W * phaseHG(mu, Cloud::PHASE_G)
             + (1.0 - Cloud::PHASE_FWD_W) * phaseHG(mu, 0.0 - Cloud::PHASE_BACK);
         if (phase > Cloud::PHASE_MAX) {
             phase = Cloud::PHASE_MAX;
         }
 
-        const direct : f64 = c.lit * phase;
-        const deep : f64 = c.cov - c.amb;
+        let direct : f64 = c.lit * phase;
+        let deep : f64 = c.cov - c.amb;
         return CloudSample {
             r: (direct * self.light.body.r
                 + c.amb * self.light.sky.r
@@ -250,19 +250,19 @@ fn clampIdx(i : i32) : i32 {
  */
 fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
     // Lambert azimuthal equal-area, from the zenith.
-    const uy : f64 = ray.dy * ray.inv;
-    const sc : f64 = 1.0 / (1.0 + uy).sqrt();
-    const edge : f64 = ((SKY_N - 1) as f64) * 0.5;
-    const fu : f64 = (ray.dx * ray.inv * sc + 1.0) * edge;
-    const fv : f64 = (ray.dz * ray.inv * sc + 1.0) * edge;
-    const iu : i32 = fu.floorToInt() as i32;
-    const iv : i32 = fv.floorToInt() as i32;
+    let uy : f64 = ray.dy * ray.inv;
+    let sc : f64 = 1.0 / (1.0 + uy).sqrt();
+    let edge : f64 = ((SKY_N - 1) as f64) * 0.5;
+    let fu : f64 = (ray.dx * ray.inv * sc + 1.0) * edge;
+    let fv : f64 = (ray.dz * ray.inv * sc + 1.0) * edge;
+    let iu : i32 = fu.floorToInt() as i32;
+    let iv : i32 = fv.floorToInt() as i32;
 
     // Most of the sky is sky. The four cells around the point say so before
     // the sixteen are read: a cloud's edge can only be where coverage is.
-    const ci : i64 = (clampIdx(iv) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
-    const cj : i64 = (clampIdx(iv + 1) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
-    const ku : i64 = (clampIdx(iu + 1) - clampIdx(iu)) as i64;
+    let ci : i64 = (clampIdx(iv) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
+    let cj : i64 = (clampIdx(iv + 1) as i64) * (SKY_N as i64) + (clampIdx(iu) as i64);
+    let ku : i64 = (clampIdx(iu + 1) - clampIdx(iu)) as i64;
     if (tabGet(cov, ci) <= 0.0 && tabGet(cov, ci + ku) <= 0.0
         && tabGet(cov, cj) <= 0.0 && tabGet(cov, cj + ku) <= 0.0) {
         return CloudCell {
@@ -272,9 +272,9 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
         };
     }
 
-    const wu : CubicW = cubicW(fu - (iu as f64));
-    const wv : CubicW = cubicW(fv - (iv as f64));
-    const r0 : CloudCell = rowTaps(
+    let wu : CubicW = cubicW(fu - (iu as f64));
+    let wv : CubicW = cubicW(fv - (iv as f64));
+    let r0 : CloudCell = rowTaps(
         cov,
         lit,
         amb,
@@ -282,7 +282,7 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
         iu,
         wu
     );
-    const r1 : CloudCell = rowTaps(
+    let r1 : CloudCell = rowTaps(
         cov,
         lit,
         amb,
@@ -290,7 +290,7 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
         iu,
         wu
     );
-    const r2 : CloudCell = rowTaps(
+    let r2 : CloudCell = rowTaps(
         cov,
         lit,
         amb,
@@ -298,7 +298,7 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
         iu,
         wu
     );
-    const r3 : CloudCell = rowTaps(
+    let r3 : CloudCell = rowTaps(
         cov,
         lit,
         amb,
@@ -307,9 +307,9 @@ fn domeRead(cov : i64, lit : i64, amb : i64, ray : ViewRay) : CloudCell {
         wu
     );
 
-    let vc : f64 = r0.cov * wv.w0 + r1.cov * wv.w1 + r2.cov * wv.w2 + r3.cov * wv.w3;
-    let vl : f64 = r0.lit * wv.w0 + r1.lit * wv.w1 + r2.lit * wv.w2 + r3.lit * wv.w3;
-    let va : f64 = r0.amb * wv.w0 + r1.amb * wv.w1 + r2.amb * wv.w2 + r3.amb * wv.w3;
+    let mut vc : f64 = r0.cov * wv.w0 + r1.cov * wv.w1 + r2.cov * wv.w2 + r3.cov * wv.w3;
+    let mut vl : f64 = r0.lit * wv.w0 + r1.lit * wv.w1 + r2.lit * wv.w2 + r3.lit * wv.w3;
+    let mut va : f64 = r0.amb * wv.w0 + r1.amb * wv.w1 + r2.amb * wv.w2 + r3.amb * wv.w3;
 
     // The curve overshoots at a step; the premultiplied ranges are the truth.
     if (vc < 0.0) {
@@ -355,11 +355,11 @@ fn rowTaps(
     iu : i32,
     w : CubicW
 ) : CloudCell {
-    const base : i64 = (row as i64) * (SKY_N as i64);
-    const c0 : i64 = base + (clampIdx(iu - 1) as i64);
-    const c1 : i64 = base + (clampIdx(iu) as i64);
-    const c2 : i64 = base + (clampIdx(iu + 1) as i64);
-    const c3 : i64 = base + (clampIdx(iu + 2) as i64);
+    let base : i64 = (row as i64) * (SKY_N as i64);
+    let c0 : i64 = base + (clampIdx(iu - 1) as i64);
+    let c1 : i64 = base + (clampIdx(iu) as i64);
+    let c2 : i64 = base + (clampIdx(iu + 1) as i64);
+    let c3 : i64 = base + (clampIdx(iu + 2) as i64);
     return CloudCell {
         cov: tabGet(cov, c0) * w.w0 + tabGet(cov, c1) * w.w1
            + tabGet(cov, c2) * w.w2 + tabGet(cov, c3) * w.w3,

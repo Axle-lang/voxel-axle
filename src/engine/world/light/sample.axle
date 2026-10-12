@@ -57,9 +57,9 @@ fn blend4(
     s2 : CornerSample,
     s3 : CornerSample
 ) : CornerSample {
-    const r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
-    const g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
-    const b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
+    let r : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 16);
+    let g : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 8);
+    let b : i32 = chanMean(s0.bounce, s1.bounce, s2.bounce, s3.bounce, 0);
 
     return CornerSample {
         sun: (s0.sun + s1.sun + s2.sun + s3.sun) / 4,
@@ -92,10 +92,10 @@ fn cellIn(surface : Shared<SurfaceLight>, slot : i32, lx : i32, y : i32, lz : i3
  * @return its sun visibility, sky access and packed bounce tint
  */
 fn cellSample(ring : RingView, surface : Shared<SurfaceLight>, cell : IVec3) : CornerSample {
-    const s : i32 = World::CHUNK_SIZE;
-    const cx : i32 = ring.floorDiv(cell.x, s);
-    const cz : i32 = ring.floorDiv(cell.z, s);
-    const slot : i32 = ring.slotFor(cx, cz);
+    let s : i32 = World::CHUNK_SIZE;
+    let cx : i32 = ring.floorDiv(cell.x, s);
+    let cz : i32 = ring.floorDiv(cell.z, s);
+    let slot : i32 = ring.slotFor(cx, cz);
     if (!ring.owns(slot, cx, cz)) {
         return openAir();
     }
@@ -116,10 +116,10 @@ fn cellSample(ring : RingView, surface : Shared<SurfaceLight>, cell : IVec3) : C
  *         the chunk is not loaded
  */
 fn cornerSlot(ring : RingView, b : IVec3, c3 : IVec3) : CornerChunk {
-    const s : i32 = World::CHUNK_SIZE;
-    const cx : i32 = ring.floorDiv(b.x, s);
-    const cz : i32 = ring.floorDiv(b.z, s);
-    const miss : CornerChunk = CornerChunk {
+    let s : i32 = World::CHUNK_SIZE;
+    let cx : i32 = ring.floorDiv(b.x, s);
+    let cz : i32 = ring.floorDiv(b.z, s);
+    let miss : CornerChunk = CornerChunk {
         slot: -1,
         ox: 0,
         oz: 0,
@@ -128,7 +128,7 @@ fn cornerSlot(ring : RingView, b : IVec3, c3 : IVec3) : CornerChunk {
         return miss;
     }
 
-    const slot : i32 = ring.slotFor(cx, cz);
+    let slot : i32 = ring.slotFor(cx, cz);
     if (!ring.owns(slot, cx, cz)) {
         return miss;
     }
@@ -150,18 +150,18 @@ fn cornerSlot(ring : RingView, b : IVec3, c3 : IVec3) : CornerChunk {
  * @return the averaged sample at that corner
  */
 fn cornerAverage(ring : RingView, surface : Shared<SurfaceLight>, probe : CornerProbe) : CornerSample {
-    const b : IVec3 = probe.base;
-    const t1 : IVec3 = probe.t1;
-    const t2 : IVec3 = probe.t2;
-    const c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
-    const c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
-    const c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
+    let b : IVec3 = probe.base;
+    let t1 : IVec3 = probe.t1;
+    let t2 : IVec3 = probe.t2;
+    let c1 : IVec3 = ivec3(b.x + t1.x, b.y + t1.y, b.z + t1.z);
+    let c2 : IVec3 = ivec3(b.x + t2.x, b.y + t2.y, b.z + t2.z);
+    let c3 : IVec3 = ivec3(b.x + t1.x + t2.x, b.y + t1.y + t2.y, b.z + t1.z + t2.z);
 
     // Four cells one step apart are in one chunk unless the corner sits on
     // a border, and this is read at every corner of every quad in the
     // frame. Finding the chunk once, where they share it, is the same four
     // reads without four walks down the ring to reach them.
-    const cc : CornerChunk = cornerSlot(ring, b, c3);
+    let cc : CornerChunk = cornerSlot(ring, b, c3);
     if (cc.slot < 0) {
         return blend4(
             cellSample(ring, surface, b),

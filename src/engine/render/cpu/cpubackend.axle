@@ -49,9 +49,9 @@ class CpuBackend : RenderBackend {
         self.renderer = new SoftRenderer();
 
         // Level 0 of the mip chain is a full copy, so the file's buffer goes at once.
-        const tile = Atlas::TILE_PX as i64;
-        const bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
-        const atlas = Mem::take(bytes);
+        let tile = Atlas::TILE_PX as i64;
+        let bytes = tile * tile * 4 * (Atlas::TILE_COUNT as i64);
+        let atlas = Mem::take(bytes);
         if (Assets::loadAtlas(atlas, bytes) != bytes) {
             Console::println("warning: atlas.raw not found next to the binary"
                 + " — textures will be blank");
@@ -81,12 +81,12 @@ class CpuBackend : RenderBackend {
      * @param win    the window to show it in
      */
     pub(crate) fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void {
-        const fb : FrameBuf = self.frameBuf();
+        let fb : FrameBuf = self.frameBuf();
         self.drawWorld(frame, world, fb);
         self.drawEffects(frame, fb);
         self.drawOverlay(frame, fb);
 
-        const start : i64 = monotonicNanos();
+        let start : i64 = monotonicNanos();
         self.screen.present(win);
         self.times.blit += (monotonicNanos() - start) / 1000;
         self.times.frames++;
@@ -105,7 +105,7 @@ class CpuBackend : RenderBackend {
      * @param fb     the target
      */
     fn drawWorld(mut self, frame : FrameDesc, world : dyn TerrainView, fb : FrameBuf) : void {
-        const start : i64 = monotonicNanos();
+        let start : i64 = monotonicNanos();
         self.renderer.render(world, frame, fb);
         self.times.world += (monotonicNanos() - start) / 1000;
 
@@ -120,16 +120,16 @@ class CpuBackend : RenderBackend {
      * @param fb     the target the world was drawn into
      */
     fn drawEffects(mut self, frame : FrameDesc, fb : FrameBuf) : void {
-        const start : i64 = monotonicNanos();
+        let start : i64 = monotonicNanos();
         if (frame.clock.underwater) {
             self.renderer.underwaterOverlay(fb, frame.clock.ripple);
         } else {
             self.renderer.godRays(frame, fb);
         }
 
-        const rays : i64 = monotonicNanos();
+        let rays : i64 = monotonicNanos();
         self.renderer.bloomPass(fb);
-        const bloom : i64 = monotonicNanos();
+        let bloom : i64 = monotonicNanos();
 
         self.times.rays += (rays - start) / 1000;
         self.times.bloom += (bloom - rays) / 1000;
@@ -220,16 +220,16 @@ class CpuBackend : RenderBackend {
      * its queue build runs on six workers and its fill on twelve bands.
      */
     pub(crate) fn report(self) : void {
-        const n = self.times.frames;
+        let n = self.times.frames;
         if (n == 0) {
             return;
         }
 
-        const world = self.times.world / n;
-        const fill = self.renderer.fillMicros() / n;
-        const build = world - fill;
-        const skyFog = self.renderer.skyFogMicros() / n;
-        const skyDraw = self.renderer.skyDrawMicros() / n;
+        let world = self.times.world / n;
+        let fill = self.renderer.fillMicros() / n;
+        let build = world - fill;
+        let skyFog = self.renderer.skyFogMicros() / n;
+        let skyDraw = self.renderer.skyDrawMicros() / n;
 
         Console::println("  world = build ${build}us (6 workers)"
             + " + fill ${fill}us (12 bands)"

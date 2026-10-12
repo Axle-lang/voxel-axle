@@ -69,7 +69,7 @@ class Render {
     // averages 15k each, and the stride keeps the shares even.
     //
     // The band and worker COUNTS are not here, and cannot be: each is the size of
-    // a `Task` array, and an array size has to be an integer literal. They live
+    // a `Future` array, and an array size has to be an integer literal. They live
     // beside those arrays as `BUILD_WORKERS` / `RASTER_BANDS` in `render::cpu::renderer`.
     // A constant here that nothing could read was worse than no constant — the two
     // that used to sit here said 4 and 12 while the code ran 8 and 12.

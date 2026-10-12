@@ -89,10 +89,10 @@ class BlockSim {
         // advances exactly one block-ring per step and pours in calmly instead
         // of filling all at once. The budget still caps a generation so a big
         // flood can't spike one frame.
-        const gen : i32 = self.count > World::SIM_BUDGET ? World::SIM_BUDGET : self.count;
+        let gen : i32 = self.count > World::SIM_BUDGET ? World::SIM_BUDGET : self.count;
 
         for (i of 0..gen) {
-            const cell : IVec3 = self.pending[self.head];
+            let cell : IVec3 = self.pending[self.head];
             self.head++;
             if (self.head >= self.cap) {
                 self.head = 0;
@@ -108,7 +108,7 @@ class BlockSim {
      * @param cell  the world cell
      */
     fn process(mut self, man : ChunkManager, cell : IVec3) : void {
-        const cur : Block = man.worldGet(cell);
+        let cur : Block = man.worldGet(cell);
         if (falls(cur)) {
             self.doFall(man, cell, cur);
             return;
@@ -127,8 +127,8 @@ class BlockSim {
      * @param cur   the falling block id
      */
     fn doFall(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
-        const belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
-        const below : Block = man.worldGet(belowCell);
+        let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
+        let below : Block = man.worldGet(belowCell);
         if (below == Block::Air || isWater(below)) {
             man.setVoxel(cell, Block::Air);
             man.setVoxel(belowCell, cur);
@@ -146,9 +146,9 @@ class BlockSim {
      * @param cur   the water block id
      */
     fn doFluid(mut self, man : ChunkManager, cell : IVec3, cur : Block) : void {
-        const lvl : i32 = fluidLevel(cur);
-        const belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
-        const below : Block = man.worldGet(belowCell);
+        let lvl : i32 = fluidLevel(cur);
+        let belowCell : IVec3 = ivec3(cell.x, cell.y - 1, cell.z);
+        let below : Block = man.worldGet(belowCell);
 
         if (below == Block::Air) {
             // Gravity first: fall straight down as a full column. While it can
@@ -188,12 +188,12 @@ class BlockSim {
      * @param nl    the flow level to place into neighbours
      */
     fn spreadOut(mut self, man : ChunkManager, cell : IVec3, nl : i32) : void {
-        const dE : i32 = self.dropDist(man, cell, 1, 0);
-        const dW : i32 = self.dropDist(man, cell, -1, 0);
-        const dS : i32 = self.dropDist(man, cell, 0, 1);
-        const dN : i32 = self.dropDist(man, cell, 0, -1);
+        let dE : i32 = self.dropDist(man, cell, 1, 0);
+        let dW : i32 = self.dropDist(man, cell, -1, 0);
+        let dS : i32 = self.dropDist(man, cell, 0, 1);
+        let dN : i32 = self.dropDist(man, cell, 0, -1);
 
-        let best : i32 = dE;
+        let mut best : i32 = dE;
         if (dW < best) {
             best = dW;
         }
@@ -239,11 +239,11 @@ class BlockSim {
      * @return the drop distance, or `World::FLOW_SEARCH`+1 if none / blocked
      */
     fn dropDist(self, man : ChunkManager, cell : IVec3, dirx : i32, dirz : i32) : i32 {
-        const maxD : i32 = World::FLOW_SEARCH;
+        let maxD : i32 = World::FLOW_SEARCH;
         for (d of 1..=maxD) {
-            const nx : i32 = cell.x + dirx * d;
-            const nz : i32 = cell.z + dirz * d;
-            const here : Block = man.worldGet(ivec3(nx, cell.y, nz));
+            let nx : i32 = cell.x + dirx * d;
+            let nz : i32 = cell.z + dirz * d;
+            let here : Block = man.worldGet(ivec3(nx, cell.y, nz));
             if (here != Block::Air && !isWater(here)) {
                 return maxD + 1;   // a solid wall blocks this direction
             }

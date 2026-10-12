@@ -92,20 +92,20 @@ fn runFrameCheck() : i32 {
     Console::println("  creatures ${mobs.actorCount()}");
 
     let frames : FrameBuilder = new FrameBuilder();
-    const below : IVec3 = ivec3(
+    let below : IVec3 = ivec3(
         player.pos.x.floorToInt() as i32,
         (player.pos.y - 0.5).floorToInt() as i32,
         player.pos.z.floorToInt() as i32
     );
 
-    let fails : i32 = 0;
+    let mut fails : i32 = 0;
     for (h of 0..SWEEP_HOURS) {
         for (p of 0..SWEEP_PITCHES) {
             for (y of 0..SWEEP_YAWS) {
                 player.aimAt((y as f64) * 1.5707963, pitchAt(p));
                 player.refresh();
 
-                const frame : FrameDesc = frames.build(
+                let frame : FrameDesc = frames.build(
                     FrameSource {
                         man,
                         mobs,
@@ -152,20 +152,20 @@ fn runFrameCheck() : i32 {
  * @param yaw    its yaw step
  */
 fn printFrame(f : FrameDesc, hour : f64, pitch : i32, yaw : i32) : void {
-    const zenith : CloudSample = f.clouds.sample(ViewRay {
+    let zenith : CloudSample = f.clouds.sample(ViewRay {
         dx: 0.0,
         dy: 1.0,
         dz: 0.0,
         inv: 1.0,
     });
-    const deck : i32 = (zenith.a * 1000.0).round() as i32;
-    const sun : i32 = (f.day.dirStrength * 1000.0).round() as i32;
-    const amb : i32 = (f.day.skyAmbient * 1000.0).round() as i32;
-    let lit : f64 = 0.0;
+    let deck : i32 = (zenith.a * 1000.0).round() as i32;
+    let sun : i32 = (f.day.dirStrength * 1000.0).round() as i32;
+    let amb : i32 = (f.day.skyAmbient * 1000.0).round() as i32;
+    let mut lit : f64 = 0.0;
     for (i of 0..f.boxCount) {
         lit += f.boxes[i].light.g;
     }
-    const mobLit : i32 = (lit * 1000.0 / (f.boxCount.max(1) as f64)).round() as i32;
+    let mobLit : i32 = (lit * 1000.0 / (f.boxCount.max(1) as f64)).round() as i32;
 
     Console::println("  t=${hour} pitch${pitch} yaw${yaw}:"
         + " boxes=${f.boxCount} lit=${mobLit} torches=${f.torchCount}"
@@ -182,15 +182,15 @@ fn printFrame(f : FrameDesc, hour : f64, pitch : i32, yaw : i32) : void {
  * @return 1 when it does, 0 otherwise
  */
 fn brokenFrame(man : ChunkManager, f : FrameDesc) : i32 {
-    const boxRoom : i32 = Mobs::CAP * MODEL_MAX_PARTS;
-    const torchRoom : i32 = World::SPAN * World::SPAN * World::MAX_TORCHES_PER_CHUNK;
+    let boxRoom : i32 = Mobs::CAP * MODEL_MAX_PARTS;
+    let torchRoom : i32 = World::SPAN * World::SPAN * World::MAX_TORCHES_PER_CHUNK;
     if (f.boxCount > boxRoom || f.torchCount > torchRoom) {
         Console::println("    FAIL: counts over capacity");
         return 1;
     }
 
     for (i of 0..f.torchCount) {
-        const t : IVec3 = f.torches[i];
+        let t : IVec3 = f.torches[i];
         if (!loadedAt(man, chunkOf(t.x as f64), chunkOf(t.z as f64))) {
             Console::println("    FAIL: torch at (${t.x}, ${t.y}, ${t.z}) outside the ring");
             return 1;
@@ -208,7 +208,7 @@ fn brokenFrame(man : ChunkManager, f : FrameDesc) : i32 {
  */
 fn loadedAt(man : ChunkManager, cx : i32, cz : i32) : bool {
     for (slot of 0..World::SPAN * World::SPAN) {
-        const sc = man.slotChunk(slot);
+        let sc = man.slotChunk(slot);
         if (sc.loaded && sc.cx == cx && sc.cz == cz) {
             return true;
         }

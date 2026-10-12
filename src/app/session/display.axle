@@ -22,7 +22,7 @@ class Display {
      * @param h  the window's height, in pixels
      */
     constructor(w : i32, h : i32) ! PlatformError {
-        const desc = WindowDesc {
+        let desc = WindowDesc {
             title: WINDOW_TITLE,
             w,
             h,
@@ -57,8 +57,8 @@ class Display {
      * @return the point, scaled by the render-to-window ratio
      */
     pub(crate) fn toFrame(self, x : i32, y : i32) : (x: i32, y: i32) {
-        const winW = self.win.width().max(1);
-        const winH = self.win.height().max(1);
+        let winW = self.win.width().max(1);
+        let winH = self.win.height().max(1);
         return (x * self.width() / winW, y * self.height() / winH);
     }
 
@@ -69,13 +69,13 @@ class Display {
      * @return whether the render size changed
      */
     pub(crate) fn fit(mut self, backend : dyn RenderBackend) : bool {
-        const winW = self.win.width();
-        const winH = self.win.height();
+        let winW = self.win.width();
+        let winH = self.win.height();
         if (winW < 1 || winH < 1) {
             return false;
         }
 
-        const want = backend.viewportFor(winW, winH);
+        let want = backend.viewportFor(winW, winH);
         if (want.w == self.width() && want.h == self.height()) {
             return false;
         }

@@ -41,7 +41,7 @@ pub fn halfOf(base : i64, index : i64) : i32 {
  */
 pub fn putHalfOf(base : i64, index : i64, v : i32) : void {
     unsafe {
-        let slot : ptr<u16> = (base + index * HALF_BYTES) as ptr<u16>;
+        let mut slot : ptr<u16> = (base + index * HALF_BYTES) as ptr<u16>;
         *slot = v as u16;
     }
 }
@@ -67,7 +67,7 @@ pub fn floatOf(base : i64, index : i64) : f64 {
  */
 pub fn putFloatOf(base : i64, index : i64, v : f64) : void {
     unsafe {
-        let slot : ptr<f32> = (base + index * FLOAT_BYTES) as ptr<f32>;
+        let mut slot : ptr<f32> = (base + index * FLOAT_BYTES) as ptr<f32>;
         *slot = v as f32;
     }
 }

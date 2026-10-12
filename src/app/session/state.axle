@@ -13,7 +13,7 @@ struct Edge {
      * @return whether it went down since the last call
      */
     pub(crate) fn rose(mut self, down : bool) : bool {
-        const pressed = down && !self.held;
+        let pressed = down && !self.held;
         self.held = down;
         return pressed;
     }
@@ -41,8 +41,8 @@ struct ScriptedWalk {
         if (self.reach <= 0.0) {
             return false;
         }
-        const dx = p.pos.x - self.x0;
-        const dz = p.pos.z - self.z0;
+        let dx = p.pos.x - self.x0;
+        let dz = p.pos.z - self.z0;
         return dx * dx + dz * dz < self.reach * self.reach;
     }
 }

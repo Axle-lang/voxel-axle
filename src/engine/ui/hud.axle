@@ -94,13 +94,13 @@ fn drawHud(
     // The overlay is sized against the frame it lands in, not against fixed
     // pixels: the framebuffer follows the window now, so fixed pixels would mean
     // a HUD that shrinks by exactly as much as going fullscreen gains.
-    const ui : UiScale = uiScaleFor(f.h);
-    const pw : i32 = hotbarPanelW(ui);
-    const ph : i32 = hotbarPanelH(ui);
-    const hx : i32 = (f.w - pw) / 2;
-    const hy : i32 = f.h - ui.px(8) - ph;
+    let ui : UiScale = uiScaleFor(f.h);
+    let pw : i32 = hotbarPanelW(ui);
+    let ph : i32 = hotbarPanelH(ui);
+    let hx : i32 = (f.w - pw) / 2;
+    let hy : i32 = f.h - ui.px(8) - ph;
 
-    const bar : HotbarBar = HotbarBar {
+    let bar : HotbarBar = HotbarBar {
         x0: hx,
         y0: hy,
         atlas,
@@ -108,8 +108,8 @@ fn drawHud(
         selected,
         ui,
     };
-    const heartsY : i32 = hy - healthHeight(ui) - ui.px(6);
-    const hearts : HeartRow = HeartRow {
+    let heartsY : i32 = hy - healthHeight(ui) - ui.px(6);
+    let hearts : HeartRow = HeartRow {
         x0: hx,
         y0: heartsY,
         hp,
@@ -125,9 +125,9 @@ fn drawHud(
     // player never sees, and which says nothing at all to someone who
     // toggled it ten minutes ago and forgot.
     if (creative) {
-        const label : string = "CREATIVE";
-        const w : i32 = font.width(label) + ui.px(16);
-        const box : Rect = Rect::make(f.w - w - ui.px(8), ui.px(8), w, ui.px(20));
+        let label : string = "CREATIVE";
+        let w : i32 = font.width(label) + ui.px(16);
+        let box : Rect = Rect::make(f.w - w - ui.px(8), ui.px(8), w, ui.px(20));
         f.fillRound(box, ui.px(5), Color::mix(0x101418, 0x4CC2FF, 1, 4));
         f.roundBorder(box, ui.px(5), 0x4CC2FF);
         font.drawCentred(f, box, label, 0xDCEEFF);
@@ -139,9 +139,9 @@ fn drawHud(
  * @param f  the frame to draw into
  */
 fn drawCrosshair(f : Frame) : void {
-    const cx : i32 = f.w / 2;
-    const cy : i32 = f.h / 2;
-    const white : i32 = Color::packBytes(255, 255, 255);
+    let cx : i32 = f.w / 2;
+    let cy : i32 = f.h / 2;
+    let white : i32 = Color::packBytes(255, 255, 255);
     f.hLine(cx - 6, cy, 13, white);
     f.vLine(cx, cy - 6, 13, white);
 }

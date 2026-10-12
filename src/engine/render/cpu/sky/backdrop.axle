@@ -61,9 +61,9 @@ fn discColor(body : SkyBody, dx : f64, dy : f64, radius : f64) : i32 {
  * @return the packed rgb colour for the texel
  */
 fn sunTexel(dx : f64, dy : f64, radius : f64) : i32 {
-    const nd : f64 = (dx * dx + dy * dy).sqrt() / radius;
-    const cg : i32 = (253.0 - 42.0 * nd).floorToInt() as i32;
-    const cb : i32 = (218.0 - 150.0 * nd).floorToInt() as i32;
+    let nd : f64 = (dx * dx + dy * dy).sqrt() / radius;
+    let cg : i32 = (253.0 - 42.0 * nd).floorToInt() as i32;
+    let cb : i32 = (218.0 - 150.0 * nd).floorToInt() as i32;
     return Color::packBytes(255, cg, cb);
 }
 
@@ -75,13 +75,13 @@ fn sunTexel(dx : f64, dy : f64, radius : f64) : i32 {
  * @return the packed rgb colour for the texel
  */
 fn moonTexel(dx : f64, dy : f64, radius : f64) : i32 {
-    const ax : f64 = dx + radius * 0.30;
-    const ay : f64 = dy + radius * 0.32;
-    const m1 : f64 = (ax * ax + ay * ay).sqrt();
+    let ax : f64 = dx + radius * 0.30;
+    let ay : f64 = dy + radius * 0.32;
+    let m1 : f64 = (ax * ax + ay * ay).sqrt();
 
-    const bx : f64 = dx - radius * 0.36;
-    const by : f64 = dy - radius * 0.10;
-    const m2 : f64 = (bx * bx + by * by).sqrt();
+    let bx : f64 = dx - radius * 0.36;
+    let by : f64 = dy - radius * 0.10;
+    let m2 : f64 = (bx * bx + by * by).sqrt();
 
     if (m1 < radius * 0.26 || m2 < radius * 0.20) {
         return Color::packBytes(198, 206, 220);
@@ -102,53 +102,53 @@ fn moonTexel(dx : f64, dy : f64, radius : f64) : i32 {
  * @param dir    the body's sky direction (unit), where the deck is sampled
  */
 fn drawDisc(fb : FrameBuf, d : Disc, body : SkyBody, cloud : CloudDome, dir : Vec3) : void {
-    const pixels : i64 = fb.pixels;
-    const zbuf : i64 = fb.zbuf;
-    const w : i32 = fb.w;
-    const h : i32 = fb.h;
-    const x0 : i32 = (d.cx - d.radius).floorToInt() as i32;
-    const x1 : i32 = (d.cx + d.radius).floorToInt() as i32;
-    const y0 : i32 = (d.cy - d.radius).floorToInt() as i32;
-    const y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
-    const r2 : f64 = d.radius * d.radius;
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let w : i32 = fb.w;
+    let h : i32 = fb.h;
+    let x0 : i32 = (d.cx - d.radius).floorToInt() as i32;
+    let x1 : i32 = (d.cx + d.radius).floorToInt() as i32;
+    let y0 : i32 = (d.cy - d.radius).floorToInt() as i32;
+    let y1 : i32 = (d.cy + d.radius).floorToInt() as i32;
+    let r2 : f64 = d.radius * d.radius;
 
     for (py of y0..=y1) {
         if (py >= 0 && py < h) {
             for (px of x0..=x1) {
                 if (px >= 0 && px < w) {
-                    const dx : f64 = (px as f64) + 0.5 - d.cx;
-                    const dy : f64 = (py as f64) + 0.5 - d.cy;
+                    let dx : f64 = (px as f64) + 0.5 - d.cx;
+                    let dy : f64 = (py as f64) + 0.5 - d.cy;
                     // Inside the disc, and not behind the world: the body is
                     // drawn after the terrain now, so the terrain's z is what
                     // hides the part of it that has set.
                     if (dx * dx + dy * dy <= r2 && floatOf(zbuf, py * w + px) <= 0.0) {
-                        let c : i32 = discColor(body, dx, dy, d.radius);
+                        let mut c : i32 = discColor(body, dx, dy, d.radius);
                         // A cloud in front of the sun hides it, which is most of
                         // what a cloud in front of the sun is for. Blended
                         // against the sky already painted underneath rather than
                         // against the disc itself, so there is no read-back of a
                         // pattern to stripe.
-                        const toward : ViewRay = ViewRay {
+                        let toward : ViewRay = ViewRay {
                             dx: dir.x,
                             dy: dir.y,
                             dz: dir.z,
                             inv: 1.0,
                         };
-                        const cl : CloudSample = cloud.sample(toward);
+                        let cl : CloudSample = cloud.sample(toward);
                         if (cl.a > 0.002) {
                             // The sky under the disc already has the cloud in it,
                             // so the body is simply hidden behind that coverage.
-                            const back : i32 = Mem::wordOf(pixels, py * w + px);
-                            const k : f64 = 1.0 - cl.a;
-                            const rr : i32 = (
+                            let back : i32 = Mem::wordOf(pixels, py * w + px);
+                            let k : f64 = 1.0 - cl.a;
+                            let rr : i32 = (
                                 (((c >> 16) & 0xFF) as f64) * k
                                 + (((back >> 16) & 0xFF) as f64) * cl.a
                             ).floorToInt() as i32;
-                            const gg : i32 = (
+                            let gg : i32 = (
                                 (((c >> 8) & 0xFF) as f64) * k
                                 + (((back >> 8) & 0xFF) as f64) * cl.a
                             ).floorToInt() as i32;
-                            const bb : i32 = (
+                            let bb : i32 = (
                                 ((c & 0xFF) as f64) * k
                                 + ((back & 0xFF) as f64) * cl.a
                             ).floorToInt() as i32;
@@ -181,12 +181,12 @@ fn drawSky(
     body : SkyBody,
     cloud : CloudDome
 ) : void {
-    const pr : Projected = cam.projectDir(dir);
+    let pr : Projected = cam.projectDir(dir);
     if (pr.cz < 0.05) {
         return;
     }
 
-    const disc : Disc = Disc {
+    let disc : Disc = Disc {
         cx: pr.sx,
         cy: pr.sy,
         radius,
@@ -216,25 +216,25 @@ fn drawSkyGradientRows(
     y0 : i32,
     y1 : i32
 ) : void {
-    const pixels : i64 = fb.pixels;
-    const zbuf : i64 = fb.zbuf;
-    const w : i32 = fb.w;
+    let pixels : i64 = fb.pixels;
+    let zbuf : i64 = fb.zbuf;
+    let w : i32 = fb.w;
 
     for (py of y0..y1) {
-        const vr : ViewRow = rays.row((py as f64) + 0.5);
-        const row : i32 = py * w;
+        let vr : ViewRow = rays.row((py as f64) + 0.5);
+        let row : i32 = py * w;
         for (px of 0..w) {
             // Only where the world left the pixel empty. The sky is painted
             // AFTER the world for exactly this: most of a frame is ground, and
             // a bicubic cloud read under every blade of grass is a frame's
             // worth of work thrown away.
             if (floatOf(zbuf, row + px) <= 0.0) {
-                const ray : ViewRay = rays.dir(vr, (px as f64) + 0.5);
-                let c : SkyColour = dome.colourAt(ray);
-                const cl : CloudSample = cloud.sample(ray);
+                let ray : ViewRay = rays.dir(vr, (px as f64) + 0.5);
+                let mut c : SkyColour = dome.colourAt(ray);
+                let cl : CloudSample = cloud.sample(ray);
                 if (cl.a > 0.002) {
                     // The cloud arrives premultiplied, so it is added, not mixed.
-                    const keep : f64 = 1.0 - cl.a;
+                    let keep : f64 = 1.0 - cl.a;
                     c = SkyColour {
                         r: c.r * keep + cl.r,
                         g: c.g * keep + cl.g,
@@ -287,10 +287,10 @@ pub(crate) class SkyPaint : Job {
      * @param shares  how many bands the frame was cut into
      */
     fn run(mut self, share : i32, shares : i32) : void {
-        const f : SkyPaintFrame = self.now[0];
-        const band : i32 = (f.fb.h + shares - 1) / shares;
-        const y0 : i32 = (band * share).min(f.fb.h);
-        const y1 : i32 = (band * (share + 1)).min(f.fb.h);
+        let f : SkyPaintFrame = self.now[0];
+        let band : i32 = (f.fb.h + shares - 1) / shares;
+        let y0 : i32 = (band * share).min(f.fb.h);
+        let y1 : i32 = (band * (share + 1)).min(f.fb.h);
         drawSkyGradientRows(
             f.dome,
             f.rays,
@@ -313,11 +313,11 @@ pub(crate) class SkyPaint : Job {
  * @param cloud  the cloud deck, which may be in front of either body
  */
 fn drawCelestial(ds : DayState, cam : Camera, fb : FrameBuf, cloud : CloudDome) : void {
-    const sunR : f64 = (fb.h as f64) * 0.085;
-    const moonR : f64 = (fb.h as f64) * 0.072;
+    let sunR : f64 = (fb.h as f64) * 0.085;
+    let moonR : f64 = (fb.h as f64) * 0.072;
 
     if (ds.sunY > 0.0 - 0.04) {
-        const sunDir : Vec3 = vec3(ds.sunX, ds.sunY, ds.sunZ);
+        let sunDir : Vec3 = vec3(ds.sunX, ds.sunY, ds.sunZ);
         drawSky(
             cam,
             fb,
@@ -328,7 +328,7 @@ fn drawCelestial(ds : DayState, cam : Camera, fb : FrameBuf, cloud : CloudDome) 
         );
     }
     if ((0.0 - ds.sunY) > 0.0 - 0.04) {
-        const moonDir : Vec3 = vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ);
+        let moonDir : Vec3 = vec3(0.0 - ds.sunX, 0.0 - ds.sunY, 0.0 - ds.sunZ);
         drawSky(
             cam,
             fb,

@@ -84,13 +84,13 @@ fn along(at : Vec3, dir : Vec3, t : f64) : Vec3 {
  * @param k       the fraction of the remaining distance to cross
  */
 fn chaseCell(show : i64, target : i64, index : i64, k : f64) : void {
-    const t : i32 = halfOf(target, index);
-    const c : i32 = halfOf(show, index);
+    let t : i32 = halfOf(target, index);
+    let c : i32 = halfOf(show, index);
     if (t == c) {
         return;
     }
-    const cf : f64 = (c as f64) * (1.0 / TAB_SCALE);
-    const tf : f64 = (t as f64) * (1.0 / TAB_SCALE);
+    let cf : f64 = (c as f64) * (1.0 / TAB_SCALE);
+    let tf : f64 = (t as f64) * (1.0 / TAB_SCALE);
     tabPut(show, index, cf + (tf - cf) * k);
 }
 
@@ -106,7 +106,7 @@ struct CloudTable {
  * @return three zeroed buffers of `SKY_N`² cells
  */
 fn newTable() : CloudTable {
-    const n : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
+    let n : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
     return CloudTable {
         cov: Mem::takeZeroed(n),
         lit: Mem::takeZeroed(n),
@@ -131,11 +131,9 @@ class CloudSky {
     refSz : f64,
     refField : CloudField, // ...and the wind, all frozen with it
     light : DeckLight,    // this frame's light, applied when the table is read
-    crew : Task<i32>[],   // the spawned shares: every worker but the caller's
 
     /** Allocate the tables, empty until the first march. */
     constructor() {
-        self.crew = malloc<Task<i32>>(SKY_CREW - 1);
         self.work = newTable();
         self.target = newTable();
         self.show = newTable();
@@ -214,19 +212,20 @@ class CloudSky {
         if (self.slice == 0) {
             // The cycle just finished: what it marched becomes the target, and
             // the buffer it displaces is marched next, with fresh inputs.
-            const done : CloudTable = self.work;
+            let done : CloudTable = self.work;
             self.work = self.target;
             self.target = done;
             self.freezeView(field, ds, eye);
         }
 
+        // A local, not a field: the shares are handed `self`, and an object
+        // holding their handles could carry them to another carrier (E0729).
+        let mut crew : Future<void>[] = malloc<Future<void>>(SKY_CREW - 1);
         for (i of 0..SKY_CREW - 1) {
-            self.crew[i] = spawn cloudSliceJob(self, i);
+            crew[i] = spawn self.frameShare(i);
         }
         self.frameShare(SKY_CREW - 1);
-        for (i of 0..SKY_CREW - 1) {
-            const d : i32 = self.crew[i].join();
-        }
+        await all crew;
 
         self.slice++;
         if (self.slice >= SKY_SLICES) {
@@ -240,10 +239,10 @@ class CloudSky {
      * @param who  the worker, 0..SKY_CREW
      */
     pub(file) fn frameShare(mut self, who : i32) : void {
-        const rows : i32 = SKY_N / SKY_CREW;
+        let rows : i32 = SKY_N / SKY_CREW;
         // The last share takes whatever the division left, so a table size
         // that is not a multiple of the crew still has every row chased.
-        let end : i32 = (who + 1) * rows;
+        let mut end : i32 = (who + 1) * rows;
         if (who == SKY_CREW - 1) {
             end = SKY_N;
         }
@@ -259,15 +258,16 @@ class CloudSky {
      */
     fn fill(mut self, field : CloudField, ds : DayState, eye : Vec3) : void {
         self.freezeView(field, ds, eye);
+        // A local, not a field: the shares are handed `self`, and an object
+        // holding their handles could carry them to another carrier (E0729).
+        let mut crew : Future<void>[] = malloc<Future<void>>(SKY_CREW - 1);
         for (i of 0..SKY_CREW - 1) {
-            self.crew[i] = spawn cloudFillJob(self, i);
+            crew[i] = spawn self.marchRows(i, SKY_CREW);
         }
         self.marchRows(SKY_CREW - 1, SKY_CREW);
-        for (i of 0..SKY_CREW - 1) {
-            const d : i32 = self.crew[i].join();
-        }
+        await all crew;
 
-        const bytes : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
+        let bytes : i64 = (SKY_N as i64) * (SKY_N as i64) * HALF_BYTES;
         Mem::copy(self.target.cov, self.work.cov, bytes);
         Mem::copy(self.target.lit, self.work.lit, bytes);
         Mem::copy(self.target.amb, self.work.amb, bytes);
@@ -286,8 +286,8 @@ class CloudSky {
      * @param y1  last row (exclusive)
      */
     fn chaseRows(mut self, y0 : i32, y1 : i32) : void {
-        const k : f64 = Cloud::CHASE;
-        const end : i64 = (y1 as i64) * (SKY_N as i64);
+        let k : f64 = Cloud::CHASE;
+        let end : i64 = (y1 as i64) * (SKY_N as i64);
         for (i of (y0 as i64) * (SKY_N as i64)..end) {
             chaseCell(self.show.cov, self.target.cov, i, k);
             chaseCell(self.show.lit, self.target.lit, i, k);
@@ -306,8 +306,8 @@ class CloudSky {
      * @param ds  the day/night state
      */
     fn takeLight(mut self, ds : DayState) : void {
-        const skyShare : f64 = Cloud::SKY_LIGHT * ds.skyAmbient / 255.0;
-        const gnd : f64 = Cloud::GROUND_K * ds.skyAmbient;
+        let skyShare : f64 = Cloud::SKY_LIGHT * ds.skyAmbient / 255.0;
+        let gnd : f64 = Cloud::GROUND_K * ds.skyAmbient;
         self.light = DeckLight {
             dir: vec3(ds.dirX, ds.dirY, ds.dirZ),
             body: LinRgb {
@@ -359,18 +359,18 @@ class CloudSky {
      * @param stride  rows between one worker's rows
      */
     pub(file) fn marchRows(mut self, first : i32, stride : i32) : void {
-        const lo : f64 = Cloud::BASE;
-        const hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
-        const cell : f64 = 2.0 / ((SKY_N - 1) as f64);
-        const rim : f64 = (1.0 + 3.0 * cell) * (1.0 + 3.0 * cell);
+        let lo : f64 = Cloud::BASE;
+        let hi : f64 = Cloud::BASE + Cloud::THICK_MAX;
+        let cell : f64 = 2.0 / ((SKY_N - 1) as f64);
+        let rim : f64 = (1.0 + 3.0 * cell) * (1.0 + 3.0 * cell);
 
-        let iv : i32 = first;
+        let mut iv : i32 = first;
         while (iv < SKY_N) {
-            const v : f64 = (iv as f64) * cell - 1.0;
-            const row : i32 = iv * SKY_N;
+            let v : f64 = (iv as f64) * cell - 1.0;
+            let row : i32 = iv * SKY_N;
             for (iu of 0..SKY_N) {
-                const u : f64 = (iu as f64) * cell - 1.0;
-                const r2 : f64 = u * u + v * v;
+                let u : f64 = (iu as f64) * cell - 1.0;
+                let r2 : f64 = u * u + v * v;
                 if (r2 > rim) {
                     self.clear((row + iu) as i64);
                 } else if (r2 > Cloud::HORIZON_SS) {
@@ -379,19 +379,19 @@ class CloudSky {
                     // elevation and almost none across. So the cell is marched
                     // twice, a quarter-cell either side along that radius, and
                     // averaged — a prefilter on the one axis that aliases.
-                    const f : f64 = 0.25 * cell / r2.sqrt();
-                    const du : f64 = u * f;
-                    const dv : f64 = v * f;
-                    const c0 : CloudCell = self.marchDir(u - du, v - dv, lo, hi);
-                    const c1 : CloudCell = self.marchDir(u + du, v + dv, lo, hi);
-                    const mean : CloudCell = CloudCell {
+                    let f : f64 = 0.25 * cell / r2.sqrt();
+                    let du : f64 = u * f;
+                    let dv : f64 = v * f;
+                    let c0 : CloudCell = self.marchDir(u - du, v - dv, lo, hi);
+                    let c1 : CloudCell = self.marchDir(u + du, v + dv, lo, hi);
+                    let mean : CloudCell = CloudCell {
                         cov: (c0.cov + c1.cov) * 0.5,
                         lit: (c0.lit + c1.lit) * 0.5,
                         amb: (c0.amb + c1.amb) * 0.5,
                     };
                     self.store((row + iu) as i64, mean);
                 } else {
-                    const c : CloudCell = self.marchDir(u, v, lo, hi);
+                    let c : CloudCell = self.marchDir(u, v, lo, hi);
                     self.store((row + iu) as i64, c);
                 }
             }
@@ -412,21 +412,21 @@ class CloudSky {
      * @return what the march found along that direction
      */
     fn marchDir(self, u : f64, v : f64, lo : f64, hi : f64) : CloudCell {
-        let r2 : f64 = u * u + v * v;
-        let cu : f64 = u;
-        let cv : f64 = v;
+        let mut r2 : f64 = u * u + v * v;
+        let mut cu : f64 = u;
+        let mut cv : f64 = v;
         if (r2 > 1.0) {
-            const f : f64 = 1.0 / r2.sqrt();
+            let f : f64 = 1.0 / r2.sqrt();
             cu = u * f;
             cv = v * f;
             r2 = 1.0;
         }
 
-        let ey : f64 = 1.0 - r2;
+        let mut ey : f64 = 1.0 - r2;
         if (ey < Cloud::MIN_UP) {
             ey = Cloud::MIN_UP;
         }
-        const k : f64 = (2.0 - r2).sqrt();
+        let k : f64 = (2.0 - r2).sqrt();
         return self.marchCell(cu * k, ey, cv * k, lo, hi);
     }
 
@@ -459,10 +459,10 @@ class CloudSky {
      * @return the three premultiplied quantities
      */
     fn marchCell(self, dx : f64, dy : f64, dz : f64, lo : f64, hi : f64) : CloudCell {
-        const field : CloudField = self.refField;
-        const eyeY : f64 = self.refY;
-        let t0 : f64 = (lo - eyeY) / dy;
-        const t1 : f64 = (hi - eyeY) / dy;
+        let field : CloudField = self.refField;
+        let eyeY : f64 = self.refY;
+        let mut t0 : f64 = (lo - eyeY) / dy;
+        let t1 : f64 = (hi - eyeY) / dy;
         if (t0 < 0.0) {
             t0 = 0.0;
         }
@@ -478,12 +478,12 @@ class CloudSky {
         // of the ray's direction: a step COUNT derived from the span jumps, and a
         // jump in something that varies with elevation is a ring about the
         // zenith. A fixed count over a capped, continuous length has no boundary.
-        const span : f64 = t1 - t0;
-        let cut : f64 = span;
+        let span : f64 = t1 - t0;
+        let mut cut : f64 = span;
         if (cut > Cloud::MAX_PATH) {
             cut = Cloud::MAX_PATH;
         }
-        const n : i32 = Cloud::VIEW_STEPS;
+        let n : i32 = Cloud::VIEW_STEPS;
 
         // How coarse this cell's view of the deck is, and therefore how much of
         // the 3-D detail it is entitled to. A cell subtends a fixed angle, so the
@@ -491,21 +491,21 @@ class CloudSky {
         // before it gets there; past one feature per cell the field aliases
         // instead of resolving. Fourth power: full detail wherever the cell can
         // carry it, gone within a few degrees of where it cannot.
-        let lift : f64 = lo - eyeY;
+        let mut lift : f64 = lo - eyeY;
         if (lift < 1.0) {
             lift = 1.0;
         }
-        const foot : f64 = t0 * t0 * (2.0 / ((SKY_N - 1) as f64)) / (lift * Cloud::DETAIL_FOOT);
-        const f2 : f64 = foot * foot;
-        const lod : f64 = 1.0 / (1.0 + f2 * f2);
+        let foot : f64 = t0 * t0 * (2.0 / ((SKY_N - 1) as f64)) / (lift * Cloud::DETAIL_FOOT);
+        let f2 : f64 = foot * foot;
+        let lod : f64 = 1.0 / (1.0 + f2 * f2);
 
         // The weather at the two ends of the marched part, interpolated between:
         // it varies over hundreds of blocks, so across one crossing it is very
         // nearly linear, and it is the cheap 2-D half of the field.
-        const ox : f64 = self.refX;
-        const oz : f64 = self.refZ;
-        const cA : f64 = field.coverAt(ox + dx * t0, oz + dz * t0, lod);
-        const cB : f64 = field.coverAt(ox + dx * (t0 + cut), oz + dz * (t0 + cut), lod);
+        let ox : f64 = self.refX;
+        let oz : f64 = self.refZ;
+        let cA : f64 = field.coverAt(ox + dx * t0, oz + dz * t0, lod);
+        let cB : f64 = field.coverAt(ox + dx * (t0 + cut), oz + dz * (t0 + cut), lod);
         if (cA <= 0.0 && cB <= 0.0) {
             return CloudCell {
                 cov: 0.0,
@@ -517,18 +517,18 @@ class CloudSky {
         // The body's direction, frozen with the cycle. Its elevation is floored
         // only to keep the divide finite — a per-frame scalar, the same in every
         // direction, so unlike an elevation-dependent clamp it can draw nothing.
-        const sx : f64 = self.refSx;
-        let sy : f64 = self.refSy;
-        const sz : f64 = self.refSz;
+        let sx : f64 = self.refSx;
+        let mut sy : f64 = self.refSy;
+        let sz : f64 = self.refSz;
         if (sy < 0.02) {
             sy = 0.02;
         }
 
-        const dsx : f64 = cut / (n as f64);
-        let trans : f64 = 1.0;
-        let acc : f64 = 0.0;
-        let accLit : f64 = 0.0;
-        let accAmb : f64 = 0.0;
+        let dsx : f64 = cut / (n as f64);
+        let mut trans : f64 = 1.0;
+        let mut acc : f64 = 0.0;
+        let mut accLit : f64 = 0.0;
+        let mut accAmb : f64 = 0.0;
         for (i of 0..n) {
             // Past a hundredth the rest of the ray is behind water the eye cannot
             // see through; what it would add is below the table's own precision.
@@ -536,21 +536,21 @@ class CloudSky {
                 break;
             }
 
-            const f : f64 = ((i as f64) + 0.5) / (n as f64);
-            const t : f64 = t0 + f * cut;
-            const py : f64 = eyeY + dy * t;
-            const cov : f64 = cA + (cB - cA) * f;
-            const here : Vec3 = vec3(ox + dx * t, py, oz + dz * t);
-            const d : f64 = field.densityAtCover(cov, here, lod, Cloud::VIEW_OCTAVES);
+            let f : f64 = ((i as f64) + 0.5) / (n as f64);
+            let t : f64 = t0 + f * cut;
+            let py : f64 = eyeY + dy * t;
+            let cov : f64 = cA + (cB - cA) * f;
+            let here : Vec3 = vec3(ox + dx * t, py, oz + dz * t);
+            let d : f64 = field.densityAtCover(cov, here, lod, Cloud::VIEW_OCTAVES);
             if (d > 0.0001) {
                 // How much of THIS step the eye sees...
-                const take : f64 = 1.0 - (0.0 - d * dsx).exp();
-                const wgt : f64 = trans * take;
+                let take : f64 = 1.0 - (0.0 - d * dsx).exp();
+                let wgt : f64 = trans * take;
 
                 // ...and how much of each light got to it.
-                const top : f64 = field.topFor(cov);
-                const sun : Vec3 = vec3(sx, sy, sz);
-                const lit : f64 = self.litAt(
+                let top : f64 = field.topFor(cov);
+                let sun : Vec3 = vec3(sx, sy, sz);
+                let lit : f64 = self.litAt(
                     field,
                     cov,
                     top,
@@ -559,7 +559,7 @@ class CloudSky {
                     sun,
                     lod
                 );
-                const amb : f64 = ambientAt(top - py, d);
+                let amb : f64 = ambientAt(top - py, d);
 
                 acc += wgt;
                 accLit += wgt * lit;
@@ -569,9 +569,9 @@ class CloudSky {
         }
 
         if (span > cut && trans > 0.01) {
-            const meanD : f64 = cB * Cloud::MEAN_PROFILE * Cloud::DENSITY;
-            const take : f64 = 1.0 - (0.0 - meanD * (span - cut)).exp();
-            const wgt : f64 = trans * take;
+            let meanD : f64 = cB * Cloud::MEAN_PROFILE * Cloud::DENSITY;
+            let take : f64 = 1.0 - (0.0 - meanD * (span - cut)).exp();
+            let wgt : f64 = trans * take;
             acc += wgt;
             accLit += wgt * Cloud::FAR_LIT;
             accAmb += wgt * Cloud::FAR_LIT;
@@ -580,8 +580,8 @@ class CloudSky {
 
         // Aerial perspective: the deck thins into the sky with distance, and what
         // shows through is the horizon the gradient already painted behind it.
-        const hz : f64 = t0 / Cloud::FADE_DIST;
-        const reach : f64 = (0.0 - hz * hz).exp();
+        let hz : f64 = t0 / Cloud::FADE_DIST;
+        let reach : f64 = (0.0 - hz * hz).exp();
         return CloudCell {
             cov: acc * reach,
             lit: accLit * reach,
@@ -627,24 +627,24 @@ class CloudSky {
         sun : Vec3,
         lod : f64
     ) : f64 {
-        let raw : f64 = (top - at.y) / sun.y;
+        let mut raw : f64 = (top - at.y) / sun.y;
         if (raw < 0.0) {
             raw = 0.0;
         }
-        const cap : f64 = Cloud::MAX_LIGHT_PATH;
-        const path : f64 = cap * (1.0 - (0.0 - raw / cap).exp());
+        let cap : f64 = Cloud::MAX_LIGHT_PATH;
+        let path : f64 = cap * (1.0 - (0.0 - raw / cap).exp());
 
-        const oct : i32 = Cloud::LIGHT_OCTAVES;
-        const p1 : f64 = path * 0.15;
-        const p2 : f64 = path * 0.45;
-        const p3 : f64 = path * 0.85;
-        const q1 : Vec3 = along(at, sun, p1);
-        const d1 : f64 = field.densityAtCover(cov, q1, lod, oct);
-        const q2 : Vec3 = along(at, sun, p2);
-        const d2 : f64 = field.densityAtCover(cov, q2, lod, oct);
-        const q3 : Vec3 = along(at, sun, p3);
-        const d3 : f64 = field.densityAtCover(cov, q3, lod, oct);
-        const mean : f64 = 0.15 * d + 0.30 * d1 + 0.30 * d2 + 0.25 * d3;
+        let oct : i32 = Cloud::LIGHT_OCTAVES;
+        let p1 : f64 = path * 0.15;
+        let p2 : f64 = path * 0.45;
+        let p3 : f64 = path * 0.85;
+        let q1 : Vec3 = along(at, sun, p1);
+        let d1 : f64 = field.densityAtCover(cov, q1, lod, oct);
+        let q2 : Vec3 = along(at, sun, p2);
+        let d2 : f64 = field.densityAtCover(cov, q2, lod, oct);
+        let q3 : Vec3 = along(at, sun, p3);
+        let d3 : f64 = field.densityAtCover(cov, q3, lod, oct);
+        let mean : f64 = 0.15 * d + 0.30 * d1 + 0.30 * d2 + 0.25 * d3;
         return Cloud::SCATTER_FLOOR
             + (1.0 - Cloud::SCATTER_FLOOR) * (0.0 - mean * path).exp();
     }
@@ -700,24 +700,3 @@ fn ambientAt(below : f64, d : f64) : f64 {
         + (1.0 - Cloud::AMB_FLOOR) * (0.0 - below * d * Cloud::AMB_K).exp();
 }
 
-/**
- * Worker job: one worker's share of a normal frame.
- * @param cs   the deck being refreshed
- * @param who  the worker, 0..SKY_CREW
- * @return 0, so the share can be awaited
- */
-fn cloudSliceJob(cs : CloudSky, who : i32) : i32 {
-    cs.frameShare(who);
-    return 0;
-}
-
-/**
- * Worker job: one worker's share of the first, full march.
- * @param cs   the deck being filled
- * @param who  the worker's first table row; it steps by `SKY_CREW`
- * @return 0, so the share can be awaited
- */
-fn cloudFillJob(cs : CloudSky, who : i32) : i32 {
-    cs.marchRows(who, SKY_CREW);
-    return 0;
-}

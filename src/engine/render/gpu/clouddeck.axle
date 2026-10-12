@@ -24,10 +24,10 @@ class CloudDeckImage {
      * @return the image, ready to upload
      */
     pub(crate) fn fill(mut self, deck : CloudDome) : Image {
-        const base : i64 = self.image.base();
-        const plane : i64 = (SKY_N as i64) * (SKY_N as i64);
+        let base : i64 = self.image.base();
+        let plane : i64 = (SKY_N as i64) * (SKY_N as i64);
         for (i of 0..plane) {
-            const c : CloudRaw = deck.rawAt(i);
+            let c : CloudRaw = deck.rawAt(i);
             Mem::putWordOf(base, i, packHalves(c.cov, c.lit));
             Mem::putWordOf(base, plane + i, packHalves(c.amb, 0));
         }

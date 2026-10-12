@@ -21,7 +21,7 @@
 //
 // # Threads
 //
-// The bakes run on the light thread — a crew of workers over disjoint slots — and
+// The bakes run on the light task — a crew of workers over disjoint slots — and
 // each builds its slot's table; the renderers read the tables during frames, on the
 // main thread and the raster crew. A bake that finds the runs unchanged writes into
 // the table in place, a byte at a time, as the volumes always were written. One whose
@@ -29,7 +29,7 @@
 // eight-byte store of its address, so a reader finds the old table whole or the new
 // one whole. The old one is retired, and freed once a frame has completed since
 // (`frameDone`): a reader that could have found it was in a frame that has ended.
-// Until the light thread starts (`shareWithReaders`) nothing reads while the bakes
+// Until the light task starts (`shareWithReaders`) nothing reads while the bakes
 // write, and a retired table is freed at once.
 //
 // A chunk streamed into a slot (`clear`, on the main thread) only counts a new load:
@@ -87,7 +87,7 @@ struct SurfaceDraft {
 class SurfaceLight {
     tables : i64[],        // per slot: its table, 0 for none
     loads : i32[],         // per slot: the chunk loads it has had (main thread)
-    changes : i32[],       // per slot: the bakes that changed it (light thread)
+    changes : i32[],       // per slot: the bakes that changed it (light task)
     retired : i64[],       // per slot: the tables retired and not yet freed, newest first
     frames : AtomicI64,    // frames completed — a reader's frame has ended once it moves
     fence : AtomicI64,     // touched before a table is published, for the full fence
@@ -124,11 +124,11 @@ class SurfaceLight {
      * @return its sun visibility, sky access and packed bounce tint
      */
     pub(crate) fn sample(self, slot : i32, lx : i32, y : i32, lz : i32) : CornerSample {
-        const table : i64 = self.tables[slot];
+        let table : i64 = self.tables[slot];
         if (table == 0 || Mem::dwordAt(table, TABLE_LOAD) != self.loads[slot]) {
             return openAir();
         }
-        const at : i64 = cellAt(table, lx, y, lz);
+        let at : i64 = cellAt(table, lx, y, lz);
         if (at < 0) {
             return openAir();
         }
@@ -153,12 +153,12 @@ class SurfaceLight {
 
     /**
      * The memory the published tables hold (main thread). Not the retired ones: their
-     * list is the light thread's, which frees them as it walks it; a published table
+     * list is the light task's, which frees them as it walks it; a published table
      * cannot be freed before the next `frameDone`, which only this thread makes.
      * @return the bytes
      */
     pub(crate) fn bytesInUse(self) : i64 {
-        let total : i64 = 0;
+        let mut total : i64 = 0;
         for (slot of 0..World::SPAN * World::SPAN) {
             total += tableBytes(self.tables[slot]);
         }
@@ -177,12 +177,12 @@ class SurfaceLight {
 
     /** A frame has been drawn: no reader is still in a table retired before it. */
     pub(crate) fn frameDone(mut self) : void {
-        const n : i64 = self.frames.incrementAndGet();
+        let n : i64 = self.frames.incrementAndGet();
     }
 
     /**
      * From now on the bakes and the readers run at the same time: retired tables wait
-     * for a frame to pass before they are freed. Called by the light thread as it
+     * for a frame to pass before they are freed. Called by the light task as it
      * starts, before its first bake.
      */
     pub(crate) fn shareWithReaders(mut self) : void {
@@ -201,9 +201,9 @@ class SurfaceLight {
      */
     pub(crate) fn open(mut self, slot : i32, scan : ShellScan) : SurfaceDraft {
         self.reclaim(slot);
-        const old : i64 = self.tables[slot];
-        const load : i32 = self.loads[slot];
-        const valid : bool = old != 0 && Mem::dwordAt(old, TABLE_LOAD) == load;
+        let old : i64 = self.tables[slot];
+        let load : i32 = self.loads[slot];
+        let valid : bool = old != 0 && Mem::dwordAt(old, TABLE_LOAD) == load;
         if (valid && sameRuns(old, scan)) {
             return SurfaceDraft {
                 slot,
@@ -213,7 +213,7 @@ class SurfaceLight {
             };
         }
 
-        const table : i64 = Mem::take(TABLE_VALUES + (scan.cells as i64) * CELL_BYTES);
+        let table : i64 = Mem::take(TABLE_VALUES + (scan.cells as i64) * CELL_BYTES);
         Mem::putDword(table, TABLE_LOAD, load);
         Mem::putDword(table, TABLE_CELLS, scan.cells);
         Mem::putQword(table, TABLE_NEXT, 0);
@@ -236,7 +236,7 @@ class SurfaceLight {
      */
     pub(crate) fn close(mut self, d : SurfaceDraft, changed : bool) : void {
         if (d.fresh) {
-            const touched : i64 = self.fence.incrementAndGet();
+            let touched : i64 = self.fence.incrementAndGet();
             self.tables[d.slot] = d.table;
             self.retire(d.slot, d.old);
         }
@@ -269,11 +269,11 @@ class SurfaceLight {
      * @param slot  the slot index
      */
     fn reclaim(mut self, slot : i32) : void {
-        const now : i64 = self.frames.get();
-        let keep : i64 = 0;
-        let t : i64 = self.retired[slot];
+        let now : i64 = self.frames.get();
+        let mut keep : i64 = 0;
+        let mut t : i64 = self.retired[slot];
         while (t != 0) {
-            const next : i64 = Mem::qwordAt(t, TABLE_NEXT);
+            let next : i64 = Mem::qwordAt(t, TABLE_NEXT);
             if (Mem::qwordAt(t, TABLE_RETIRED_AT) < now) {
                 Mem::release(t);
             } else {
@@ -295,8 +295,8 @@ class SurfaceLight {
  * @return the byte offset of its values in the table, or -1
  */
 fn cellAt(table : i64, lx : i32, y : i32, lz : i32) : i64 {
-    const run : i32 = Mem::dwordAt(table, TABLE_COLUMNS + ((lz * World::CHUNK_SIZE + lx) as i64) * 4);
-    const y0 : i32 = run & 0xFF;
+    let run : i32 = Mem::dwordAt(table, TABLE_COLUMNS + ((lz * World::CHUNK_SIZE + lx) as i64) * 4);
+    let y0 : i32 = run & 0xFF;
     if (y < y0 || y >= y0 + ((run >> 8) & 0xFF)) {
         return 0 - 1;
     }
@@ -347,14 +347,14 @@ fn sameRuns(table : i64, scan : ShellScan) : bool {
  * @param old    the table it replaces, 0 for none
  */
 fn fillFrom(table : i64, old : i64) : void {
-    const s : i32 = World::CHUNK_SIZE;
+    let s : i32 = World::CHUNK_SIZE;
     for (lz of 0..s) {
         for (lx of 0..s) {
-            const run : i32 = Mem::dwordAt(table, TABLE_COLUMNS + ((lz * s + lx) as i64) * 4);
-            const y0 : i32 = run & 0xFF;
+            let run : i32 = Mem::dwordAt(table, TABLE_COLUMNS + ((lz * s + lx) as i64) * 4);
+            let y0 : i32 = run & 0xFF;
             for (y of y0..(y0 + ((run >> 8) & 0xFF))) {
-                const to : i64 = cellAt(table, lx, y, lz);
-                const from : i64 = old == 0 ? 0 - 1 : cellAt(old, lx, y, lz);
+                let to : i64 = cellAt(table, lx, y, lz);
+                let from : i64 = old == 0 ? 0 - 1 : cellAt(old, lx, y, lz);
                 if (from >= 0) {
                     Mem::copy(table + to, old + from, CELL_BYTES);
                 } else {
@@ -425,10 +425,10 @@ fn putDraftSun(d : SurfaceDraft, at : i64, v : i32) : bool {
  * @return true when a stored value moved
  */
 fn putDraftSky(d : SurfaceDraft, at : i64, sky : i32, bounce : i32) : bool {
-    const a : bool = storeByte(d.table, at + CELL_SKY, sky);
-    const r : bool = storeByte(d.table, at + CELL_RED, (bounce >> 16) & 0xFF);
-    const g : bool = storeByte(d.table, at + CELL_GREEN, (bounce >> 8) & 0xFF);
-    const b : bool = storeByte(d.table, at + CELL_BLUE, bounce & 0xFF);
+    let a : bool = storeByte(d.table, at + CELL_SKY, sky);
+    let r : bool = storeByte(d.table, at + CELL_RED, (bounce >> 16) & 0xFF);
+    let g : bool = storeByte(d.table, at + CELL_GREEN, (bounce >> 8) & 0xFF);
+    let b : bool = storeByte(d.table, at + CELL_BLUE, bounce & 0xFF);
     return a || r || g || b;
 }
 

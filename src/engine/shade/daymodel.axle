@@ -42,7 +42,7 @@ struct SkyBodyLight {
  * Which body is lighting the world at `dayTime`, from where, how strongly and in
  * what colour.
  *
- * Shared by the renderer and by the shadow bake on the light thread — they have
+ * Shared by the renderer and by the shadow bake on the light task — they have
  * to agree about where the light comes from or the shadows point the wrong way,
  * and the only way to guarantee that is for there to be one answer.
  *
@@ -53,23 +53,23 @@ struct SkyBodyLight {
  * @return the active body's direction, strength and colour
  */
 fn activeBody(dayTime : f64) : SkyBodyLight {
-    const ang : f64 = (dayTime - 0.25) * 6.2831853;
-    const sx : f64 = ang.cos();
-    const sy : f64 = ang.sin();
-    const sz : f64 = Daylight::SUN_TILT;
-    let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
+    let ang : f64 = (dayTime - 0.25) * 6.2831853;
+    let sx : f64 = ang.cos();
+    let sy : f64 = ang.sin();
+    let sz : f64 = Daylight::SUN_TILT;
+    let mut len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
     if (len < 0.0001) {
         len = 0.0001;
     }
 
     if (sy > 0.0) {
-        let up : f64 = sy * Daylight::HORIZON_FADE;
+        let mut up : f64 = sy * Daylight::HORIZON_FADE;
         if (up > 1.0) {
             up = 1.0;
         }
 
         // The sun reddens as it sinks, off the same elevation that dims it.
-        const warm : f64 = 1.0 - up;
+        let warm : f64 = 1.0 - up;
         return SkyBodyLight {
             dirX: sx / len,
             dirY: sy / len,
@@ -81,7 +81,7 @@ fn activeBody(dayTime : f64) : SkyBodyLight {
         };
     }
 
-    let up : f64 = (0.0 - sy) * Daylight::HORIZON_FADE;
+    let mut up : f64 = (0.0 - sy) * Daylight::HORIZON_FADE;
     if (up > 1.0) {
         up = 1.0;
     }
@@ -135,7 +135,7 @@ struct DayState : SkyLighting {
      * @return the face's direct and ambient terms
      */
     pub(crate) fn shade(self, n : Vec3) : FaceLight {
-        const f : FaceLight = shadeLambert(n, vec3(self.dirX, self.dirY, self.dirZ));
+        let f : FaceLight = shadeLambert(n, vec3(self.dirX, self.dirY, self.dirZ));
         return FaceLight {
             direct: f.direct * self.dirStrength,
             ambient: f.ambient * self.skyAmbient,
@@ -153,17 +153,17 @@ struct DayState : SkyLighting {
  */
 fn computeDayState(dayTime : f64) : DayState {
     // Sun angle around the sky dome, tilted out of the pure east-west plane.
-    const ang : f64 = (dayTime - 0.25) * 6.2831853;
-    const sx : f64 = ang.cos();
-    const sy : f64 = ang.sin();
-    const sz : f64 = Daylight::SUN_TILT;
-    let len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
+    let ang : f64 = (dayTime - 0.25) * 6.2831853;
+    let sx : f64 = ang.cos();
+    let sy : f64 = ang.sin();
+    let sz : f64 = Daylight::SUN_TILT;
+    let mut len : f64 = (sx * sx + sy * sy + sz * sz).sqrt();
     if (len < 0.0001) {
         len = 0.0001;
     }
 
     // Daylight: full above the horizon, floor (moonlight) below, smooth dusk.
-    let dl : f64 = (sy + 0.2) * 2.0;
+    let mut dl : f64 = (sy + 0.2) * 2.0;
     if (dl < 0.0) {
         dl = 0.0;
     }
@@ -172,21 +172,21 @@ fn computeDayState(dayTime : f64) : DayState {
     }
 
     // Warm dusk/dawn push, strongest as the sun crosses the horizon (dl ≈ 0.5).
-    let ad : f64 = dl - 0.5;
+    let mut ad : f64 = dl - 0.5;
     if (ad < 0.0) {
         ad = 0.0 - ad;
     }
-    let dusk : f64 = 1.0 - ad * 2.0;
+    let mut dusk : f64 = 1.0 - ad * 2.0;
     if (dusk < 0.0) {
         dusk = 0.0;
     }
     dusk *= 0.7;
 
-    let r : f64 = (Daylight::NIGHT_SKY_R as f64)
+    let mut r : f64 = (Daylight::NIGHT_SKY_R as f64)
         + ((Daylight::DAY_SKY_R - Daylight::NIGHT_SKY_R) as f64) * dl;
-    let g : f64 = (Daylight::NIGHT_SKY_G as f64)
+    let mut g : f64 = (Daylight::NIGHT_SKY_G as f64)
         + ((Daylight::DAY_SKY_G - Daylight::NIGHT_SKY_G) as f64) * dl;
-    let b : f64 = (Daylight::NIGHT_SKY_B as f64)
+    let mut b : f64 = (Daylight::NIGHT_SKY_B as f64)
         + ((Daylight::DAY_SKY_B - Daylight::NIGHT_SKY_B) as f64) * dl;
     r += ((Daylight::DUSK_SKY_R as f64) - r) * dusk;
     g += ((Daylight::DUSK_SKY_G as f64) - g) * dusk;
@@ -198,8 +198,8 @@ fn computeDayState(dayTime : f64) : DayState {
     // only thing tinting them was how squarely they faced it — and at sunset
     // nothing faces it squarely, so the whole world went cool exactly when it
     // should have gone gold.
-    const overcast : f64 = Cloud::ON ? Cloud::COVERAGE : 0.0;
-    const body : SkyBodyLight = activeBody(dayTime);
+    let overcast : f64 = Cloud::ON ? Cloud::COVERAGE : 0.0;
+    let body : SkyBodyLight = activeBody(dayTime);
     return DayState {
         sunX: sx / len,
         sunY: sy / len,
@@ -263,7 +263,7 @@ class DayLighting {
         self.lcurve = Mem::take(16 * 8);
         Mem::putRealOf(self.lcurve, 0, 0.0);
         for (li of 1..16) {
-            let pc : f64 = 1.0;
+            let mut pc : f64 = 1.0;
             for (kc of 0..(15 - li)) {
                 pc *= Light::FALLOFF;
             }

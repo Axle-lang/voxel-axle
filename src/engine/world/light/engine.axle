@@ -4,12 +4,12 @@
 //   volumes     block light per channel + sky light, per voxel (value struct of addresses)
 //   flood       those levels, re-flooded on every edit
 //   surface     sun visibility, sky access and the bounce tint, kept at the surface
-//   sun         soft directional shadows, baked by rays on the light thread
+//   sun         soft directional shadows, baked by rays on the light task
 //   skyaccess   hemispherical sky access + one-bounce tint, same thread
 //   sample      reading the surface back, per cell or per face corner
 //
 // Each component holds its own `RingView` over the voxel field and the ring,
-// both co-owned with the manager, so the light thread reaches the live world
+// both co-owned with the manager, so the light task reaches the live world
 // with no copy; each holds the same `LightVolumes` value, and the bakes co-own
 // the one `SurfaceLight`. `ChunkManager` composes one of these and delegates its
 // light seams to it.
@@ -35,7 +35,7 @@ use crate::configs::time::{ Daylight };
 
 /**
  * The throttled per-frame light bake capability (directional sun soft-shadows +
- * hemispherical sky-access / one-bounce GI), run by the background light thread.
+ * hemispherical sky-access / one-bounce GI), run by the background light task.
  */
 trait LightBaker {
     /**
@@ -55,7 +55,7 @@ class LightEngine : LightSample, LightBaker {
     moment : LightMoment,         // the hour, the clock and the camera column, published
                                   // by the main loop — everything the bake needs about now
     momentSeq : AtomicI32,        // odd while `moment` is being written (a seqlock)
-    lightRunning : AtomicBoolean, // false tells the light thread to exit (quit)
+    lightRunning : AtomicBoolean, // false tells the light task to exit (quit)
 
     /**
      * Compose the light components over a shared voxel field + ring ownership.
@@ -65,7 +65,7 @@ class LightEngine : LightSample, LightBaker {
      */
     constructor(own field : Shared<VoxData>, own cols : Shared<ColumnRing>, slots : i32) {
         self.vols = newVolumes(slots);
-        const surface : Shared<SurfaceLight> = new shared SurfaceLight(slots);
+        let surface : Shared<SurfaceLight> = new shared SurfaceLight(slots);
         self.surface = surface;
         self.ring = new RingView(new VoxStore(field), cols);
         self.flood = new LightFlood(new RingView(new VoxStore(field), cols), self.vols, slots);
@@ -236,13 +236,13 @@ class LightEngine : LightSample, LightBaker {
         return cornerAverage(self.ring, self.surface, probe);
     }
 
-    // ── The light thread ────────────────────────────────────────
+    // ── The light task ────────────────────────────────────────
 
     /**
      * Light the whole loaded ring NOW, and do not come back until it is lit.
      *
      * The world is generated before the first frame; this is the other half of
-     * that. Left to the light thread, the ring is lit over the first tenth of a
+     * that. Left to the light task, the ring is lit over the first tenth of a
      * second of play, and a tenth of a second is long enough to watch the shadows
      * and the ambient occlusion arrive — the world appears, and THEN it is lit.
      * Called once from the startup path, where the cost is a load and not a
@@ -250,7 +250,7 @@ class LightEngine : LightSample, LightBaker {
      *
      * ONE pass is the whole ring: both bakes see a backlog the size of the ring
      * and take their crew path, which drains it rather than budgeting it. The
-     * light thread then only ever has the sun's own movement to keep up with.
+     * light task then only ever has the sun's own movement to keep up with.
      */
     pub(crate) fn primeLight(mut self) : void {
         self.stepBake();
@@ -259,15 +259,15 @@ class LightEngine : LightSample, LightBaker {
     /**
      * One pass of the whole lighting system: refresh the directional sun-shadow
      * map and bake any pending hemispherical sky-access / colour-bounce. Run by
-     * the dedicated light thread, reading the time of day the main loop publishes.
+     * the dedicated light task, reading the time of day the main loop publishes.
      */
     fn stepBake(mut self) : void {
         // The clouds move on their own clock and the shadows are cast through
         // them, so the deck is re-marched before the ring is: a shadow bake
         // reading last pass's cloud would put the dark patch where the cloud has
         // already left.
-        const now : LightMoment = self.readMoment();
-        const body : SkyBodyLight = activeBody(now.dayTime);
+        let now : LightMoment = self.readMoment();
+        let body : SkyBodyLight = activeBody(now.dayTime);
         self.sun.rebakeClouds(
             cloudFieldAt(now.seconds),
             vec3(body.dirX, body.dirY, body.dirZ),
@@ -279,28 +279,28 @@ class LightEngine : LightSample, LightBaker {
     }
 
     /**
-     * Publish the moment the background light thread bakes against (main
+     * Publish the moment the background light task bakes against (main
      * thread). The sequence is odd while the four fields are being written, so
      * a reader can tell a half-written moment from a whole one.
      * @param m  the hour, clock and camera column to bake for
      */
     pub(crate) fn setMoment(mut self, m : LightMoment) : void {
-        const begin : i32 = self.momentSeq.incrementAndGet();
+        let begin : i32 = self.momentSeq.incrementAndGet();
         self.moment = m;
-        const end : i32 = self.momentSeq.incrementAndGet();
+        let end : i32 = self.momentSeq.incrementAndGet();
     }
 
     /**
-     * The last moment published, whole (light thread). Read once a pass and
+     * The last moment published, whole (light task). Read once a pass and
      * used for everything in it: a bake that mixed this frame's hour with last
      * frame's wind would put a cloud's shadow where the cloud is not.
      * @return a consistent copy of the moment
      */
     fn readMoment(self) : LightMoment {
         while (true) {
-            const before : i32 = self.momentSeq.get();
+            let before : i32 = self.momentSeq.get();
             if ((before & 1) == 0) {
-                const copy : LightMoment = self.moment;
+                let copy : LightMoment = self.moment;
                 if (self.momentSeq.get() == before) {
                     return copy;
                 }
@@ -332,13 +332,13 @@ class LightEngine : LightSample, LightBaker {
         return self.surface.bytesInUse();
     }
 
-    /** Tell the background light thread to stop (call before joining it). */
+    /** Tell the background light task to stop (call before awaiting it). */
     pub(crate) fn stopLight(mut self) : void {
         self.lightRunning.set(false);
     }
 
     /**
-     * Whether the background light thread should keep running.
+     * Whether the background light task should keep running.
      * @return false once `stopLight` has been called
      */
     pub(crate) fn lightAlive(self) : bool {
@@ -346,8 +346,18 @@ class LightEngine : LightSample, LightBaker {
     }
 
     /**
-     * The light thread is starting: from now on the bakes run while frames read
-     * (light thread, before its first bake).
+     * Whether the bakes still owe work: a slot waiting for its shadow map or
+     * its sky access. What the light loop paces itself on — a tick that finds
+     * work comes back at once, an idle world sleeps the long interval.
+     * @return true while any loaded slot is owed a bake
+     */
+    pub(crate) fn lightOwed(self) : bool {
+        return self.sun.owed() || self.sky.owed();
+    }
+
+    /**
+     * The light task is starting: from now on the bakes run while frames read
+     * (light task, before its first bake).
      */
     pub(crate) fn lightStarted(mut self) : void {
         self.surface.shareWithReaders();

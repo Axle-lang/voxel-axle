@@ -100,7 +100,7 @@ fn boxOf(id : Block, level : i32) : BlockBox {
         // accepts, even when every field has a default.
         return BlockBox { yMax: 1.0 };
     }
-    let n : i32 = level;
+    let mut n : i32 = level;
     if (n < 1) {
         n = 1;
     }
@@ -119,7 +119,7 @@ fn boxOf(id : Block, level : i32) : BlockBox {
  * @return the level that height rounds to, at least 1
  */
 fn levelOfHeight(height : f64) : i32 {
-    let n : i32 = (height * (BLOCK_LEVELS as f64)).round() as i32;
+    let mut n : i32 = (height * (BLOCK_LEVELS as f64)).round() as i32;
     if (n < 1) {
         n = 1;
     }

@@ -45,7 +45,7 @@ struct LightRemoval {
  * @return the level 0..15
  */
 fn levelAt(ring : RingView, p : Nibble, cell : IVec3) : i32 {
-    const off : i64 = ring.offsetOf(cell);
+    let off : i64 = ring.offsetOf(cell);
     if (off < 0) {
         return 0;
     }
@@ -86,7 +86,7 @@ class LightFlood {
         self.ring = ring;
         self.vols = vols;
         self.ldirty = newSlotFlags(slots);
-        const lcap : i32 = Light::QUEUE_CAP;
+        let lcap : i32 = Light::QUEUE_CAP;
         self.lq = malloc<IVec3>(lcap);
         self.lqn = 0;
         self.rq = malloc<LightRemoval>(lcap);
@@ -109,7 +109,7 @@ class LightFlood {
      * @param cz  the chunk z coordinate
      */
     pub(crate) fn markDirtyAt(mut self, cx : i32, cz : i32) : void {
-        const slot : i32 = self.ring.slotFor(cx, cz);
+        let slot : i32 = self.ring.slotFor(cx, cz);
         if (self.ring.owns(slot, cx, cz)) {
             self.ldirty[slot] = 1;
         }
@@ -155,17 +155,17 @@ class LightFlood {
             return;
         }
 
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.ring.floorDiv(cell.x, s);
-        const cz : i32 = self.ring.floorDiv(cell.z, s);
-        const slot : i32 = self.ring.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.ring.floorDiv(cell.x, s);
+        let cz : i32 = self.ring.floorDiv(cell.z, s);
+        let slot : i32 = self.ring.slotFor(cx, cz);
         if (!self.ring.owns(slot, cx, cz)) {
             return;
         }
 
-        const lx : i32 = cell.x - cx * s;
-        const lz : i32 = cell.z - cz * s;
-        const off : i64 = self.ring.store.voxIdx(slot, lx, cell.y, lz) as i64;
+        let lx : i32 = cell.x - cx * s;
+        let lz : i32 = cell.z - cz * s;
+        let off : i64 = self.ring.store.voxIdx(slot, lx, cell.y, lz) as i64;
         if (nibGet(p, off) != v) {
             nibPut(p, off, v);
             self.ldirty[slot] = 1;
@@ -185,11 +185,11 @@ class LightFlood {
      * @param lz  the cell's local z
      */
     fn markReaders(mut self, cx : i32, cz : i32, lx : i32, lz : i32) : void {
-        const s : i32 = World::CHUNK_SIZE;
-        const xLo : i32 = lx == 0 ? -1 : 0;
-        const xHi : i32 = lx == s - 1 ? 1 : 0;
-        const zLo : i32 = lz == 0 ? -1 : 0;
-        const zHi : i32 = lz == s - 1 ? 1 : 0;
+        let s : i32 = World::CHUNK_SIZE;
+        let xLo : i32 = lx == 0 ? -1 : 0;
+        let xHi : i32 = lx == s - 1 ? 1 : 0;
+        let zLo : i32 = lz == 0 ? -1 : 0;
+        let zHi : i32 = lz == s - 1 ? 1 : 0;
         for (dz of zLo..=zHi) {
             for (dx of xLo..=xHi) {
                 if (dx != 0 || dz != 0) {
@@ -206,24 +206,24 @@ class LightFlood {
      * @param wz  world z
      */
     fn skyColumn(mut self, wx : i32, wz : i32) : void {
-        const s : i32 = World::CHUNK_SIZE;
-        const cx : i32 = self.ring.floorDiv(wx, s);
-        const cz : i32 = self.ring.floorDiv(wz, s);
-        const slot : i32 = self.ring.slotFor(cx, cz);
+        let s : i32 = World::CHUNK_SIZE;
+        let cx : i32 = self.ring.floorDiv(wx, s);
+        let cz : i32 = self.ring.floorDiv(wz, s);
+        let slot : i32 = self.ring.slotFor(cx, cz);
         if (!self.ring.owns(slot, cx, cz)) {
             return;
         }
 
-        const lx : i32 = wx - cx * s;
-        const lz : i32 = wz - cz * s;
-        let lit : i32 = 15;
-        let y : i32 = World::HEIGHT - 1;
+        let lx : i32 = wx - cx * s;
+        let lz : i32 = wz - cz * s;
+        let mut lit : i32 = 15;
+        let mut y : i32 = World::HEIGHT - 1;
         while (y >= 0) {
             if (lit > 0 && isOpaque(self.ring.store.getVox(slot, ivec3(lx, y, lz)))) {
                 lit = 0;
             }
-            const off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
-            const sky : Nibble = self.vols.sky();
+            let off : i64 = self.ring.store.voxIdx(slot, lx, y, lz) as i64;
+            let sky : Nibble = self.vols.sky();
             if (nibGet(sky, off) != lit) {
                 nibPut(sky, off, lit);
                 self.ldirty[slot] = 1;
@@ -241,7 +241,7 @@ class LightFlood {
      * @param cz    the chunk z coordinate
      */
     pub(crate) fn seedSky(mut self, slot : i32, cx : i32, cz : i32) : void {
-        const s : i32 = World::CHUNK_SIZE;
+        let s : i32 = World::CHUNK_SIZE;
         for (lz of 0..s) {
             for (lx of 0..s) {
                 self.skyColumn(cx * s + lx, cz * s + lz);
@@ -249,7 +249,7 @@ class LightFlood {
         }
 
         self.lqn = 0;
-        let top : i32 = self.ring.store.faceTop(slot) + 1;
+        let mut top : i32 = self.ring.store.faceTop(slot) + 1;
         if (top > World::HEIGHT - 1) {
             top = World::HEIGHT - 1;
         }
@@ -257,8 +257,8 @@ class LightFlood {
         for (bz of 0..s) {
             for (bx of 0..s) {
                 for (by of 0..=top) {
-                    const sky : Nibble = self.vols.sky();
-                    const off : i64 = self.ring.store.voxIdx(slot, bx, by, bz) as i64;
+                    let sky : Nibble = self.vols.sky();
+                    let off : i64 = self.ring.store.voxIdx(slot, bx, by, bz) as i64;
                     if (nibGet(sky, off) == 15) {
                         self.lpush(ivec3(cx * s + bx, by, cz * s + bz));
                     }
@@ -295,8 +295,8 @@ class LightFlood {
     fn floodAdd(mut self, p : Nibble) : void {
         while (self.lqn > 0) {
             self.lqn--;
-            const entry : IVec3 = self.lq[self.lqn];
-            const lv : i32 = levelAt(self.ring, p, entry);
+            let entry : IVec3 = self.lq[self.lqn];
+            let lv : i32 = levelAt(self.ring, p, entry);
             if (lv > 1) {
                 self.trySpread(p, ivec3(entry.x + 1, entry.y, entry.z), lv);
                 self.trySpread(p, ivec3(entry.x - 1, entry.y, entry.z), lv);
@@ -317,7 +317,7 @@ class LightFlood {
      * @param lvl        the level being removed from the parent cell
      */
     fn tryRemove(mut self, p : Nibble, neighbour : IVec3, lvl : i32) : void {
-        const nl : i32 = levelAt(self.ring, p, neighbour);
+        let nl : i32 = levelAt(self.ring, p, neighbour);
         if (nl != 0) {
             if (nl < lvl) {
                 self.setLevel(p, neighbour, 0);
@@ -336,9 +336,9 @@ class LightFlood {
     fn floodRemove(mut self, p : Nibble) : void {
         while (self.rqn > 0) {
             self.rqn--;
-            const entry : LightRemoval = self.rq[self.rqn];
-            const ey : i32 = entry.y as i32;
-            const lvl : i32 = entry.lvl as i32;
+            let entry : LightRemoval = self.rq[self.rqn];
+            let ey : i32 = entry.y as i32;
+            let lvl : i32 = entry.lvl as i32;
             self.tryRemove(p, ivec3(entry.x + 1, ey, entry.z), lvl);
             self.tryRemove(p, ivec3(entry.x - 1, ey, entry.z), lvl);
             self.tryRemove(p, ivec3(entry.x, ey + 1, entry.z), lvl);
@@ -427,15 +427,15 @@ class LightFlood {
      * @param cell  the edited world voxel
      */
     pub(crate) fn lightUpdate(mut self, cell : IVec3) : void {
-        const wx : i32 = cell.x;
-        const wy : i32 = cell.y;
-        const wz : i32 = cell.z;
+        let wx : i32 = cell.x;
+        let wy : i32 = cell.y;
+        let wz : i32 = cell.z;
 
         // 1..3. Block light, once per channel: clear what ran through the cell,
         // re-seed this block's own emission, then let the neighbours flow back
         // in. The three channels share the flood stacks, so they run in turn.
-        const cur : ChannelLevels = channelsAt(self.ring, self.vols, cell);
-        const emit : Emission = emissionOf(self.ring.worldGet(ivec3(wx, wy, wz)));
+        let cur : ChannelLevels = channelsAt(self.ring, self.vols, cell);
+        let emit : Emission = emissionOf(self.ring.worldGet(ivec3(wx, wy, wz)));
         self.refloodChannel(self.vols.red(), cell, cur.r, emit.r);
         self.refloodChannel(self.vols.green(), cell, cur.g, emit.g);
         self.refloodChannel(self.vols.blue(), cell, cur.b, emit.b);
@@ -445,21 +445,21 @@ class LightFlood {
         // flood both, so sky light recedes as well as fills.
         self.lqn = 0;
         self.rqn = 0;
-        const scx : i32 = self.ring.floorDiv(wx, World::CHUNK_SIZE);
-        const scz : i32 = self.ring.floorDiv(wz, World::CHUNK_SIZE);
-        const sslot : i32 = self.ring.slotFor(scx, scz);
+        let scx : i32 = self.ring.floorDiv(wx, World::CHUNK_SIZE);
+        let scz : i32 = self.ring.floorDiv(wz, World::CHUNK_SIZE);
+        let sslot : i32 = self.ring.slotFor(scx, scz);
         if (self.ring.owns(sslot, scx, scz)) {
-            const slx : i32 = wx - scx * World::CHUNK_SIZE;
-            const slz : i32 = wz - scz * World::CHUNK_SIZE;
-            let lit : i32 = 15;
-            let cy : i32 = World::HEIGHT - 1;
+            let slx : i32 = wx - scx * World::CHUNK_SIZE;
+            let slz : i32 = wz - scz * World::CHUNK_SIZE;
+            let mut lit : i32 = 15;
+            let mut cy : i32 = World::HEIGHT - 1;
             while (cy >= 0) {
                 if (lit > 0 && isOpaque(self.ring.store.getVox(sslot, ivec3(slx, cy, slz)))) {
                     lit = 0;
                 }
-                const coff : i64 = self.ring.store.voxIdx(sslot, slx, cy, slz) as i64;
-                const sky : Nibble = self.vols.sky();
-                const oldv : i32 = nibGet(sky, coff);
+                let coff : i64 = self.ring.store.voxIdx(sslot, slx, cy, slz) as i64;
+                let sky : Nibble = self.vols.sky();
+                let oldv : i32 = nibGet(sky, coff);
                 if (oldv > lit) {
                     nibPut(sky, coff, lit);
                     self.ldirty[sslot] = 1;
@@ -489,9 +489,9 @@ class LightFlood {
         // A border face is baked from the NEIGHBOUR chunk's light, which didn't
         // change — re-flag the edited chunk plus every neighbour that reads
         // the cell so their shared faces re-bake with the final light.
-        const ecs : i32 = World::CHUNK_SIZE;
-        const ecx : i32 = self.ring.floorDiv(wx, ecs);
-        const ecz : i32 = self.ring.floorDiv(wz, ecs);
+        let ecs : i32 = World::CHUNK_SIZE;
+        let ecx : i32 = self.ring.floorDiv(wx, ecs);
+        let ecz : i32 = self.ring.floorDiv(wz, ecs);
         self.markDirtyAt(ecx, ecz);
         self.markReaders(ecx, ecz, wx - ecx * ecs, wz - ecz * ecs);
     }

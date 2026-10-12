@@ -43,8 +43,8 @@ fn shoulder(x : f64) : f64 {
     if (x <= Render::SKY_SHOULDER) {
         return x;
     }
-    const head : f64 = 255.0 - Render::SKY_SHOULDER;
-    const over : f64 = x - Render::SKY_SHOULDER;
+    let head : f64 = 255.0 - Render::SKY_SHOULDER;
+    let over : f64 = x - Render::SKY_SHOULDER;
     return Render::SKY_SHOULDER + head * over / (over + head);
 }
 
@@ -75,7 +75,7 @@ struct SkyDome {
      * @return the sky's colour there, in display range
      */
     pub(crate) fn colourAt(self, ray : ViewRay) : SkyColour {
-        let t : f64 = ray.dy * ray.inv;
+        let mut t : f64 = ray.dy * ray.inv;
         if (t < 0.0) {
             t = 0.0;
         }
@@ -85,17 +85,17 @@ struct SkyDome {
 
         // Sharper near the horizon: the square root pushes the gradient up, the
         // way the real one is compressed into the first few degrees.
-        const ts : f64 = t.sqrt();
-        let r : f64 = self.horR + (self.zenR - self.horR) * ts;
-        let g : f64 = self.horG + (self.zenG - self.horG) * ts;
-        let b : f64 = self.horB + (self.zenB - self.horB) * ts;
+        let ts : f64 = t.sqrt();
+        let mut r : f64 = self.horR + (self.zenR - self.horR) * ts;
+        let mut g : f64 = self.horG + (self.zenG - self.horG) * ts;
+        let mut b : f64 = self.horB + (self.zenB - self.horB) * ts;
 
-        const sd : f64 = (ray.dx * self.sunX + ray.dy * self.sunY + ray.dz * self.sunZ) * ray.inv;
+        let sd : f64 = (ray.dx * self.sunX + ray.dy * self.sunY + ray.dz * self.sunZ) * ray.inv;
         if (sd > 0.0 && self.haloFade > 0.0) {
-            const s2 : f64 = sd * sd;
-            let halo : f64 = s2 * s2 * s2 * Render::SKY_HALO_STRENGTH * self.haloFade;
+            let s2 : f64 = sd * sd;
+            let mut halo : f64 = s2 * s2 * s2 * Render::SKY_HALO_STRENGTH * self.haloFade;
             if (sd > Render::SKY_CORE_THRESH) {
-                const cc : f64 = (sd - Render::SKY_CORE_THRESH) / (1.0 - Render::SKY_CORE_THRESH);
+                let cc : f64 = (sd - Render::SKY_CORE_THRESH) / (1.0 - Render::SKY_CORE_THRESH);
                 halo += cc * cc * self.haloFade * Render::SKY_CORE_STRENGTH;
             }
             r += (Render::SKY_HALO_R as f64) * halo;
@@ -113,12 +113,12 @@ struct SkyDome {
  * @return the sky's colour field for the frame
  */
 fn skyDomeFor(ds : DayState) : SkyDome {
-    const baseR : f64 = ds.skyColR as f64;
-    const baseG : f64 = ds.skyColG as f64;
-    const baseB : f64 = ds.skyColB as f64;
-    const lift : f64 = Render::SKY_HORIZON_LIFT;
+    let baseR : f64 = ds.skyColR as f64;
+    let baseG : f64 = ds.skyColG as f64;
+    let baseB : f64 = ds.skyColB as f64;
+    let lift : f64 = Render::SKY_HORIZON_LIFT;
 
-    let fade : f64 = (ds.sunY + 0.1) * 3.0;
+    let mut fade : f64 = (ds.sunY + 0.1) * 3.0;
     if (fade < 0.0) {
         fade = 0.0;
     }

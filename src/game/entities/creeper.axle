@@ -41,36 +41,36 @@ class Creeper : Mob, Hostile {
      * @param out  the model to append the boxes to
      */
     fn buildModel(self, out : BoxModel) : void {
-        const sw : f64 = self.walkPhase.sin() * 0.10;
-        const fuse : i32 = self.fuse;
+        let sw : f64 = self.walkPhase.sin() * 0.10;
+        let fuse : i32 = self.fuse;
 
         // Calm green vs. charging gilet jaune skin/face tiles + base tints.
-        let skin : i32 = Tile::CREEPER_SKIN;
-        let face : i32 = Tile::CREEPER_FACE;
-        let body : i32 = Color::packBytes(58, 140, 58);
-        let leg : i32 = Color::packBytes(42, 96, 42);
+        let mut skin : i32 = Tile::CREEPER_SKIN;
+        let mut face : i32 = Tile::CREEPER_FACE;
+        let mut body : i32 = Color::packBytes(58, 140, 58);
+        let mut leg : i32 = Color::packBytes(42, 96, 42);
         // Legs always wear the plain green skin — the vest only belongs on the
         // torso, so they never carry the charge tile.
-        let legTile : i32 = Tile::CREEPER_SKIN;
+        let mut legTile : i32 = Tile::CREEPER_SKIN;
 
         // Charging menace: swell the whole model and strobe white. The strobe
         // accelerates as the fuse runs down; a flash frame paints every part
         // flat white (tile = -1) so it reads as a bright pulse over the model.
-        let s : f64 = 1.0;
-        let flash : bool = false;
+        let mut s : f64 = 1.0;
+        let mut flash : bool = false;
         if (fuse >= 0) {
             skin = Tile::CHARGE_SKIN;
             face = Tile::CHARGE_FACE;
             body = Color::packBytes(228, 196, 40);
             leg = Color::packBytes(170, 140, 28);
             s = 1.25;
-            const period : i32 = 2 + fuse / 40;
+            let period : i32 = 2 + fuse / 40;
             if ((fuse / period) % 4 == 0) {
                 flash = true;
             }
         }
         if (flash) {
-            const wht : i32 = Color::packBytes(242, 248, 242);
+            let wht : i32 = Color::packBytes(242, 248, 242);
             skin = -1;
             face = -1;
             legTile = -1;
@@ -157,21 +157,21 @@ class Creeper : Mob, Hostile {
             return;
         }
 
-        const dx : f64 = player.pos.x - self.pos.x;
-        const dy : f64 = player.pos.y - self.pos.y;
-        const dz : f64 = player.pos.z - self.pos.z;
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
         // 3D distance + an explicit vertical cap: a player flying or standing
         // high overhead is NOT in range, so the creeper won't chase or blow up
         // under an out-of-reach target.
-        const dist : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
-        const vert : f64 = dy < 0.0 ? 0.0 - dy : dy;
+        let dist : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
+        let vert : f64 = dy < 0.0 ? 0.0 - dy : dy;
         self.heading = math::atan2(dz, dx);
 
         // Hostile only toward a survival player who is near our own level. In
         // creative / flight, or too far above/below, the creeper stands down
         // (and any lit fuse is defused below).
-        const survival : bool = player.mode == GameMode::Survival;
-        const hostile : bool = survival && vert <= Mobs::CREEPER_MAX_VERTICAL;
+        let survival : bool = player.mode == GameMode::Survival;
+        let hostile : bool = survival && vert <= Mobs::CREEPER_MAX_VERTICAL;
 
         if (self.fuse < 0) {
             if (hostile && dist <= Mobs::CREEPER_TRIGGER_DIST) {
@@ -181,7 +181,7 @@ class Creeper : Mob, Hostile {
                 return;
             }
             if (hostile && dist <= Mobs::CREEPER_CHASE_DIST) {
-                const spd : f64 = Mobs::CREEPER_SPEED;
+                let spd : f64 = Mobs::CREEPER_SPEED;
                 self.walkPhase += 0.35;
                 self.tick(world, self.heading.cos() * spd, self.heading.sin() * spd);
             } else {
@@ -215,14 +215,14 @@ class Creeper : Mob, Hostile {
      * @param sim     the block-update sim woken (fluid / falling) around each broken cell
      */
     fn explode(mut self, world : dyn VoxelQuery, player : Player, sim : BlockSim) : void {
-        const dx : f64 = player.pos.x - self.pos.x;
-        const dy : f64 = player.pos.y - self.pos.y;
-        const dz : f64 = player.pos.z - self.pos.z;
-        const d : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
-        const reach : f64 = Mobs::CREEPER_BLAST_RADIUS * 2.0;
+        let dx : f64 = player.pos.x - self.pos.x;
+        let dy : f64 = player.pos.y - self.pos.y;
+        let dz : f64 = player.pos.z - self.pos.z;
+        let d : f64 = (dx * dx + dy * dy + dz * dz).sqrt();
+        let reach : f64 = Mobs::CREEPER_BLAST_RADIUS * 2.0;
         if (d < reach) {
-            const f : f64 = 1.0 - d / reach;
-            const dmg : i32 = (f * (Mobs::CREEPER_DAMAGE as f64)).floorToInt() as i32;
+            let f : f64 = 1.0 - d / reach;
+            let dmg : i32 = (f * (Mobs::CREEPER_DAMAGE as f64)).floorToInt() as i32;
             if (dmg > 0) {
                 player.hurt(dmg);
             }
@@ -247,16 +247,16 @@ class Creeper : Mob, Hostile {
      * @param sim    the block-update sim woken around each broken cell
      */
     fn crater(mut self, query : dyn VoxelQuery, edit : dyn VoxelEdit, sim : BlockSim) : void {
-        const r : i32 = (Mobs::CREEPER_BLAST_RADIUS).floorToInt() as i32;
-        const cx : i32 = self.pos.x.floorToInt() as i32;
-        const cy : i32 = self.pos.y.floorToInt() as i32;
-        const cz : i32 = self.pos.z.floorToInt() as i32;
+        let r : i32 = (Mobs::CREEPER_BLAST_RADIUS).floorToInt() as i32;
+        let cx : i32 = self.pos.x.floorToInt() as i32;
+        let cy : i32 = self.pos.y.floorToInt() as i32;
+        let cz : i32 = self.pos.z.floorToInt() as i32;
 
         for (ox of (-r)..=r) {
             for (oy of (-r)..=r) {
                 for (oz of (-r)..=r) {
                     if (ox * ox + oy * oy + oz * oz <= r * r) {
-                        const cell : IVec3 = ivec3(cx + ox, cy + oy, cz + oz);
+                        let cell : IVec3 = ivec3(cx + ox, cy + oy, cz + oz);
                         if (query.worldGet(cell) != Block::Air) {
                             edit.breakAt(cell);
                             sim.enqueue6(cell);

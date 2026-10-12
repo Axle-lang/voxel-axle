@@ -29,12 +29,12 @@ pub fn lerp(a : f64, b : f64, t : f64) : f64 {
  * @return the eased fraction in [0, 1]
  */
 pub fn smoothstep(e0 : f64, e1 : f64, x : f64) : f64 {
-    const d : f64 = e1 - e0;
+    let d : f64 = e1 - e0;
     if (d > -0.000001 && d < 0.000001) {
         return x < e0 ? 0.0 : 1.0;
     }
 
-    const t : f64 = (x - e0) / d;
+    let t : f64 = (x - e0) / d;
     if (t < 0.0) {
         return 0.0;
     }
@@ -84,7 +84,7 @@ pub fn clampI32(v : i32, lo : i32, hi : i32) : i32 {
  * @return the equivalent angle in (-π, π]
  */
 pub fn wrapAngle(a : f64) : f64 {
-    let r : f64 = a;
+    let mut r : f64 = a;
     while (r > PI) {
         r -= TAU;
     }

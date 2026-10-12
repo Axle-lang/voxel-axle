@@ -8,7 +8,7 @@
 // Pipeline: bright-extract + downsample to half-res (luma above `Render::BLOOM_THRESHOLD`,
 // soft-knee), separable box blur (`Render::BLOOM_ITERS` passes, ping-ponging bl* ↔ bt*),
 // then composite the upsampled glow back over the full frame. The extract and
-// composite passes each split into two disjoint row bands run on two threads;
+// composite passes each split into two disjoint row bands run on two tasks;
 // the blur is single-threaded, and measured to be right to stay that way.
 //
 // The blur slides a RUNNING SUM rather than re-summing `2*rad+1` taps per
@@ -22,7 +22,7 @@
 // sub-pass here is short enough that the split was mostly overhead. The
 // rule the measurement left behind, rather than the number it left: a band
 // must carry appreciably more work than one spawn costs before it is worth
-// being a thread — and that cost belongs to the platform, so it is worth
+// being a task — and that cost belongs to the platform, so it is worth
 // re-measuring on the machine at hand before splitting anything else.
 
 use smalt::Mem;
@@ -30,6 +30,27 @@ use crate::engine::math::narrow::{ floatOf, putFloatOf, FLOAT_BYTES };
 use crate::configs::screen::{ Screen };
 use crate::engine::render::cpu::raster::framebuf::{ FrameBuf, PostEffect };
 use crate::configs::render::{ Render };
+
+/**
+ * The geometry one bloom pass runs over: the frame it reads and the
+ * half-resolution target it writes. Built once per pass and handed to both
+ * halves of a split pass, so the band spawned and the band this task runs
+ * cannot come to disagree about the frame they share — which five adjacent
+ * `i32`s in a call site invite.
+ */
+struct BloomFrame {
+    pixels : i64; // full-resolution base
+    w : i32;      // full-resolution width
+    h : i32;      // full-resolution height
+    dw : i32;     // half-resolution width
+    dh : i32;     // half-resolution height
+}
+
+/** A half-open band of rows, `[first, last)`. */
+struct Rows {
+    first : i32;
+    last : i32;
+}
 
 class Bloom : PostEffect {
     blR : i64, // half-res bright buffers (R/G/B) + blur ping-pong target
@@ -119,32 +140,16 @@ class Bloom : PostEffect {
         if (!Render::BLOOM_ON) {
             return;
         }
-        const dw : i32 = (w + 1) / 2;
-        const dh : i32 = (h + 1) / 2;
+        let dw : i32 = (w + 1) / 2;
+        let dh : i32 = (h + 1) / 2;
         self.fit(halfCount(w, h));
+        let frame : BloomFrame = BloomFrame { pixels: pixels, w: w, h: h, dw: dw, dh: dh };
 
-        // 1) Bright extraction + downsample — two threads (disjoint output rows).
-        const halfD : i32 = dh / 2;
-        const te : Task<i32> = spawn bloomExtractJob(
-            self,
-            pixels,
-            w,
-            h,
-            dw,
-            dh,
-            0,
-            halfD
-        );
-        self.extractRows(
-            pixels,
-            w,
-            h,
-            dw,
-            dh,
-            halfD,
-            dh
-        );
-        const de : i32 = te.join();
+        // 1) Bright extraction + downsample — two tasks (disjoint output rows).
+        let halfD : i32 = dh / 2;
+        let te : Future<void> = spawn self.extractRows(frame, Rows { first: 0, last: halfD });
+        self.extractRows(frame, Rows { first: halfD, last: dh });
+        await te;
 
         // 2) Separable box blur, as a RUNNING SUM (`Render::BLOOM_ITERS` passes).
         //
@@ -153,36 +158,19 @@ class Bloom : PostEffect {
         // taps re-summed from scratch. The cost stops depending on the
         // radius, and `BLOOM_RADIUS` becomes a free knob.
         self.fitAcc(dw as i64);
-        const rad : i32 = Render::BLOOM_RADIUS;
-        const invK : f64 = 1.0 / ((2 * rad + 1) as f64);
+        let rad : i32 = Render::BLOOM_RADIUS;
+        let invK : f64 = 1.0 / ((2 * rad + 1) as f64);
         for (it of 0..Render::BLOOM_ITERS) {
             self.blurRows(dw, rad, invK, 0, dh);
             self.blurCols(dw, dh, rad, invK, 0, dw);
         }
 
-        // 3) Composite the upsampled glow over the full frame — two threads.
-        const st : f64 = Render::BLOOM_STRENGTH;
-        const halfH : i32 = h / 2;
-        const tc : Task<i32> = spawn bloomCompositeJob(
-            self,
-            pixels,
-            w,
-            h,
-            dw,
-            st,
-            0,
-            halfH
-        );
-        self.compositeRows(
-            pixels,
-            w,
-            h,
-            dw,
-            st,
-            halfH,
-            h
-        );
-        const dc : i32 = tc.join();
+        // 3) Composite the upsampled glow over the full frame — two tasks.
+        let st : f64 = Render::BLOOM_STRENGTH;
+        let halfH : i32 = h / 2;
+        let tc : Future<void> = spawn self.compositeRows(frame, st, Rows { first: 0, last: halfH });
+        self.compositeRows(frame, st, Rows { first: halfH, last: h });
+        await tc;
     }
 
     /**
@@ -220,15 +208,15 @@ class Bloom : PostEffect {
      * @param y1    last half-res row (exclusive)
      */
     pub(file) fn blurRows(self, dw : i32, rad : i32, invK : f64, y0 : i32, y1 : i32) : void {
-        const last : i32 = dw - 1;
+        let last : i32 = dw - 1;
         for (y of y0..y1) {
-            const rb : i32 = y * dw;
+            let rb : i32 = y * dw;
 
-            let sr : f64 = 0.0;
-            let sg : f64 = 0.0;
-            let sb : f64 = 0.0;
+            let mut sr : f64 = 0.0;
+            let mut sg : f64 = 0.0;
+            let mut sb : f64 = 0.0;
             for (k of -rad..=rad) {
-                let xx : i32 = k;
+                let mut xx : i32 = k;
                 if (xx < 0) {
                     xx = 0;
                 }
@@ -244,11 +232,11 @@ class Bloom : PostEffect {
             putFloatOf(self.btB, rb, sb * invK);
 
             for (x of 1..=last) {
-                let ai : i32 = x + rad;
+                let mut ai : i32 = x + rad;
                 if (ai > last) {
                     ai = last;
                 }
-                let si : i32 = x - 1 - rad;
+                let mut si : i32 = x - 1 - rad;
                 if (si < 0) {
                     si = 0;
                 }
@@ -287,7 +275,7 @@ class Bloom : PostEffect {
         x0 : i32,
         x1 : i32
     ) : void {
-        const lastY : i32 = dh - 1;
+        let lastY : i32 = dh - 1;
         for (z of x0..x1) {
             putFloatOf(self.acR, z, 0.0);
             putFloatOf(self.acG, z, 0.0);
@@ -295,14 +283,14 @@ class Bloom : PostEffect {
         }
 
         for (k of -rad..=rad) {
-            let yy : i32 = k;
+            let mut yy : i32 = k;
             if (yy < 0) {
                 yy = 0;
             }
             if (yy > lastY) {
                 yy = lastY;
             }
-            const rb : i32 = yy * dw;
+            let rb : i32 = yy * dw;
             for (xi of x0..x1) {
                 putFloatOf(self.acR, xi, floatOf(self.acR, xi) + floatOf(self.btR, rb + xi));
                 putFloatOf(self.acG, xi, floatOf(self.acG, xi) + floatOf(self.btG, rb + xi));
@@ -317,25 +305,25 @@ class Bloom : PostEffect {
         }
 
         for (y of 1..=lastY) {
-            let ay : i32 = y + rad;
+            let mut ay : i32 = y + rad;
             if (ay > lastY) {
                 ay = lastY;
             }
-            let sy : i32 = y - 1 - rad;
+            let mut sy : i32 = y - 1 - rad;
             if (sy < 0) {
                 sy = 0;
             }
-            const ab : i32 = ay * dw;
-            const sbb : i32 = sy * dw;
-            const ob : i32 = y * dw;
+            let ab : i32 = ay * dw;
+            let sbb : i32 = sy * dw;
+            let ob : i32 = y * dw;
             for (xx of x0..x1) {
-                const nr : f64 = floatOf(self.acR, xx)
+                let nr : f64 = floatOf(self.acR, xx)
                     + floatOf(self.btR, ab + xx)
                     - floatOf(self.btR, sbb + xx);
-                const ng : f64 = floatOf(self.acG, xx)
+                let ng : f64 = floatOf(self.acG, xx)
                     + floatOf(self.btG, ab + xx)
                     - floatOf(self.btG, sbb + xx);
-                const nb : f64 = floatOf(self.acB, xx)
+                let nb : f64 = floatOf(self.acB, xx)
                     + floatOf(self.btB, ab + xx)
                     - floatOf(self.btB, sbb + xx);
                 putFloatOf(self.acR, xx, nr);
@@ -352,44 +340,35 @@ class Bloom : PostEffect {
      * Bright-extraction + 2×2 downsample into the half-res bright buffers, for
      * half-res rows [dy0, dy1).
      * @param pixels  framebuffer base
-     * @param w       framebuffer width
-     * @param h       framebuffer height
-     * @param dw      half-res width
-     * @param dh      half-res height
-     * @param dy0     first half-res row (inclusive)
-     * @param dy1     last half-res row (exclusive)
+     * @param frame  the frame and its half-resolution target
+     * @param rows   the half-res rows to fill, half-open
      */
-    pub(file) fn extractRows(
-        self,
-        pixels : i64,
-        w : i32,
-        h : i32,
-        dw : i32,
-        dh : i32,
-        dy0 : i32,
-        dy1 : i32
-    ) : void {
-        const thr : f64 = Render::BLOOM_THRESHOLD;
-        for (dy of dy0..dy1) {
-            const sy0 : i32 = dy * 2;
+    pub(file) fn extractRows(self, frame : BloomFrame, rows : Rows) : void {
+        let pixels : i64 = frame.pixels;
+        let w : i32 = frame.w;
+        let h : i32 = frame.h;
+        let dw : i32 = frame.dw;
+        let thr : f64 = Render::BLOOM_THRESHOLD;
+        for (dy of rows.first..rows.last) {
+            let sy0 : i32 = dy * 2;
             for (dx of 0..dw) {
-                const sx0 : i32 = dx * 2;
-                let ar : f64 = 0.0;
-                let ag : f64 = 0.0;
-                let ab : f64 = 0.0;
+                let sx0 : i32 = dx * 2;
+                let mut ar : f64 = 0.0;
+                let mut ag : f64 = 0.0;
+                let mut ab : f64 = 0.0;
                 for (jy of 0..2) {
-                    const yy : i32 = sy0 + jy;
+                    let yy : i32 = sy0 + jy;
                     if (yy < h) {
                         for (jx of 0..2) {
-                            const xx : i32 = sx0 + jx;
+                            let xx : i32 = sx0 + jx;
                             if (xx < w) {
-                                const c : i32 = Mem::dwordAt(pixels, ((yy * w + xx) as i64) * 4);
-                                const r : f64 = ((c >> 16) & 0xFF) as f64;
-                                const g : f64 = ((c >> 8) & 0xFF) as f64;
-                                const b : f64 = (c & 0xFF) as f64;
-                                const lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
+                                let c : i32 = Mem::dwordAt(pixels, ((yy * w + xx) as i64) * 4);
+                                let r : f64 = ((c >> 16) & 0xFF) as f64;
+                                let g : f64 = ((c >> 8) & 0xFF) as f64;
+                                let b : f64 = (c & 0xFF) as f64;
+                                let lum : f64 = 0.299 * r + 0.587 * g + 0.114 * b;
                                 if (lum > thr) {
-                                    const f : f64 = (lum - thr) / lum;
+                                    let f : f64 = (lum - thr) / lum;
                                     ar += r * f;
                                     ag += g * f;
                                     ab += b * f;
@@ -398,7 +377,7 @@ class Bloom : PostEffect {
                         }
                     }
                 }
-                const di : i32 = dy * dw + dx;
+                let di : i32 = dy * dw + dx;
                 putFloatOf(self.blR, di, ar * 0.25);
                 putFloatOf(self.blG, di, ag * 0.25);
                 putFloatOf(self.blB, di, ab * 0.25);
@@ -409,36 +388,27 @@ class Bloom : PostEffect {
     /**
      * Composite (add the upsampled glow back) for full-res rows [y0, y1).
      * @param pixels  framebuffer base
-     * @param w       framebuffer width
-     * @param h       framebuffer height
-     * @param dw      half-res width
+     * @param frame  the frame and its half-resolution target
      * @param st      bloom strength multiplier
-     * @param y0      first row (inclusive)
-     * @param y1      last row (exclusive)
+     * @param rows    the full-res rows to composite, half-open
      */
-    pub(file) fn compositeRows(
-        self,
-        pixels : i64,
-        w : i32,
-        h : i32,
-        dw : i32,
-        st : f64,
-        y0 : i32,
-        y1 : i32
-    ) : void {
-        for (py of y0..y1) {
-            const row : i32 = py * w;
-            const drow : i32 = (py / 2) * dw;
+    pub(file) fn compositeRows(self, frame : BloomFrame, st : f64, rows : Rows) : void {
+        let pixels : i64 = frame.pixels;
+        let w : i32 = frame.w;
+        let dw : i32 = frame.dw;
+        for (py of rows.first..rows.last) {
+            let row : i32 = py * w;
+            let drow : i32 = (py / 2) * dw;
             for (px of 0..w) {
-                const di : i32 = drow + px / 2;
-                const addr : f64 = floatOf(self.blR, di) * st;
-                const addg : f64 = floatOf(self.blG, di) * st;
-                const addb : f64 = floatOf(self.blB, di) * st;
+                let di : i32 = drow + px / 2;
+                let addr : f64 = floatOf(self.blR, di) * st;
+                let addg : f64 = floatOf(self.blG, di) * st;
+                let addb : f64 = floatOf(self.blB, di) * st;
                 if (addr > 0.5 || addg > 0.5 || addb > 0.5) {
-                    const c : i32 = Mem::dwordAt(pixels, (row + px) as i64 * 4);
-                    let r : i32 = ((c >> 16) & 0xFF) + (addr.floorToInt() as i32);
-                    let g : i32 = ((c >> 8) & 0xFF) + (addg.floorToInt() as i32);
-                    let b : i32 = (c & 0xFF) + (addb.floorToInt() as i32);
+                    let c : i32 = Mem::dwordAt(pixels, (row + px) as i64 * 4);
+                    let mut r : i32 = ((c >> 16) & 0xFF) + (addr.floorToInt() as i32);
+                    let mut g : i32 = ((c >> 8) & 0xFF) + (addg.floorToInt() as i32);
+                    let mut b : i32 = (c & 0xFF) + (addb.floorToInt() as i32);
                     if (r > 255) {
                         r = 255;
                     }
@@ -457,74 +427,6 @@ class Bloom : PostEffect {
             }
         }
     }
-}
-
-/**
- * Worker job: bloom bright-extraction for one half-res row band.
- * @param b       the bloom mini-manager
- * @param pixels  framebuffer base
- * @param w       framebuffer width
- * @param h       framebuffer height
- * @param dw      half-res width
- * @param dh      half-res height
- * @param dy0     first half-res row (inclusive)
- * @param dy1     last half-res row (exclusive)
- * @return 0
- */
-fn bloomExtractJob(
-    b : Bloom,
-    pixels : i64,
-    w : i32,
-    h : i32,
-    dw : i32,
-    dh : i32,
-    dy0 : i32,
-    dy1 : i32
-) : i32 {
-    b.extractRows(
-        pixels,
-        w,
-        h,
-        dw,
-        dh,
-        dy0,
-        dy1
-    );
-    return 0;
-}
-
-/**
- * Worker job: bloom composite for one full-res row band.
- * @param b       the bloom mini-manager
- * @param pixels  framebuffer base
- * @param w       framebuffer width
- * @param h       framebuffer height
- * @param dw      half-res width
- * @param st      bloom strength multiplier
- * @param y0      first row (inclusive)
- * @param y1      last row (exclusive)
- * @return 0
- */
-fn bloomCompositeJob(
-    b : Bloom,
-    pixels : i64,
-    w : i32,
-    h : i32,
-    dw : i32,
-    st : f64,
-    y0 : i32,
-    y1 : i32
-) : i32 {
-    b.compositeRows(
-        pixels,
-        w,
-        h,
-        dw,
-        st,
-        y0,
-        y1
-    );
-    return 0;
 }
 
 /**

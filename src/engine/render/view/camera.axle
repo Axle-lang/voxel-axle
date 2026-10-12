@@ -82,9 +82,9 @@ struct Lens {
  * @return the projection centre and focal length to draw it with
  */
 fn lensFor(renderW : i32, renderH : i32) : Lens {
-    const hh : f64 = (renderH as f64) * 0.5;
-    const half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
-    let t : f64 = half.tan();
+    let hh : f64 = (renderH as f64) * 0.5;
+    let half : f64 = Screen::FOV_V_DEG * 0.5 * 3.14159265358979 / 180.0;
+    let mut t : f64 = half.tan();
     if (t < 0.0001) {
         t = 0.0001;
     }
@@ -114,12 +114,12 @@ struct Viewport {
  * @return the framebuffer size to render at
  */
 fn viewportFor(winW : i32, winH : i32) : Viewport {
-    let w : i32 = winW;
-    let h : i32 = winH;
-    const px : i64 = (w as i64) * (h as i64);
-    const cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
+    let mut w : i32 = winW;
+    let mut h : i32 = winH;
+    let px : i64 = (w as i64) * (h as i64);
+    let cap : i64 = Screen::MAX_RENDER_PIXELS as i64;
     if (px > cap) {
-        const k : f64 = ((cap as f64) / (px as f64)).sqrt();
+        let k : f64 = ((cap as f64) / (px as f64)).sqrt();
         w = ((w as f64) * k).floorToInt() as i32;
         h = ((h as f64) * k).floorToInt() as i32;
     }
@@ -170,11 +170,11 @@ struct Camera : Projector {
      * @return the camera-space point (x, y, depth)
      */
     pub(crate) fn toCamera(self, world : Vec3) : Vec3 {
-        const dx : f64 = world.x - self.eye.x;
-        const dy : f64 = world.y - self.eye.y;
-        const dz : f64 = world.z - self.eye.z;
-        const rx : f64 = dx * self.cosy + dz * self.siny;
-        const rz : f64 = (0.0 - dx) * self.siny + dz * self.cosy;
+        let dx : f64 = world.x - self.eye.x;
+        let dy : f64 = world.y - self.eye.y;
+        let dz : f64 = world.z - self.eye.z;
+        let rx : f64 = dx * self.cosy + dz * self.siny;
+        let rz : f64 = (0.0 - dx) * self.siny + dz * self.cosy;
         return Vec3 {
             x: rx,
             y: dy * self.cosp - rz * self.sinp,
@@ -214,10 +214,10 @@ struct Camera : Projector {
      * @return the projected screen point
      */
     pub(crate) fn projectDir(self, dir : Vec3) : Projected {
-        const rx : f64 = dir.x * self.cosy + dir.z * self.siny;
-        const rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
-        const ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
-        const rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
+        let rx : f64 = dir.x * self.cosy + dir.z * self.siny;
+        let rz : f64 = (0.0 - dir.x) * self.siny + dir.z * self.cosy;
+        let ry2 : f64 = dir.y * self.cosp - rz * self.sinp;
+        let rz2 : f64 = dir.y * self.sinp + rz * self.cosp;
         return Projected {
             sx: self.lens.hw + self.lens.focal * rx / rz2,
             sy: self.lens.hh - self.lens.focal * ry2 / rz2,
@@ -266,31 +266,31 @@ struct DepthRange {
  * @return clip = matrix * (point - origin, 1)
  */
 fn clipMatrix(cam : Camera, origin : Vec3, depth : DepthRange) : Mat4 {
-    const ex : f64 = cam.eye.x - origin.x;
-    const ey : f64 = cam.eye.y - origin.y;
-    const ez : f64 = cam.eye.z - origin.z;
+    let ex : f64 = cam.eye.x - origin.x;
+    let ey : f64 = cam.eye.y - origin.y;
+    let ez : f64 = cam.eye.z - origin.z;
 
     // The rotation `toCamera` applies: x right, y up, z forward.
-    const r0x : f64 = cam.cosy;
-    const r0z : f64 = cam.siny;
-    const r1x : f64 = cam.siny * cam.sinp;
-    const r1y : f64 = cam.cosp;
-    const r1z : f64 = 0.0 - cam.cosy * cam.sinp;
-    const r2x : f64 = 0.0 - cam.siny * cam.cosp;
-    const r2y : f64 = cam.sinp;
-    const r2z : f64 = cam.cosy * cam.cosp;
+    let r0x : f64 = cam.cosy;
+    let r0z : f64 = cam.siny;
+    let r1x : f64 = cam.siny * cam.sinp;
+    let r1y : f64 = cam.cosp;
+    let r1z : f64 = 0.0 - cam.cosy * cam.sinp;
+    let r2x : f64 = 0.0 - cam.siny * cam.cosp;
+    let r2y : f64 = cam.sinp;
+    let r2z : f64 = cam.cosy * cam.cosp;
 
     // The lens `screenOf` applies, as a perspective with w = forward depth.
-    const sx : f64 = cam.lens.focal / cam.lens.hw;
-    const sy : f64 = cam.lens.focal / cam.lens.hh;
-    const near : f64 = depth.near;
-    const far : f64 = depth.far;
-    const a : f64 = (far + near) / (far - near);
-    const b : f64 = 0.0 - 2.0 * far * near / (far - near);
+    let sx : f64 = cam.lens.focal / cam.lens.hw;
+    let sy : f64 = cam.lens.focal / cam.lens.hh;
+    let near : f64 = depth.near;
+    let far : f64 = depth.far;
+    let a : f64 = (far + near) / (far - near);
+    let b : f64 = 0.0 - 2.0 * far * near / (far - near);
 
-    const t0 : f64 = 0.0 - (r0x * ex + r0z * ez);
-    const t1 : f64 = 0.0 - (r1x * ex + r1y * ey + r1z * ez);
-    const t2 : f64 = 0.0 - (r2x * ex + r2y * ey + r2z * ez);
+    let t0 : f64 = 0.0 - (r0x * ex + r0z * ez);
+    let t1 : f64 = 0.0 - (r1x * ex + r1y * ey + r1z * ez);
+    let t2 : f64 = 0.0 - (r2x * ex + r2y * ey + r2z * ez);
     return Mat4 {
         m00: sx * r0x,
         m01: 0.0,

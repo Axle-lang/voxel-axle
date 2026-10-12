@@ -46,16 +46,16 @@ fn runSurfaceCheck() : i32 {
     man.setMoment(momentAt(player, 0.42, 0.0));
     man.primeLight();
 
-    let whole : Digest = Digest { };
+    let mut whole : Digest = Digest { };
     for (slot of 0..World::SPAN * World::SPAN) {
-        const sc : SlotChunk = man.slotChunk(slot);
+        let sc : SlotChunk = man.slotChunk(slot);
         if (sc.loaded) {
             whole = digestChunk(man, whole, sc, false);
         }
     }
     printDigest("ring", whole);
 
-    const at : IVec3 = ivec3(
+    let at : IVec3 = ivec3(
         player.pos.x.floorToInt() as i32,
         player.pos.y.floorToInt() as i32,
         player.pos.z.floorToInt() as i32
@@ -65,11 +65,11 @@ fn runSurfaceCheck() : i32 {
         man.primeLight();
     }
 
-    let edited : Digest = Digest { };
-    const cx : i32 = chunkOf(at.x as f64);
-    const cz : i32 = chunkOf(at.z as f64);
+    let mut edited : Digest = Digest { };
+    let cx : i32 = chunkOf(at.x as f64);
+    let cz : i32 = chunkOf(at.z as f64);
     for (slot of 0..World::SPAN * World::SPAN) {
-        const sc : SlotChunk = man.slotChunk(slot);
+        let sc : SlotChunk = man.slotChunk(slot);
         if (sc.loaded && (sc.cx - cx).abs() <= 1 && (sc.cz - cz).abs() <= 1) {
             edited = digestChunk(man, edited, sc, true);
         }
@@ -109,12 +109,12 @@ fn editAround(man : ChunkManager, at : IVec3) : void {
  * @return the digest with the chunk folded in
  */
 fn digestChunk(man : ChunkManager, d : Digest, sc : SlotChunk, shellOnly : bool) : Digest {
-    let out : Digest = d;
-    const s : i32 = World::CHUNK_SIZE;
+    let mut out : Digest = d;
+    let s : i32 = World::CHUNK_SIZE;
     for (lz of 0..s) {
         for (lx of 0..s) {
             for (y of 0..World::HEIGHT) {
-                const cell : IVec3 = ivec3(sc.cx * s + lx, y, sc.cz * s + lz);
+                let cell : IVec3 = ivec3(sc.cx * s + lx, y, sc.cz * s + lz);
                 if (!shellOnly || isShell(man, cell)) {
                     out = fold(out, man.sunlitGet(cell), man.skyaccessGet(cell), man.bounceGet(cell));
                 }
@@ -156,11 +156,11 @@ fn isShell(man : ChunkManager, cell : IVec3) : bool {
  * @return the digest with the cell folded in
  */
 fn fold(d : Digest, sun : i32, sky : i32, bounce : i32) : Digest {
-    let h : i32 = d.hash;
+    let mut h : i32 = d.hash;
     h = (h ^ sun) * 16777619;
     h = (h ^ sky) * 16777619;
     h = (h ^ bounce) * 16777619;
-    const open : bool = sun == UNBAKED_SUN && sky == UNBAKED_SKY && bounce == UNBAKED_BOUNCE;
+    let open : bool = sun == UNBAKED_SUN && sky == UNBAKED_SKY && bounce == UNBAKED_BOUNCE;
     return Digest {
         hash: h,
         cells: d.cells + 1,

@@ -10,6 +10,16 @@
 class Light {
     static QUEUE_CAP : i32 = 65536;   // flood-fill stack capacity (cells)
 
+    // ── The light task's cadence ────────────────────────────────
+    // The bake is incremental — a bounded number of chunks per tick — so the
+    // loop's sleep is what sets how fast the shadows follow a walking player.
+    // A tick that still owes work comes back at once; an idle world sleeps the
+    // long interval. Neither value is free: the sleep is also the loop's only
+    // suspension point, so it is what yields its carrier to the frame's tasks
+    // (Axle tasks are cooperative, and a loop that never suspends starves them).
+    static TICK_BUSY_MS : i64 = 1;    // sleep after a tick that found work
+    static TICK_IDLE_MS : i64 = 8;    // sleep after a tick that found none
+
     // ── The sun's share, and the sky's ──────────────────────────
     // The one rule the whole engine is built around: THE LIGHT COMES FROM THE
     // SUN. `AMBIENT` is the sky's share on a surface that faces it squarely, and

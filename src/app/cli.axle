@@ -49,7 +49,7 @@ fn snapDeadline() : i64 {
         try {
             if (argAt(i) == "--snap") {
                 if (i + 1 < argc()) {
-                    const ms : i64 = argAt(i + 1).toI64();
+                    let ms : i64 = argAt(i + 1).toI64();
                     if (ms > 0) {
                         return ms;
                     }
@@ -77,12 +77,12 @@ fn snapDeadline() : i64 {
  * @return whether the view is pinned, and the yaw / pitch it is pinned to
  */
 fn lookPin() : (on: bool, yaw: f64, pitch: f64) {
-    const toRad : f64 = 3.14159265358979 / 180.0;
+    let toRad : f64 = 3.14159265358979 / 180.0;
     for (i of 1..argc()) {
         try {
             if (flagWith(i, "--look", 2, "two angles in degrees")) {
-                const yaw : f64 = argAt(i + 1).toF64() * toRad;
-                const pitch : f64 = argAt(i + 2).toF64() * toRad;
+                let yaw : f64 = argAt(i + 1).toF64() * toRad;
+                let pitch : f64 = argAt(i + 2).toF64() * toRad;
                 return (true, yaw, pitch);
             }
         } catch e : IndexOutOfBoundsException {
@@ -135,8 +135,8 @@ fn startColumn(clock : Clock) : (x: i32, z: i32) {
     for (i of 1..argc()) {
         try {
             if (flagWith(i, "--at", 2, "two whole numbers")) {
-                const x : i32 = argAt(i + 1).toI64() as i32;
-                const z : i32 = argAt(i + 2).toI64() as i32;
+                let x : i32 = argAt(i + 1).toI64() as i32;
+                let z : i32 = argAt(i + 2).toI64() as i32;
                 return (x, z);
             }
         } catch e : IndexOutOfBoundsException {
@@ -162,8 +162,8 @@ fn windowSize() : (w: i32, h: i32) {
     for (i of 1..argc()) {
         try {
             if (flagWith(i, "--size", 2, "two whole numbers")) {
-                const w : i32 = argAt(i + 1).toI64() as i32;
-                const h : i32 = argAt(i + 2).toI64() as i32;
+                let w : i32 = argAt(i + 1).toI64() as i32;
+                let h : i32 = argAt(i + 2).toI64() as i32;
                 if (w >= 320 && h >= 240) {
                     return (w, h);
                 }

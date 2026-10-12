@@ -197,7 +197,7 @@ fn biomeDef(b : BiomeId) : BiomeDef {
  * @return the surface block id
  */
 fn biomeSurface(b : BiomeId, height : i32) : Block {
-    const d : BiomeDef = biomeDef(b);
+    let d : BiomeDef = biomeDef(b);
     return match d.surfMode {
         // Snow on the peaks, bare stone higher up, grass at the foot.
         SurfaceRule::Mountain => mountainSurface(height),
@@ -271,7 +271,7 @@ fn biomeAt(temp : f64, humid : f64, height : i32) : BiomeId {
 
     // Cool the climate with altitude, so foothills and uplands read a little
     // colder than the plain below them.
-    let t : f64 = temp - ((height - World::SEA_LEVEL) as f64) * Noise::ALTITUDE_COOLING;
+    let mut t : f64 = temp - ((height - World::SEA_LEVEL) as f64) * Noise::ALTITUDE_COOLING;
     if (t < 0.0) {
         t = 0.0;
     }

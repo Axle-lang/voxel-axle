@@ -103,10 +103,10 @@ fn btnY(fbH : i32, i : i32, ui : UiScale) : i32 {
  * @return the button index, or -1 if none.
  */
 fn menuHit(fbW : i32, fbH : i32, mx : i32, my : i32) : i32 {
-    const ui : UiScale = uiScaleFor(fbH);
+    let ui : UiScale = uiScaleFor(fbH);
     for (i of 0..2) {
-        const bx : i32 = btnX(fbW, ui);
-        const by : i32 = btnY(fbH, i, ui);
+        let bx : i32 = btnX(fbW, ui);
+        let by : i32 = btnY(fbH, i, ui);
         if (mx >= bx && mx < bx + btnW(ui) && my >= by && my < by + btnH(ui)) {
             return i;
         }
@@ -148,13 +148,13 @@ fn drawButton(
     hover : i32,
     ui : UiScale
 ) : void {
-    const bx : i32 = btnX(f.w, ui);
-    const by : i32 = btnY(f.h, i, ui);
-    const on : bool = hover == i;
+    let bx : i32 = btnX(f.w, ui);
+    let by : i32 = btnY(f.h, i, ui);
+    let on : bool = hover == i;
 
-    let bg : i32 = Color::packBytes(44, 48, 58);
-    let edge : i32 = Color::packBytes(70, 76, 90);
-    let txt : i32 = Color::packBytes(210, 214, 224);
+    let mut bg : i32 = Color::packBytes(44, 48, 58);
+    let mut edge : i32 = Color::packBytes(70, 76, 90);
+    let mut txt : i32 = Color::packBytes(210, 214, 224);
     if (on) {
         bg = Color::packBytes(86, 180, 90);
         edge = Color::packBytes(150, 230, 150);
@@ -206,18 +206,18 @@ struct PauseWidget : Widget {
     fn draw(self, f : Frame) : void {
         f.shade(f.clipRect(), 0x000000, VEIL_NUM, VEIL_DEN);
 
-        const ui : UiScale = uiScaleFor(f.h);
-        const px : i32 = panelX(f.w, ui);
-        const py : i32 = panelY(f.h, ui);
-        const pw : i32 = panelW(ui);
-        const ph : i32 = panelH(ui);
+        let ui : UiScale = uiScaleFor(f.h);
+        let px : i32 = panelX(f.w, ui);
+        let py : i32 = panelY(f.h, ui);
+        let pw : i32 = panelW(ui);
+        let ph : i32 = panelH(ui);
 
         // Black as 1, 1, 1: a GPU overlay keys pure black out as "nothing drawn here".
-        const dropShadow : Rect = Rect::make(px + ui.px(6), py + ui.px(8), pw, ph);
+        let dropShadow : Rect = Rect::make(px + ui.px(6), py + ui.px(8), pw, ph);
         f.fillRect(dropShadow, Color::packBytes(1, 1, 1));
-        const panel : Rect = Rect::make(px, py, pw, ph);
+        let panel : Rect = Rect::make(px, py, pw, ph);
         f.fillRect(panel, Color::packBytes(24, 26, 32));
-        const accentBar : Rect = Rect::make(px, py, pw, ui.px(6));
+        let accentBar : Rect = Rect::make(px, py, pw, ui.px(6));
         f.fillRect(accentBar, Color::packBytes(86, 180, 90));
         border(
             f,
@@ -233,9 +233,9 @@ struct PauseWidget : Widget {
         // coverage levels survive and the letters keep their edges. It rides the
         // overlay scale, which is why that scale carries a separate whole-step
         // number for text.
-        const title : string = "PAUSED";
-        const ts : i32 = ui.text + 1;
-        const tw : i32 = self.font.widthScaled(title, ts);
+        let title : string = "PAUSED";
+        let ts : i32 = ui.text + 1;
+        let tw : i32 = self.font.widthScaled(title, ts);
         self.font.drawScaled(
             f,
             px + (pw - tw) / 2,
@@ -252,13 +252,13 @@ struct PauseWidget : Widget {
         // actually looks. They used to be one line printed to stdout at
         // startup, which is a console a windowed game's player does not
         // have open and cannot get back.
-        const ink : i32 = Color::packBytes(150, 154, 166);
-        const keys : i32 = Color::packBytes(196, 202, 214);
+        let ink : i32 = Color::packBytes(150, 154, 166);
+        let keys : i32 = Color::packBytes(196, 202, 214);
         // Anchored under the LAST button rather than measured back from the
         // panel's bottom: the buttons are laid out from the top, so a
         // bottom-relative row moves under them the moment the panel grows.
-        const line : i32 = btnY(f.h, 1, ui) + btnH(ui) + ui.px(20);
-        const step : i32 = ui.px(16);
+        let line : i32 = btnY(f.h, 1, ui) + btnH(ui) + ui.px(20);
+        let step : i32 = ui.px(16);
         controlLine(
             f,
             self.font,
@@ -325,7 +325,7 @@ struct PauseWidget : Widget {
  * @param hover  index of the hovered button.
  */
 fn drawPauseMenu(f : Frame, font : BitmapFont, hover : i32) : void {
-    const w : PauseWidget = PauseWidget { hover, font };
+    let w : PauseWidget = PauseWidget { hover, font };
     w.draw(f);
 }
 
@@ -354,8 +354,8 @@ fn controlLine(
     ink : i32,
     ui : UiScale
 ) : void {
-    const base : i32 = font.baselineFor(top, 1);
-    const inset : i32 = ui.px(22);
+    let base : i32 = font.baselineFor(top, 1);
+    let inset : i32 = ui.px(22);
     font.draw(f, px + inset, base, what, ink);
     font.drawRight(f, px + pw - inset, base, keys, keyInk);
 }

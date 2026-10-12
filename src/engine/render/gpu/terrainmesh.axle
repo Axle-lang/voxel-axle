@@ -81,8 +81,8 @@ class ChunkMeshBuild {
         self.solid.clear();
         self.twoSided.clear();
         self.lcurve = lcurve;
-        const faces : FaceMesh = world.faces();
-        const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        let faces : FaceMesh = world.faces();
+        let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
         for (i of 0..faces.fcount[slot]) {
             self.addFace(world, faceRefOf(faces, base + i, origin));
         }
@@ -94,20 +94,20 @@ class ChunkMeshBuild {
      * @param f      the face
      */
     fn addFace(mut self, world : dyn TerrainView, f : FaceRef) : void {
-        const cell : IVec3 = ivec3(
+        let cell : IVec3 = ivec3(
             faceX(f.faces, f.idx) + f.origin.x,
             f.faces.fy[f.idx] as i32,
             faceZ(f.faces, f.idx) + f.origin.z
         );
-        const probe : IVec3 = ivec3(cell.x + f.step.x, cell.y + f.step.y, cell.z + f.step.z);
-        const run : i32 = faceRun(f.faces, f.idx);
-        const step : i32 = self.shadowStep(world, f, probe, run);
+        let probe : IVec3 = ivec3(cell.x + f.step.x, cell.y + f.step.y, cell.z + f.step.z);
+        let run : i32 = faceRun(f.faces, f.idx);
+        let step : i32 = self.shadowStep(world, f, probe, run);
 
-        let start : i32 = 0;
+        let mut start : i32 = 0;
         while (start < run) {
-            const len : i32 = (run - start).min(step);
-            let advX : i32 = 0;
-            let advZ : i32 = 0;
+            let len : i32 = (run - start).min(step);
+            let mut advX : i32 = 0;
+            let mut advZ : i32 = 0;
             if (f.naxis == 0) {
                 advZ = start;
             } else {
@@ -137,16 +137,16 @@ class ChunkMeshBuild {
         if (run < 2 || (Mem::byteAt(f.faces.flight, (f.idx * 8) as i64) >> 4) == 0) {
             return run;
         }
-        let dx : i32 = 1;
-        let dz : i32 = 0;
+        let mut dx : i32 = 1;
+        let mut dz : i32 = 0;
         if (f.naxis == 0) {
             dx = 0;
             dz = 1;
         }
-        let lo : i32 = 255;
-        let hi : i32 = 0;
+        let mut lo : i32 = 255;
+        let mut hi : i32 = 0;
         for (i of 0..run) {
-            const v : i32 = world.sunlitGet(ivec3(probe.x + dx * i, probe.y, probe.z + dz * i));
+            let v : i32 = world.sunlitGet(ivec3(probe.x + dx * i, probe.y, probe.z + dz * i));
             lo = lo.min(v);
             hi = hi.max(v);
         }
@@ -160,21 +160,21 @@ class ChunkMeshBuild {
      * @param sp     the span
      */
     fn addSpan(mut self, world : dyn TerrainView, f : FaceRef, sp : Span) : void {
-        let runX : i32 = 1;
-        let runZ : i32 = 1;
+        let mut runX : i32 = 1;
+        let mut runZ : i32 = 1;
         if (f.naxis == 0) {
             runZ = sp.run;
         } else {
             runX = sp.run;
         }
 
-        const into : MeshBuilder = drawsBothSides(f) ? self.twoSided : self.solid;
-        const first : i32 = into.vertices();
+        let into : MeshBuilder = drawsBothSides(f) ? self.twoSided : self.solid;
+        let first : i32 = into.vertices();
         for (k of 0..4) {
-            const b : i32 = (f.dir * 4 + k) * 3;
-            const off : IVec3 = ivec3(self.geom.coff[b], self.geom.coff[b + 1], self.geom.coff[b + 2]);
-            const smp : CornerSample = world.cornerSample(cornerProbe(sp.probe, off, f.naxis, runX - 1, runZ - 1));
-            const word : i32 = cornerWord(f, k);
+            let b : i32 = (f.dir * 4 + k) * 3;
+            let off : IVec3 = ivec3(self.geom.coff[b], self.geom.coff[b + 1], self.geom.coff[b + 2]);
+            let smp : CornerSample = world.cornerSample(cornerProbe(sp.probe, off, f.naxis, runX - 1, runZ - 1));
+            let word : i32 = cornerWord(f, k);
             self.lum[k] = self.cornerLum(word, smp);
             // The crate's `Vec3` shadows smalt's, which is reached through `Vec4`.
             into.vertexRaw(RawVertex {
@@ -203,7 +203,7 @@ class ChunkMeshBuild {
         // dark corner wraps the edge it sits on instead of smearing across the face; and
         // its triangles turn counter-clockwise seen from the front, which is the side the
         // pipeline keeps.
-        const seam13 : bool = self.lum[0] + self.lum[2] > self.lum[1] + self.lum[3];
+        let seam13 : bool = self.lum[0] + self.lum[2] > self.lum[1] + self.lum[3];
         if (self.reversed[f.dir]) {
             if (seam13) {
                 into.quad(first + 1, first, first + 3, first + 2);
@@ -227,13 +227,13 @@ class ChunkMeshBuild {
      * @return its brightness
      */
     fn cornerLum(self, word : i32, smp : CornerSample) : f64 {
-        const keep : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * (smp.sun as f64) / 255.0;
-        const skyAO : f64 = Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * (smp.sky as f64) / 255.0;
-        const sky : f64 = self.levelLight(word >> WORD_SKY) * skyAO * keep;
-        const block : f64 = self.levelLight(word >> WORD_RED)
+        let keep : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * (smp.sun as f64) / 255.0;
+        let skyAO : f64 = Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * (smp.sky as f64) / 255.0;
+        let sky : f64 = self.levelLight(word >> WORD_SKY) * skyAO * keep;
+        let block : f64 = self.levelLight(word >> WORD_RED)
             + self.levelLight(word >> WORD_GREEN)
             + self.levelLight(word >> WORD_BLUE);
-        const ao : f64 = 1.0 - Light::AO_STRENGTH * ((3 - ((word >> WORD_AO) & 3)) as f64) / 3.0;
+        let ao : f64 = 1.0 - Light::AO_STRENGTH * ((3 - ((word >> WORD_AO) & 3)) as f64) / 3.0;
         return ao * (3.0 * sky + block);
     }
 
@@ -257,10 +257,10 @@ class ChunkMeshBuild {
  * @return true when the table's order must be reversed
  */
 fn windsBackward(geom : FaceTable, dir : i32) : bool {
-    const c0 : Vec3 = cornerOffset(geom, dir, 0);
-    const c1 : Vec3 = cornerOffset(geom, dir, 1);
-    const c2 : Vec3 = cornerOffset(geom, dir, 2);
-    const s : IVec3 = stepOf(dir);
+    let c0 : Vec3 = cornerOffset(geom, dir, 0);
+    let c1 : Vec3 = cornerOffset(geom, dir, 1);
+    let c2 : Vec3 = cornerOffset(geom, dir, 2);
+    let s : IVec3 = stepOf(dir);
     return c1.sub(c0).cross(c2.sub(c0)).dot(vec3(s.x as f64, s.y as f64, s.z as f64)) > 0.0;
 }
 
@@ -272,7 +272,7 @@ fn windsBackward(geom : FaceTable, dir : i32) : bool {
  * @return the offset
  */
 fn cornerOffset(geom : FaceTable, dir : i32, k : i32) : Vec3 {
-    const b : i32 = (dir * 4 + k) * 3;
+    let b : i32 = (dir * 4 + k) * 3;
     return vec3(geom.coff[b] as f64, geom.coff[b + 1] as f64, geom.coff[b + 2] as f64);
 }
 
@@ -284,9 +284,9 @@ fn cornerOffset(geom : FaceTable, dir : i32, k : i32) : Vec3 {
  * @return the face
  */
 fn faceRefOf(faces : FaceMesh, idx : i32, origin : IVec3) : FaceRef {
-    const packed : i32 = faces.ftile[idx] as i32;
-    const dir : i32 = packed / 256;
-    const water : bool = faceKind(faces, idx) == (FaceKind::Water as i32);
+    let packed : i32 = faces.ftile[idx] as i32;
+    let dir : i32 = packed / 256;
+    let water : bool = faceKind(faces, idx) == (FaceKind::Water as i32);
     return FaceRef {
         faces,
         idx,
@@ -306,7 +306,7 @@ fn faceRefOf(faces : FaceMesh, idx : i32, origin : IVec3) : FaceRef {
  * @return the step
  */
 fn stepOf(dir : i32) : IVec3 {
-    const sign : i32 = (dir % 2) == 0 ? 1 : 0 - 1;
+    let sign : i32 = (dir % 2) == 0 ? 1 : 0 - 1;
     return match dir / 2 {
         0 => ivec3(sign, 0, 0),
         1 => ivec3(0, sign, 0),
@@ -321,7 +321,7 @@ fn stepOf(dir : i32) : IVec3 {
  * @return true when it is drawn from both sides
  */
 fn drawsBothSides(f : FaceRef) : bool {
-    const partial : bool = faceKind(f.faces, f.idx) == (FaceKind::Partial as i32);
+    let partial : bool = faceKind(f.faces, f.idx) == (FaceKind::Partial as i32);
     return f.water || (partial && f.dir == 2);
 }
 
@@ -333,10 +333,10 @@ fn drawsBothSides(f : FaceRef) : bool {
  * @return the word
  */
 fn cornerWord(f : FaceRef, k : i32) : i32 {
-    const at : i64 = ((f.idx * 4 + k) * 2) as i64;
-    const skyRed : i32 = Mem::byteAt(f.faces.flight, at);
-    const greenBlue : i32 = Mem::byteAt(f.faces.flight, at + 1);
-    const ao : i32 = (Mem::byteAt(f.faces.fao, f.idx as i64) >> (2 * k)) & 3;
+    let at : i64 = ((f.idx * 4 + k) * 2) as i64;
+    let skyRed : i32 = Mem::byteAt(f.faces.flight, at);
+    let greenBlue : i32 = Mem::byteAt(f.faces.flight, at + 1);
+    let ao : i32 = (Mem::byteAt(f.faces.fao, f.idx as i64) >> (2 * k)) & 3;
     return f.tile
         | (((skyRed >> 4) & 15) << WORD_SKY)
         | ((skyRed & 15) << WORD_RED)

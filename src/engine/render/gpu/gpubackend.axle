@@ -115,12 +115,12 @@ class GpuBackend : RenderBackend {
      * @param win    the window to show it in
      */
     pub(crate) fn draw(mut self, frame : FrameDesc, world : dyn TerrainView, win : Window) : void {
-        const eyeChunk : IVec3 = eyeChunkOf(frame.cam);
-        const origin : IVec3 = ivec3(eyeChunk.x * World::CHUNK_SIZE, 0, eyeChunk.z * World::CHUNK_SIZE);
+        let eyeChunk : IVec3 = eyeChunkOf(frame.cam);
+        let origin : IVec3 = ivec3(eyeChunk.x * World::CHUNK_SIZE, 0, eyeChunk.z * World::CHUNK_SIZE);
 
-        const start : i64 = monotonicNanos();
+        let start : i64 = monotonicNanos();
         self.terrain.refresh(self.gfx, world, eyeChunk, frame.lcurve);
-        const meshed : i64 = monotonicNanos();
+        let meshed : i64 = monotonicNanos();
 
         self.entities.rebuild(frame, origin);
         self.gfx.updateMesh(self.entityMesh, self.entities.mesh);
@@ -129,7 +129,7 @@ class GpuBackend : RenderBackend {
         }
         self.describe(frame, world, origin);
         self.drawOverlay(frame);
-        const described : i64 = monotonicNanos();
+        let described : i64 = monotonicNanos();
 
         if (self.capturePath.byteLength != 0) {
             self.gfx.captureNext();
@@ -137,7 +137,7 @@ class GpuBackend : RenderBackend {
         self.gfx.render(self.scene, win);
         self.keepCapture();
 
-        const shown : i64 = monotonicNanos();
+        let shown : i64 = monotonicNanos();
         self.times.meshes += (meshed - start) / 1000;
         self.times.scene += (described - meshed) / 1000;
         self.times.submit += (shown - described) / 1000;
@@ -152,7 +152,7 @@ class GpuBackend : RenderBackend {
      * @param origin  the render origin
      */
     fn describe(mut self, frame : FrameDesc, world : dyn TerrainView, origin : IVec3) : void {
-        const cam : Camera = frame.cam;
+        let cam : Camera = frame.cam;
         self.scene.reset();
         self.scene.setViewProjection(
             clipMatrix(
@@ -177,7 +177,7 @@ class GpuBackend : RenderBackend {
         self.terrain.addTo(self.scene, world, self.atlas, origin);
 
         if (!self.entities.mesh.isEmpty()) {
-            let bothSides : Material = Material::baked();
+            let mut bothSides : Material = Material::baked();
             bothSides.cullBackface = false;
             self.scene.useShader(self.shaders.entity);
             self.scene.add(self.entityMesh, self.atlas, bothSides, Mat4::identity());
@@ -193,14 +193,14 @@ class GpuBackend : RenderBackend {
      * @param frame  what this frame shows
      */
     fn addPasses(mut self, frame : FrameDesc) : void {
-        const none : TextureHandle = TextureHandle::none();
-        let haze : ShaderHandle = ShaderHandle::none();
+        let none : TextureHandle = TextureHandle::none();
+        let mut haze : ShaderHandle = ShaderHandle::none();
         if (frame.clock.underwater) {
             haze = self.shaders.underwater;
         } else if (frame.shafts.on) {
             haze = self.shaders.godRays;
         }
-        const bloom : bool = Render::BLOOM_ON;
+        let bloom : bool = Render::BLOOM_ON;
 
         // The bloom adds its glow to the frame it was taken from: the last pass before
         // it is kept for that.
@@ -255,7 +255,7 @@ class GpuBackend : RenderBackend {
         if (self.capturePath.byteLength == 0) {
             return;
         }
-        const px : FramePixels = self.gfx.captured();
+        let px : FramePixels = self.gfx.captured();
         if (!px.isEmpty()) {
             self.written = Bmp::write(self.capturePath, px.frame());
             self.capturePath = "";
@@ -318,7 +318,7 @@ class GpuBackend : RenderBackend {
 
     /** Print the per-frame averages. */
     pub(crate) fn report(self) : void {
-        const n : i64 = self.times.frames;
+        let n : i64 = self.times.frames;
         if (n == 0) {
             return;
         }
@@ -342,6 +342,6 @@ class GpuBackend : RenderBackend {
  * @return the chunk's coordinates, y 0
  */
 fn eyeChunkOf(cam : Camera) : IVec3 {
-    const size : f64 = World::CHUNK_SIZE as f64;
+    let size : f64 = World::CHUNK_SIZE as f64;
     return ivec3((cam.eye.x / size).floorToInt() as i32, 0, (cam.eye.z / size).floorToInt() as i32);
 }

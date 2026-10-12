@@ -31,7 +31,7 @@ pub class Assets {
      * @return how many bytes the last attempted read delivered
      */
     pub(crate) static fn loadAtlas(base : i64, bytes : i64) : i64 {
-        let got : i64 = AssetFile::readInto(Assets::ATLAS_FILE, base, bytes);
+        let mut got : i64 = AssetFile::readInto(Assets::ATLAS_FILE, base, bytes);
         if (got == bytes) {
             return got;
         }

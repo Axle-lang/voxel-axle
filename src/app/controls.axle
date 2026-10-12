@@ -45,7 +45,7 @@ struct Intent {
  * @return the combined axis value (-1.0, 0.0, or 1.0)
  */
 fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
-    let v : f64 = 0.0;
+    let mut v : f64 = 0.0;
     if (events.isKeyDown(plus)) {
         v += 1.0;
     }
@@ -62,10 +62,10 @@ fn axis(events : Events, plus : Scancode, minus : Scancode) : f64 {
  * @return the intent, and the sprint latch to carry into the next frame
  */
 fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
-    const fwd : f64 = axis(events, Keys::forward(), Keys::back());
-    const strafe : f64 = axis(events, Keys::right(), Keys::left());
+    let fwd : f64 = axis(events, Keys::forward(), Keys::back());
+    let strafe : f64 = axis(events, Keys::right(), Keys::left());
 
-    let latch : bool = latched;
+    let mut latch : bool = latched;
     if (events.isKeyDown(Keys::sprint())) {
         latch = true;
     }
@@ -73,7 +73,7 @@ fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
         latch = false;
     }
 
-    const intent : Intent = Intent {
+    let intent : Intent = Intent {
         fwd,
         strafe,
         sprint: latch,
@@ -94,14 +94,14 @@ fn readIntent(events : Events, latched : bool) : (intent: Intent, latch: bool) {
  * @return the swallow flag for the next frame
  */
 fn applyLook(events : Events, p : Player, swallow : bool, pinned : bool) : bool {
-    const mdx : i32 = events.mouseDX();
-    const mdy : i32 = events.mouseDY();
+    let mdx : i32 = events.mouseDX();
+    let mdy : i32 = events.mouseDY();
     if (swallow) {
         return false;
     }
     if (!pinned) {
-        const dYaw : f64 = 0.0 - (mdx as f64) * Motion::MOUSE_SENS;
-        const dPitch : f64 = 0.0 - (mdy as f64) * Motion::MOUSE_SENS;
+        let dYaw : f64 = 0.0 - (mdx as f64) * Motion::MOUSE_SENS;
+        let dPitch : f64 = 0.0 - (mdy as f64) * Motion::MOUSE_SENS;
         p.look(dYaw, dPitch);
     }
     return false;
@@ -130,7 +130,7 @@ fn readHotbar(events : Events, p : Player) : void {
  * @return whether both keys are down now
  */
 fn readGameMode(events : Events, p : Player, wasBoth : bool) : bool {
-    const both : bool = events.isKeyDown(Keys::gameModeA())
+    let both : bool = events.isKeyDown(Keys::gameModeA())
         && events.isKeyDown(Keys::gameModeB());
     if (both && !wasBoth) {
         p.toggleGameMode();

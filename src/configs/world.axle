@@ -22,7 +22,7 @@ class World {
     // Streamed chunk (re)builds per frame: spreads the cost of entering new chunks
     // over several frames (nearest-first) instead of a single stutter when crossing
     // a chunk border. Generation stays on the main thread (the world is read every
-    // tick by physics + the render + the light thread, so it must not change
+    // tick by physics + the render + the light task, so it must not change
     // mid-frame), so this amortises rather than offloads.
     static CHUNK_LOADS_PER_FRAME : i32 = 2;
 

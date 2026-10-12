@@ -86,13 +86,13 @@ class MobView {
      * @return corners in `clipOut`, under 3 when nothing survives
      */
     fn clipNear(mut self, n : i32) : i32 {
-        const near : f64 = Screen::NEAR_PLANE;
-        let m : i32 = 0;
+        let near : f64 = Screen::NEAR_PLANE;
+        let mut m : i32 = 0;
         for (i of 0..n) {
-            const cur : ClipVert = self.clipIn[i];
-            const nxt : ClipVert = self.clipIn[(i + 1) % n];
-            const curIn : bool = cur.p.z >= near;
-            const nxtIn : bool = nxt.p.z >= near;
+            let cur : ClipVert = self.clipIn[i];
+            let nxt : ClipVert = self.clipIn[(i + 1) % n];
+            let curIn : bool = cur.p.z >= near;
+            let nxtIn : bool = nxt.p.z >= near;
             if (curIn) {
                 self.clipOut[m] = ClipVert {
                     p: cur.p,
@@ -102,7 +102,7 @@ class MobView {
                 m++;
             }
             if (curIn != nxtIn) {
-                const t : f64 = (near - cur.p.z) / (nxt.p.z - cur.p.z);
+                let t : f64 = (near - cur.p.z) / (nxt.p.z - cur.p.z);
                 self.clipOut[m] = ClipVert {
                     p: vec3(
                         cur.p.x + (nxt.p.x - cur.p.x) * t,
@@ -125,7 +125,7 @@ class MobView {
      * @return its screen position and inverse depth
      */
     fn flatAt(self, cam : Camera, k : i32) : ScreenVert {
-        const pr : Projected = cam.screenOf(self.clipOut[k].p);
+        let pr : Projected = cam.screenOf(self.clipOut[k].p);
         return ScreenVert {
             sx: pr.sx,
             sy: pr.sy,
@@ -143,8 +143,8 @@ class MobView {
      * @return the vertex
      */
     fn screenAt(self, cam : Camera, k : i32, tr : f64, tg : f64, tb : f64) : RasterVert {
-        const c : ClipVert = self.clipOut[k];
-        const pr : Projected = cam.screenOf(c.p);
+        let c : ClipVert = self.clipOut[k];
+        let pr : Projected = cam.screenOf(c.p);
         return RasterVert {
             sx: pr.sx as f32,
             sy: pr.sy as f32,
@@ -183,9 +183,9 @@ class MobView {
         mat : BoxSurface,
         scene : MobScene
     ) : void {
-        const mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
-        const my : f64 = (a.y + b.y + c.y + d.y) * 0.25;
-        const mz : f64 = (a.z + b.z + c.z + d.z) * 0.25;
+        let mx : f64 = (a.x + b.x + c.x + d.x) * 0.25;
+        let my : f64 = (a.y + b.y + c.y + d.y) * 0.25;
+        let mz : f64 = (a.z + b.z + c.z + d.z) * 0.25;
         if ((cam.eye.x - mx) * n.x + (cam.eye.y - my) * n.y + (cam.eye.z - mz) * n.z <= 0.0) {
             return;
         }
@@ -212,25 +212,25 @@ class MobView {
             u: 0.0,
             v: 0.0,
         };
-        const corners : i32 = self.clipNear(4);
+        let corners : i32 = self.clipNear(4);
         if (corners < 3) {
             return;
         }
 
-        const lit : BoxFaceLight = boxFaceLight(n, mat.light, mat.hurt, scene.ds);
-        const tr : f64 = lit.tint.r;
-        const tg : f64 = lit.tint.g;
-        const tb : f64 = lit.tint.b;
-        const textured : bool = Atlas::USE_MOB_TEXTURES && mat.tile >= 0;
-        const col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), lit.bright);
-        const band : Band = Band { x0: 0, x1: fb.w };
+        let lit : BoxFaceLight = boxFaceLight(n, mat.light, mat.hurt, scene.ds);
+        let tr : f64 = lit.tint.r;
+        let tg : f64 = lit.tint.g;
+        let tb : f64 = lit.tint.b;
+        let textured : bool = Atlas::USE_MOB_TEXTURES && mat.tile >= 0;
+        let col : i32 = scene.gam.shade(tintIf(mat.hurt, mat.color), lit.bright);
+        let band : Band = Band { x0: 0, x1: fb.w };
 
         // A fan from the first corner: unclipped, that is (a, b, c) then
         // (a, c, d), the two triangles the quad always was.
-        const v0 : RasterVert = self.screenAt(cam, 0, tr, tg, tb);
+        let v0 : RasterVert = self.screenAt(cam, 0, tr, tg, tb);
         for (k of 1..corners - 1) {
-            const v1 : RasterVert = self.screenAt(cam, k, tr, tg, tb);
-            const v2 : RasterVert = self.screenAt(cam, k + 1, tr, tg, tb);
+            let v1 : RasterVert = self.screenAt(cam, k, tr, tg, tb);
+            let v2 : RasterVert = self.screenAt(cam, k + 1, tr, tg, tb);
             if (textured) {
                 // A mob is drawn straight into the full-width band rather than
                 // queued, so nothing reads the span — filled in anyway, so no
@@ -296,22 +296,22 @@ class MobView {
         mat : BoxSurface,
         scene : MobScene
     ) : void {
-        const c0 : Vec3 = vec3(
+        let c0 : Vec3 = vec3(
             Mem::realOf(self.obx, i0),
             Mem::realOf(self.oby, i0),
             Mem::realOf(self.obz, i0)
         );
-        const c1 : Vec3 = vec3(
+        let c1 : Vec3 = vec3(
             Mem::realOf(self.obx, i1),
             Mem::realOf(self.oby, i1),
             Mem::realOf(self.obz, i1)
         );
-        const c2 : Vec3 = vec3(
+        let c2 : Vec3 = vec3(
             Mem::realOf(self.obx, i2),
             Mem::realOf(self.oby, i2),
             Mem::realOf(self.obz, i2)
         );
-        const c3 : Vec3 = vec3(
+        let c3 : Vec3 = vec3(
             Mem::realOf(self.obx, i3),
             Mem::realOf(self.oby, i3),
             Mem::realOf(self.obz, i3)
@@ -341,28 +341,28 @@ class MobView {
      * @param scene  the per-frame mob context
      */
     pub(crate) fn drawBox(mut self, cam : Camera, fb : FrameBuf, b : MobBox, scene : MobScene) : void {
-        const p : BoxPose = poseOf(b);
+        let p : BoxPose = poseOf(b);
         for (ci of 0..8) {
-            const c : Vec3 = boxCorner(b, p, ci);
+            let c : Vec3 = boxCorner(b, p, ci);
             Mem::putRealOf(self.obx, ci, c.x);
             Mem::putRealOf(self.oby, ci, c.y);
             Mem::putRealOf(self.obz, ci, c.z);
         }
 
-        const skin : BoxSurface = BoxSurface {
+        let skin : BoxSurface = BoxSurface {
             color: b.part.color,
             tile: b.part.skinTile,
             hurt: b.hurt,
             light: b.light,
         };
-        const faceM : BoxSurface = BoxSurface {
+        let faceM : BoxSurface = BoxSurface {
             color: b.part.color,
             tile: b.part.faceTile,
             hurt: b.hurt,
             light: b.light,
         };
         for (i of 0..boxFaceCount(b)) {
-            const f : BoxFace = boxFaceOf(p, i);
+            let f : BoxFace = boxFaceOf(p, i);
             self.oquad(
                 cam,
                 fb,

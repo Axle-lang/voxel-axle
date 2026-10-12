@@ -101,10 +101,10 @@ fn topHeight(steps : i32) : f64 {
  * @return the corner's probe
  */
 fn cornerProbe(cell : IVec3, off : IVec3, naxis : i32, advX : i32, advZ : i32) : CornerProbe {
-    const sgx : i32 = off.x * 2 - 1;
-    const sgy : i32 = off.y * 2 - 1;
-    const sgz : i32 = off.z * 2 - 1;
-    const base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
+    let sgx : i32 = off.x * 2 - 1;
+    let sgy : i32 = off.y * 2 - 1;
+    let sgz : i32 = off.z * 2 - 1;
+    let base : IVec3 = ivec3(cell.x + off.x * advX, cell.y, cell.z + off.z * advZ);
     match naxis {
         0 => {
             return CornerProbe {

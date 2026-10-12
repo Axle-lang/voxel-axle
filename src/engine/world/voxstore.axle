@@ -48,7 +48,7 @@ class VoxData {
      * @param slots  the number of ring slots (span * span)
      */
     constructor(slots : i32) {
-        const s : i32 = World::CHUNK_SIZE;
+        let s : i32 = World::CHUNK_SIZE;
         self.vox = malloc<Block>(slots * s * s * World::HEIGHT);
         self.lvl = malloc<i8>((slots * s * s * World::HEIGHT + 1) / 2);
         self.maxFY = malloc<i16>(slots);
@@ -75,7 +75,7 @@ class VoxStore {
      * @return the flat offset into `vox` (and into the light byte volumes)
      */
     pub(crate) fn voxIdx(self, slot : i32, lx : i32, ly : i32, lz : i32) : i32 {
-        const s : i32 = World::CHUNK_SIZE;
+        let s : i32 = World::CHUNK_SIZE;
         return slot * (s * s * World::HEIGHT) + (lz * s + lx) * World::HEIGHT + ly;
     }
 
@@ -103,7 +103,7 @@ class VoxStore {
      * @param id     the block id to write
      */
     pub(crate) fn setVoxLocal(mut self, slot : i32, local : IVec3, own id : Block) : void {
-        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         self.data.vox[at] = id;
         // A write that says nothing about the level clears it, so a cell
         // never inherits the level of whatever used to be there. Zero is
@@ -130,7 +130,7 @@ class VoxStore {
         own id : Block,
         level : i32
     ) : void {
-        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         self.data.vox[at] = id;
         self.putLevel(at, level);
     }
@@ -145,7 +145,7 @@ class VoxStore {
         if (local.y < 0 || local.y >= World::HEIGHT) {
             return 0;
         }
-        const at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
+        let at : i32 = self.voxIdx(slot, local.x, local.y, local.z);
         return ((self.data.lvl[at >> 1] as i32) >> ((at & 1) * 4)) & 15;
     }
 
@@ -157,8 +157,8 @@ class VoxStore {
      * @param level  0..15
      */
     fn putLevel(mut self, at : i32, level : i32) : void {
-        const shift : i32 = (at & 1) * 4;
-        const kept : i32 = (self.data.lvl[at >> 1] as i32) & (0xF0 >> shift);
+        let shift : i32 = (at & 1) * 4;
+        let kept : i32 = (self.data.lvl[at >> 1] as i32) & (0xF0 >> shift);
         self.data.lvl[at >> 1] = (kept | ((level & 15) << shift)) as i8;
     }
 
@@ -171,7 +171,7 @@ class VoxStore {
      * @param id     the block id to write
      */
     pub(crate) fn setVoxClip(mut self, slot : i32, local : IVec3, id : Block) : void {
-        const s : i32 = World::CHUNK_SIZE;
+        let s : i32 = World::CHUNK_SIZE;
         if (local.x < 0 || local.x >= s || local.z < 0 || local.z >= s) {
             return;
         }

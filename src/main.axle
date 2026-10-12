@@ -76,7 +76,7 @@ fn main() : i32 {
     }
 
     try {
-        const game = new Game();
+        let game = new Game();
         defer game.close();
         game.play();
         return 0;

@@ -33,7 +33,7 @@ use crate::configs::cloud::{ Cloud };
 /**
  * The cloud field at one instant: the noise, plus how far the wind has carried
  * it. A value struct, so it crosses `spawn` into the sky's worker rows and onto
- * the light thread without being shared.
+ * the light task without being shared.
  */
 struct CloudField {
     pub(crate) driftX : f64,
@@ -55,13 +55,13 @@ struct CloudField {
      * @return the band fraction this column may fill, 0..1
      */
     pub(crate) fn coverAt(self, wx : f64, wz : f64, lod : f64) : f64 {
-        const x : f64 = wx * Cloud::SHAPE_SCALE + self.driftX;
-        const z : f64 = wz * Cloud::SHAPE_SCALE + self.driftZ;
-        const c : f64 = fbm(x, z, Noise::SEED + 7001, 4);
+        let x : f64 = wx * Cloud::SHAPE_SCALE + self.driftX;
+        let z : f64 = wz * Cloud::SHAPE_SCALE + self.driftZ;
+        let c : f64 = fbm(x, z, Noise::SEED + 7001, 4);
 
         // `coverage` moves the THRESHOLD, so more of it fills more sky rather
         // than making the same clouds heavier.
-        const lo : f64 = 1.0 - self.coverage;
+        let lo : f64 = 1.0 - self.coverage;
 
         // The shoulder widens as the sample coarsens. A cloud's EDGE is the
         // sharpest thing in the field, and near the horizon a table cell spans
@@ -69,7 +69,7 @@ struct CloudField {
         // shoulder narrower than the sample that had to carry it. Softening it
         // exactly as far as the cell is wide is the same filtering the 3-D
         // detail gets, applied to the one part of the field that is not detail.
-        const soft : f64 = Cloud::EDGE_SOFT + (1.0 - lod) * Cloud::EDGE_WIDEN;
+        let soft : f64 = Cloud::EDGE_SOFT + (1.0 - lod) * Cloud::EDGE_WIDEN;
         return smoothstep(lo, lo + soft, c);
     }
 
@@ -107,7 +107,7 @@ struct CloudField {
         if (cov <= 0.0) {
             return 0.0;
         }
-        const h : f64 = (at.y - Cloud::BASE) / Cloud::THICK_MAX;
+        let h : f64 = (at.y - Cloud::BASE) / Cloud::THICK_MAX;
         if (h < 0.0 || h > 1.0) {
             return 0.0;
         }
@@ -116,7 +116,7 @@ struct CloudField {
         // which is where the random depth comes from. Cumulus sit on a level
         // bottom because that is the altitude their water condenses at, and they
         // billow up from it by however much they have.
-        const prof : f64 = smoothstep(0.0, Cloud::BASE_SOFT, h)
+        let prof : f64 = smoothstep(0.0, Cloud::BASE_SOFT, h)
             * smoothstep(0.0, Cloud::TOP_SOFT, self.heightOf(cov) - h);
         if (prof <= 0.0) {
             return 0.0;
@@ -136,7 +136,7 @@ struct CloudField {
         // Thresholding the noise instead lets the mass be absent wherever the
         // field happens to be low — INCLUDING mid-column. That is what makes a
         // hole with sky behind it, and an overhang above it.
-        let n : f64 = fbm3(
+        let mut n : f64 = fbm3(
             (at.x + self.driftX * Cloud::DRIFT_TO_WORLD) * Cloud::DETAIL_SCALE,
             at.y * Cloud::DETAIL_SCALE_Y,
             (at.z + self.driftZ * Cloud::DRIFT_TO_WORLD) * Cloud::DETAIL_SCALE,
@@ -151,7 +151,7 @@ struct CloudField {
         // the distribution outward is what gives the field both real voids and
         // real cores rather than an even haze.
         n = (n - 0.5) * Cloud::CONTRAST + 0.5;
-        let d : f64 = n - Cloud::THRESHOLD - (1.0 - prof) * Cloud::PROFILE_BIAS;
+        let mut d : f64 = n - Cloud::THRESHOLD - (1.0 - prof) * Cloud::PROFILE_BIAS;
         if (d < 0.0) {
             d = 0.0;
         }
@@ -169,8 +169,8 @@ struct CloudField {
         // shape, and a worse comb than before. The smooth end is the envelope
         // times the detail's mean, which is the slab a cloud deck resolves to
         // when it is too far away to have a texture.
-        const mean : f64 = prof * Cloud::MEAN_DETAIL;
-        let mix : f64 = d * lod + mean * (1.0 - lod);
+        let mean : f64 = prof * Cloud::MEAN_DETAIL;
+        let mut mix : f64 = d * lod + mean * (1.0 - lod);
         if (mix <= 0.0) {
             return 0.0;
         }
@@ -182,7 +182,7 @@ struct CloudField {
         // marched into a grid of cells, is a staircase of teeth along every
         // cloud's edge whatever the reconstruction does. The ramp makes the
         // outline a ramp too, which is what the edge of a cloud is: wisps.
-        const edge : f64 = cov * Cloud::EDGE_RAMP;
+        let edge : f64 = cov * Cloud::EDGE_RAMP;
         if (edge < 1.0) {
             mix *= edge;
         }
@@ -199,7 +199,7 @@ struct CloudField {
         if (at.y < Cloud::BASE || at.y > Cloud::BASE + Cloud::THICK_MAX) {
             return 0.0;
         }
-        const cov : f64 = self.coverAt(at.x, at.z, 1.0);
+        let cov : f64 = self.coverAt(at.x, at.z, 1.0);
         return self.densityAtCover(cov, at, 1.0, Cloud::VIEW_OCTAVES);
     }
 

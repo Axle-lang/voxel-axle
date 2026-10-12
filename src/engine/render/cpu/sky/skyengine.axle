@@ -120,7 +120,7 @@ class SkyEngine {
         deck : CloudDome,
         fb : FrameBuf
     ) : void {
-        const t : i64 = monotonicNanos();
+        let t : i64 = monotonicNanos();
         self.dome = skyDomeFor(ds);
         self.rays = ViewRays {
             cosy: cam.cosy,
@@ -152,7 +152,7 @@ class SkyEngine {
      * @param fb    the render target
      */
     pub(crate) fn draw(mut self, ds : DayState, cam : Camera, deck : CloudDome, fb : FrameBuf) : void {
-        const t : i64 = monotonicNanos();
+        let t : i64 = monotonicNanos();
         self.paintNow[0] = SkyPaintFrame {
             dome: self.dome,
             rays: self.rays,

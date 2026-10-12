@@ -107,7 +107,7 @@ struct Vec3 : Spatial {
      * @return self / |self|, or self if it has zero length
      */
     pub(crate) fn normalize(self) : Vec3 {
-        const len : f64 = self.length();
+        let len : f64 = self.length();
         if (len == 0.0) {
             return Vec3 {
                 x: self.x,
@@ -116,7 +116,7 @@ struct Vec3 : Spatial {
             };
         }
 
-        const inv : f64 = 1.0 / len;
+        let inv : f64 = 1.0 / len;
         return Vec3 {
             x: self.x * inv,
             y: self.y * inv,
@@ -130,9 +130,9 @@ struct Vec3 : Spatial {
      * @return |self - o|²
      */
     fn distanceSq(self, o : Vec3) : f64 {
-        const dx : f64 = self.x - o.x;
-        const dy : f64 = self.y - o.y;
-        const dz : f64 = self.z - o.z;
+        let dx : f64 = self.x - o.x;
+        let dy : f64 = self.y - o.y;
+        let dz : f64 = self.z - o.z;
         return dx * dx + dy * dy + dz * dz;
     }
 

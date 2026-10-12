@@ -328,7 +328,7 @@ class Mob : Entity, Actor, Wanders {
         if (self.state == MobState::Alive) {
             return 0.0;
         }
-        const df : f64 = Mobs::DEATH_FRAMES as f64;
+        let df : f64 = Mobs::DEATH_FRAMES as f64;
         return (df - (self.timers.deathTimer as f64)) / df;
     }
 
@@ -360,8 +360,8 @@ class Mob : Entity, Actor, Wanders {
      * taking the shortest way around the circle.
      */
     fn turnToward(mut self) : void {
-        const d : f64 = wrapAngle(self.targetHeading - self.heading);
-        const rate : f64 = Mobs::TURN_RATE;
+        let d : f64 = wrapAngle(self.targetHeading - self.heading);
+        let rate : f64 = Mobs::TURN_RATE;
         self.heading += clampF64(d, 0.0 - rate, rate);
     }
 
@@ -418,10 +418,10 @@ class Mob : Entity, Actor, Wanders {
             // heading and the idle roll were the same number: every mob that
             // kept walking had a heading in the top two thirds of the turn,
             // so whole herds drifted the same way across the map.
-            const idleRoll : f64 = fract(rnd * 7919.0);
-            const timeRoll : f64 = fract(rnd * 104729.0);
+            let idleRoll : f64 = fract(rnd * 7919.0);
+            let timeRoll : f64 = fract(rnd * 104729.0);
             self.targetHeading = rnd * TAU;
-            const extraFrames : i32 = (timeRoll * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
+            let extraFrames : i32 = (timeRoll * (Mobs::TURN_EVERY_RAND as f64)).floorToInt() as i32;
             self.timers.turnTimer = Mobs::TURN_EVERY_MIN + extraFrames;
             if (idleRoll < Mobs::IDLE_CHANCE) {
                 self.moving = false;
@@ -431,7 +431,7 @@ class Mob : Entity, Actor, Wanders {
         }
         self.turnToward();
 
-        let spd : f64 = 0.0;
+        let mut spd : f64 = 0.0;
         if (self.timers.fleeTimer > 0) {
             spd = Mobs::FLEE_SPEED;
         } else if (self.moving) {
@@ -442,8 +442,8 @@ class Mob : Entity, Actor, Wanders {
             self.walkPhase += 0.35;
         }
 
-        const dx : f64 = self.heading.cos() * spd;
-        const dz : f64 = self.heading.sin() * spd;
+        let dx : f64 = self.heading.cos() * spd;
+        let dz : f64 = self.heading.sin() * spd;
         self.tick(world, dx, dz);
     }
 }

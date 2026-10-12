@@ -75,7 +75,7 @@ fn fullScreen(kind : ShaderKind, frag : i32[], bytes : i64) : ShaderDesc {
  * @throws PlatformError when the GPU refuses it
  */
 fn accepted(gfx : Renderer, desc : ShaderDesc, name : string) : ShaderHandle ! PlatformError {
-    const h : ShaderHandle = gfx.uploadShader(desc);
+    let h : ShaderHandle = gfx.uploadShader(desc);
     if (h.isNone()) {
         throw PlatformError("the GPU refused voxel's ${name} shader");
     }

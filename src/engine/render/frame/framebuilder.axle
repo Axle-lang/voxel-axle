@@ -99,11 +99,11 @@ class FrameBuilder {
      * @return the frame, valid until the next `build`
      */
     pub(crate) fn build(mut self, src : FrameSource, req : FrameRequest) : FrameDesc {
-        const ds : DayState = self.day.update(req.clock.dayTime);
-        const cam : Camera = cameraOf(req.view, self.lens);
+        let ds : DayState = self.day.update(req.clock.dayTime);
+        let cam : Camera = cameraOf(req.view, self.lens);
 
-        const t : i64 = monotonicNanos();
-        const inView : bool = self.skyInView(src.man, cam, req.clock);
+        let t : i64 = monotonicNanos();
+        let inView : bool = self.skyInView(src.man, cam, req.clock);
         self.clouds.march(cloudFieldAt(req.clock.seconds), ds, cam.eye, inView);
         self.marchUs += (monotonicNanos() - t) / 1000;
         self.builds++;
@@ -111,7 +111,7 @@ class FrameBuilder {
         self.readMobs(src, ds);
         self.readTorches(src.man, cam);
 
-        let topH : f64 = 1.0;
+        let mut topH : f64 = 1.0;
         if (req.aim.on) {
             topH = src.man.blockBoxHeight(req.aim.cell);
         }
@@ -150,7 +150,7 @@ class FrameBuilder {
             return false;
         }
 
-        const eye : IVec3 = ivec3(
+        let eye : IVec3 = ivec3(
             cam.eye.x.floorToInt() as i32,
             cam.eye.y.floorToInt() as i32,
             cam.eye.z.floorToInt() as i32
@@ -161,8 +161,8 @@ class FrameBuilder {
 
         // The top edge is the forward ray pitched up by half the vertical field
         // of view; its height is sin(pitch + half).
-        const edge : f64 = (cam.lens.focal * cam.lens.focal + cam.lens.hh * cam.lens.hh).sqrt();
-        const topY : f64 = (cam.sinp * cam.lens.focal + cam.cosp * cam.lens.hh) / edge;
+        let edge : f64 = (cam.lens.focal * cam.lens.focal + cam.lens.hh * cam.lens.hh).sqrt();
+        let topY : f64 = (cam.sinp * cam.lens.focal + cam.cosp * cam.lens.hh) / edge;
         return topY > 0.0;
     }
 
@@ -185,10 +185,10 @@ class FrameBuilder {
      */
     fn readMobs(mut self, src : FrameSource, ds : DayState) : void {
         self.boxCount = 0;
-        const n : i32 = src.mobs.actorCount();
+        let n : i32 = src.mobs.actorCount();
         for (i of 0..n) {
-            const a : dyn ActorVisual = src.mobs.actorAt(i);
-            const light : LinRgb = self.lightAt(src.man, a, ds.skyAmbient);
+            let a : dyn ActorVisual = src.mobs.actorAt(i);
+            let light : LinRgb = self.lightAt(src.man, a, ds.skyAmbient);
             self.model.clear();
             a.buildModel(self.model);
             for (k of 0..self.model.count()) {
@@ -215,17 +215,17 @@ class FrameBuilder {
      * @return the light, in [`Light::MIN`, 1] per channel
      */
     fn lightAt(self, man : ChunkManager, a : dyn ActorVisual, daylight : f64) : LinRgb {
-        const pos = a.pos();
-        const cell : IVec3 = ivec3(
+        let pos = a.pos();
+        let cell : IVec3 = ivec3(
             pos.x.floorToInt() as i32,
             (pos.y + 0.5).floorToInt() as i32,
             pos.z.floorToInt() as i32
         );
-        const lcurve : i64 = self.day.curve();
-        const skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
-        const blk : ChannelLevels = man.blGetW(cell);
-        const floor : f64 = Light::MIN;
-        const span : f64 = 1.0 - Light::MIN;
+        let lcurve : i64 = self.day.curve();
+        let skyF : f64 = Mem::realOf(lcurve, man.skGetW(cell)) * daylight;
+        let blk : ChannelLevels = man.blGetW(cell);
+        let floor : f64 = Light::MIN;
+        let span : f64 = 1.0 - Light::MIN;
 
         return LinRgb {
             r: floor + span * (skyF + Mem::realOf(lcurve, blk.r)),
@@ -241,13 +241,13 @@ class FrameBuilder {
      */
     fn readTorches(mut self, man : ChunkManager, cam : Camera) : void {
         self.torchCount = 0;
-        const cone : ViewCone = viewConeFor(cam);
+        let cone : ViewCone = viewConeFor(cam);
         for (slot of 0..World::SPAN * World::SPAN) {
             if (man.cols.loaded[slot] == 1
                 && chunkVisible(cone, man.cols.cxs[slot], man.cols.czs[slot])) {
-                const base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
-                const ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
-                const oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
+                let base : i32 = slot * World::MAX_TORCHES_PER_CHUNK;
+                let ox : i32 = man.cols.cxs[slot] * World::CHUNK_SIZE;
+                let oz : i32 = man.cols.czs[slot] * World::CHUNK_SIZE;
                 for (ti of 0..man.mesher.torches.tcount[slot]) {
                     self.torches[self.torchCount] = ivec3(
                         ox + (man.mesher.torches.tx[base + ti] as i32),
@@ -272,7 +272,7 @@ class FrameBuilder {
  * @return the shafts
  */
 fn sunShaftsOf(ds : DayState, cam : Camera, clouds : CloudDome) : SunShafts {
-    const none : SunShafts = SunShafts {
+    let none : SunShafts = SunShafts {
         on: false,
         sx: 0.0,
         sy: 0.0,
@@ -281,18 +281,18 @@ fn sunShaftsOf(ds : DayState, cam : Camera, clouds : CloudDome) : SunShafts {
     if (!Render::GOD_RAYS_ON || ds.sunY < 0.02) {
         return none;
     }
-    const pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
+    let pr : Projected = cam.projectDir(vec3(ds.sunX, ds.sunY, ds.sunZ));
     if (pr.cz < 0.05) {
         return none;
     }
-    const climb : f64 = (ds.sunY * 4.0).min(1.0);
-    const sunCloud : CloudSample = clouds.sample(ViewRay {
+    let climb : f64 = (ds.sunY * 4.0).min(1.0);
+    let sunCloud : CloudSample = clouds.sample(ViewRay {
         dx: ds.sunX,
         dy: ds.sunY,
         dz: ds.sunZ,
         inv: 1.0,
     });
-    const expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
+    let expo : f64 = Render::GOD_RAY_WEIGHT * ds.dirStrength * climb * (1.0 - sunCloud.a);
     if (expo < 0.002) {
         return none;
     }

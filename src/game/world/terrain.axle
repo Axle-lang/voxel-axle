@@ -20,21 +20,21 @@ use crate::configs::world::{ World };
  * @return the continentalness value in [0,1)
  */
 fn continentalness(wx : f64, wz : f64) : f64 {
-    const warpX : f64 = fbm(
+    let warpX : f64 = fbm(
         wx * Noise::WARP_SCALE,
         wz * Noise::WARP_SCALE,
         Noise::SEED + 11,
         2
     );
-    const wxx : f64 = wx + (warpX - 0.5) * 34.0;
+    let wxx : f64 = wx + (warpX - 0.5) * 34.0;
 
-    const warpZ : f64 = fbm(
+    let warpZ : f64 = fbm(
         wx * Noise::WARP_SCALE + 9.0,
         wz * Noise::WARP_SCALE + 9.0,
         Noise::SEED + 23,
         2
     );
-    const wzz : f64 = wz + (warpZ - 0.5) * 34.0;
+    let wzz : f64 = wz + (warpZ - 0.5) * 34.0;
 
     return fbm(
         wxx * Noise::CONT_SCALE,
@@ -69,13 +69,13 @@ fn erosion(wx : f64, wz : f64) : f64 {
  * @return the ridge value in [0,1)
  */
 fn ridge(wx : f64, wz : f64) : f64 {
-    const w : f64 = fbm(
+    let w : f64 = fbm(
         wx * Noise::WEIRD_SCALE + 7.0,
         wz * Noise::WEIRD_SCALE + 31.0,
         Noise::SEED + 777,
         4
     );
-    let r : f64 = 2.0 * w - 1.0;
+    let mut r : f64 = 2.0 * w - 1.0;
     if (r < 0.0) {
         r = 0.0 - r;
     }
@@ -95,26 +95,26 @@ fn ridge(wx : f64, wz : f64) : f64 {
  * @return the terrain surface height in blocks
  */
 fn terrainHeight(wx : f64, wz : f64) : f64 {
-    const cont : f64 = continentalness(wx, wz);
-    const hills : f64 = fbm(
+    let cont : f64 = continentalness(wx, wz);
+    let hills : f64 = fbm(
         wx * Noise::HILL_SCALE,
         wz * Noise::HILL_SCALE,
         Noise::SEED + 99,
         3
     );
-    const sea : f64 = World::SEA_LEVEL as f64;
-    const ocean : f64 = Noise::OCEAN_LEVEL;
+    let sea : f64 = World::SEA_LEVEL as f64;
+    let ocean : f64 = Noise::OCEAN_LEVEL;
 
     if (cont < ocean) {
         // Ocean basin: a coherent sea floor, deeper toward open water.
-        const d : f64 = (ocean - cont) / ocean;
+        let d : f64 = (ocean - cont) / ocean;
         return sea - 1.0 - d * 22.0 - hills * 4.0;
     }
 
-    const land : f64 = (cont - ocean) / (1.0 - ocean);   // 0 (coast) .. 1 (deep inland)
+    let land : f64 = (cont - ocean) / (1.0 - ocean);   // 0 (coast) .. 1 (deep inland)
 
     // Base elevation spline: gentle coast, rising to an inland plateau.
-    let base : f64 = 0.0;
+    let mut base : f64 = 0.0;
     if (land < 0.30) {
         base = (land / 0.30) * 8.0;
     } else if (land < 0.62) {
@@ -126,15 +126,15 @@ fn terrainHeight(wx : f64, wz : f64) : f64 {
     // Erosion → relief amplitude: high erosion flattens (plains/plateaus), low
     // erosion unleashes tall jagged relief. Cubed so most land is calm and only
     // the least-eroded regions become real mountains.
-    const ero : f64 = erosion(wx, wz);
-    let amp : f64 = 1.0 - ero;
+    let ero : f64 = erosion(wx, wz);
+    let mut amp : f64 = 1.0 - ero;
     amp = amp * amp * amp;
 
     // Ridged peaks & valleys, plus rolling hills, scaled by the amplitude.
-    const pv : f64 = ridge(wx, wz);
-    const mountains : f64 = pv * amp * 58.0;
-    const rolling : f64 = (hills - 0.5) * (6.0 + amp * 22.0);
-    let h : f64 = sea + 2.0 + base + mountains + rolling;
+    let pv : f64 = ridge(wx, wz);
+    let mountains : f64 = pv * amp * 58.0;
+    let rolling : f64 = (hills - 0.5) * (6.0 + amp * 22.0);
+    let mut h : f64 = sea + 2.0 + base + mountains + rolling;
     if (h < sea + 1.0) {
         h = sea + 1.0;
     }
@@ -182,7 +182,7 @@ fn humidity(wx : f64, wz : f64) : f64 {
  * @return the snow depth fraction in [0,1]
  */
 fn snowDepth(wx : f64, wz : f64) : f64 {
-    const n : f64 = fbm(
+    let n : f64 = fbm(
         wx * Noise::SNOW_SCALE + 71.0,
         wz * Noise::SNOW_SCALE - 53.0,
         Noise::SEED + 1212,
@@ -199,8 +199,8 @@ fn snowDepth(wx : f64, wz : f64) : f64 {
         return 1.0;
     }
 
-    const t : f64 = (n - 0.30) / 0.65;                   // 0..1 across the layered band
-    let lvl : i32 = 1 + ((t * 6.0).floorToInt() as i32); // 1..6
+    let t : f64 = (n - 0.30) / 0.65;                   // 0..1 across the layered band
+    let mut lvl : i32 = 1 + ((t * 6.0).floorToInt() as i32); // 1..6
     if (lvl > 6) {
         lvl = 6;
     }

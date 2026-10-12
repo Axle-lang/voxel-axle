@@ -254,27 +254,27 @@ class Player : Entity, Looks, Survives, Inventory {
             return;
         }
 
-        const inWater : bool = self.bodyInWater(world);
+        let inWater : bool = self.bodyInWater(world);
         self.inWater = inWater;
 
         // Submerged = the eye's own voxel is water, at any altitude (not the
         // absolute sea level) — this is what drives the underwater visuals and
         // drowning, so a pool you dug on a hill counts too.
-        const ex : i32 = self.pos.x.floorToInt() as i32;
-        const ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
-        const ez : i32 = self.pos.z.floorToInt() as i32;
-        const submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
+        let ex : i32 = self.pos.x.floorToInt() as i32;
+        let ey : i32 = (self.pos.y + Motion::EYE_HEIGHT).floorToInt() as i32;
+        let ez : i32 = self.pos.z.floorToInt() as i32;
+        let submerged : bool = isWater(world.worldGet(ivec3(ex, ey, ez)));
         self.headInWater = submerged;
 
-        let speed : f64 = Motion::WALK_SPEED;
+        let mut speed : f64 = Motion::WALK_SPEED;
         if (inWater) {
             speed = Motion::SWIM_SPEED;
         } else if (sprint) {
             speed = Motion::SPRINT_SPEED;
         }
 
-        let dx : f64 = (0.0 - self.siny) * fwd + self.cosy * strafe;
-        let dz : f64 = self.cosy * fwd + self.siny * strafe;
+        let mut dx : f64 = (0.0 - self.siny) * fwd + self.cosy * strafe;
+        let mut dz : f64 = self.cosy * fwd + self.siny * strafe;
         dx *= speed;
         dz *= speed;
 
@@ -317,9 +317,9 @@ class Player : Entity, Looks, Survives, Inventory {
         up : bool,
         down : bool
     ) : void {
-        const speed : f64 = sprint ? Motion::FLY_SPRINT_SPEED : Motion::FLY_SPEED;
-        const dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
-        const dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
+        let speed : f64 = sprint ? Motion::FLY_SPRINT_SPEED : Motion::FLY_SPEED;
+        let dx : f64 = ((0.0 - self.siny) * fwd + self.cosy * strafe) * speed;
+        let dz : f64 = (self.cosy * fwd + self.siny * strafe) * speed;
         self.velY = 0.0;
         self.onGround = false;
 
@@ -333,7 +333,7 @@ class Player : Entity, Looks, Survives, Inventory {
         // Climbing into a ceiling stops at it. The "don't sink" lift below is
         // for the floor: left to it, a body pushed up into a roof was lifted
         // onto the roof's top — through a ceiling of any thickness.
-        const climb : f64 = self.pos.y + Motion::FLY_VERT_SPEED;
+        let climb : f64 = self.pos.y + Motion::FLY_VERT_SPEED;
         if (up && !self.collidesAt(world, vec3(self.pos.x, climb, self.pos.z))) {
             self.pos.y = climb;
         }
@@ -344,7 +344,7 @@ class Player : Entity, Looks, Survives, Inventory {
         // Don't sink into the ground: if the body intersects blocks, lift
         // the feet onto the highest support beneath them.
         if (self.collidesAt(world, self.pos)) {
-            const top : f64 = self.supportTop(
+            let top : f64 = self.supportTop(
                 world,
                 self.pos.x,
                 self.pos.z,
@@ -361,14 +361,14 @@ class Player : Entity, Looks, Survives, Inventory {
      * Reads `headInWater`, already refreshed by `look` earlier this frame.
      */
     fn survive(mut self) : void {
-        const water : bool = self.headInWater;
+        let water : bool = self.headInWater;
         self.sinceHurt++;
 
         // Water cushions a fall; on land, falling far hurts (`impact` is
         // the distance dropped from the apex).
         if (!water && self.impact > Health::SAFE_FALL_DIST) {
-            const excess : f64 = self.impact - Health::SAFE_FALL_DIST;
-            const dmg : i32 = (excess * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
+            let excess : f64 = self.impact - Health::SAFE_FALL_DIST;
+            let dmg : i32 = (excess * Health::FALL_DAMAGE_PER_BLOCK).floorToInt() as i32;
             if (dmg > 0) {
                 self.hurt(dmg);
             }

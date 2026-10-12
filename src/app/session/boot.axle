@@ -1,5 +1,5 @@
 // boot — putting a run together: the world with the game's terrain attached,
-// the player stood on it, and the values the light thread is handed.
+// the player stood on it, and the values the light task is handed.
 
 use crate::engine::world::chunks::{ ChunkManager };
 use crate::engine::world::seams::{ LightMoment };
@@ -25,7 +25,7 @@ const TORCH_AHEAD : f64 = 3.5;
  * @return the world, with no chunk loaded yet
  */
 fn newWorld() : ChunkManager {
-    const man = new ChunkManager();
+    let man = new ChunkManager();
     man.attachGenerator(new TerrainGen(World::SPAN * World::SPAN));
     return man;
 }
@@ -44,9 +44,9 @@ fn placePlayer(man : ChunkManager, x : i32, z : i32) : Player {
     let sp : Spawn = new Spawn();
     sp.find(man, x, z);
 
-    const px = (sp.sx as f64) + 0.5;
-    const pz = (sp.sz as f64) + 0.5;
-    let player : Player = new Player(px, sp.h as f64, pz);
+    let px = (sp.sx as f64) + 0.5;
+    let pz = (sp.sz as f64) + 0.5;
+    let mut player : Player = new Player(px, sp.h as f64, pz);
     player.yaw = openYaw(man, sp.sx, sp.sz, sp.h);
     player.refresh();
 
@@ -74,19 +74,19 @@ fn loadAround(man : ChunkManager, x : f64, z : f64) : void {
  * @param p    the player whose facing the torch is placed along
  */
 fn plantTorch(man : ChunkManager, p : Player) : void {
-    const x = (p.pos.x - p.yaw.sin() * TORCH_AHEAD).floorToInt() as i32;
-    const z = (p.pos.z + p.yaw.cos() * TORCH_AHEAD).floorToInt() as i32;
+    let x = (p.pos.x - p.yaw.sin() * TORCH_AHEAD).floorToInt() as i32;
+    let z = (p.pos.z + p.yaw.cos() * TORCH_AHEAD).floorToInt() as i32;
     // The first air cell above whatever is solid there: the heightmap's own top
     // is already that cell, so the old `+ 1` hung the torch a block in the air,
     // and it ignored trees, so beside one the torch replaced the trunk.
-    const cell = ivec3(x, man.collisionHeight(x, z), z);
+    let cell = ivec3(x, man.collisionHeight(x, z), z);
 
     man.placeAt(cell, Block::Torch);
     Console::println("torch at (${cell.x}, ${cell.y}, ${cell.z})");
 }
 
 /**
- * The hour, and the column the light ring follows, for the light thread.
+ * The hour, and the column the light ring follows, for the light task.
  * @param p        the player, whose column the ring follows
  * @param dayTime  the time of day, in [0, 1)
  * @param seconds  seconds since the run began

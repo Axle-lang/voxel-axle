@@ -46,7 +46,7 @@ class TerrainMeshes {
 
     /** No slot built yet. */
     constructor() {
-        const slots : i32 = World::SPAN * World::SPAN;
+        let slots : i32 = World::SPAN * World::SPAN;
         self.build = new ChunkMeshBuild();
         self.states = malloc<SlotState>(slots);
         self.meshes = malloc<SlotMeshes>(slots);
@@ -64,12 +64,12 @@ class TerrainMeshes {
      * @param lcurve  the brightness curve (`FrameDesc.lcurve`)
      */
     pub(crate) fn refresh(mut self, gfx : Renderer, world : dyn TerrainView, eye : IVec3, lcurve : i64) : void {
-        const slots : i32 = World::SPAN * World::SPAN;
-        let budget : i32 = self.primed ? REBUILDS_PER_FRAME : slots;
+        let slots : i32 = World::SPAN * World::SPAN;
+        let mut budget : i32 = self.primed ? REBUILDS_PER_FRAME : slots;
         self.primed = true;
 
         for (slot of 0..slots) {
-            const sc : SlotChunk = world.slotChunk(slot);
+            let sc : SlotChunk = world.slotChunk(slot);
             self.rings[slot] = sc.loaded && self.isStale(world, slot, sc) ? chunkDistance(sc, eye) : 0 - 1;
         }
         // Ring by ring outward, so the budget goes to what is in front of the player
@@ -95,7 +95,7 @@ class TerrainMeshes {
      * @return true when it needs rebuilding
      */
     fn isStale(self, world : dyn TerrainView, slot : i32, sc : SlotChunk) : bool {
-        const s : SlotState = self.states[slot];
+        let s : SlotState = self.states[slot];
         return !s.built
             || s.cx != sc.cx
             || s.cz != sc.cz
@@ -112,20 +112,20 @@ class TerrainMeshes {
      * @param lcurve  the brightness curve
      */
     fn rebuild(mut self, gfx : Renderer, world : dyn TerrainView, slot : i32, lcurve : i64) : void {
-        const sc : SlotChunk = world.slotChunk(slot);
-        const state : SlotState = SlotState {
+        let sc : SlotChunk = world.slotChunk(slot);
+        let state : SlotState = SlotState {
             built: true,
             cx: sc.cx,
             cz: sc.cz,
             meshGen: world.meshGen(slot),
             lightGen: world.lightGen(slot),
         };
-        const origin : IVec3 = ivec3(sc.cx * World::CHUNK_SIZE, 0, sc.cz * World::CHUNK_SIZE);
+        let origin : IVec3 = ivec3(sc.cx * World::CHUNK_SIZE, 0, sc.cz * World::CHUNK_SIZE);
         self.build.build(world, slot, origin, lcurve);
 
         if (!self.states[slot].built) {
-            const solid : MeshHandle = gfx.uploadMesh(self.build.solid);
-            const twoSided : MeshHandle = gfx.uploadMesh(self.build.twoSided);
+            let solid : MeshHandle = gfx.uploadMesh(self.build.solid);
+            let twoSided : MeshHandle = gfx.uploadMesh(self.build.twoSided);
             if (solid.isNone() || twoSided.isNone()) {
                 gfx.releaseMesh(solid);
                 gfx.releaseMesh(twoSided);
@@ -136,9 +136,9 @@ class TerrainMeshes {
                 twoSided: meshOf(twoSided, self.build.twoSided),
             };
         } else {
-            const m : SlotMeshes = self.meshes[slot];
-            const solidOk : bool = gfx.updateMesh(m.solid.handle, self.build.solid);
-            const twoSidedOk : bool = gfx.updateMesh(m.twoSided.handle, self.build.twoSided);
+            let m : SlotMeshes = self.meshes[slot];
+            let solidOk : bool = gfx.updateMesh(m.solid.handle, self.build.solid);
+            let twoSidedOk : bool = gfx.updateMesh(m.twoSided.handle, self.build.twoSided);
             if (!solidOk || !twoSidedOk) {
                 return;
             }
@@ -159,23 +159,23 @@ class TerrainMeshes {
      * @param origin  the world point the frame's coordinates are measured from
      */
     pub(crate) fn addTo(mut self, scene : Scene, world : dyn TerrainView, atlas : TextureHandle, origin : IVec3) : void {
-        const oneSided : Material = Material::baked();
-        let bothSides : Material = Material::baked();
+        let oneSided : Material = Material::baked();
+        let mut bothSides : Material = Material::baked();
         bothSides.cullBackface = false;
 
         for (slot of 0..World::SPAN * World::SPAN) {
-            const sc : SlotChunk = world.slotChunk(slot);
-            const s : SlotState = self.states[slot];
+            let sc : SlotChunk = world.slotChunk(slot);
+            let s : SlotState = self.states[slot];
             if (sc.loaded && s.built && s.cx == sc.cx && s.cz == sc.cz) {
-                const m : SlotMeshes = self.meshes[slot];
+                let m : SlotMeshes = self.meshes[slot];
                 // The crate's `Vec3` shadows smalt's, which is reached through `Vec4`.
-                const at : Vec4 = Vec4::make(
+                let at : Vec4 = Vec4::make(
                     (sc.cx * World::CHUNK_SIZE - origin.x) as f64,
                     (0 - origin.y) as f64,
                     (sc.cz * World::CHUNK_SIZE - origin.z) as f64,
                     0.0
                 );
-                const model : Mat4 = Mat4::translation(at.xyz());
+                let model : Mat4 = Mat4::translation(at.xyz());
                 if (m.solid.vertices > 0) {
                     scene.addBounded(m.solid.handle, atlas, oneSided, model, moved(m.solid.box, at));
                 }
@@ -191,7 +191,7 @@ class TerrainMeshes {
      * @return the count
      */
     pub(crate) fn vertexCount(self) : i64 {
-        let total : i64 = 0;
+        let mut total : i64 = 0;
         for (slot of 0..World::SPAN * World::SPAN) {
             if (self.states[slot].built) {
                 total += (self.meshes[slot].solid.vertices + self.meshes[slot].twoSided.vertices) as i64;
@@ -222,8 +222,8 @@ fn meshOf(handle : MeshHandle, built : MeshBuilder) : SlotMesh {
  * @return the distance in chunks
  */
 fn chunkDistance(sc : SlotChunk, eye : IVec3) : i32 {
-    const dx : i32 = sc.cx - eye.x;
-    const dz : i32 = sc.cz - eye.z;
+    let dx : i32 = sc.cx - eye.x;
+    let dz : i32 = sc.cz - eye.z;
     return dx.max(0 - dx).max(dz.max(0 - dz));
 }
 

@@ -81,11 +81,11 @@ const FALL_TICKS : i32 = 240;
  * @return blocks travelled along that axis
  */
 fn walk(man : ChunkManager, x : f64, y : f64, z : f64, yaw : f64, alongX : bool) : f64 {
-    let p : Player = new Player(x, y, z);
+    let mut p : Player = new Player(x, y, z);
     p.yaw = yaw;
     p.refresh();
-    const sx : f64 = p.pos.x;
-    const sz : f64 = p.pos.z;
+    let sx : f64 = p.pos.x;
+    let sz : f64 = p.pos.z;
 
     for (i of 0..WALK_TICKS) {
         p.update(
@@ -124,13 +124,13 @@ fn snowyChunk(gen : TerrainGen) : (i32, i32) {
         for (cz of -d..=d) {
             for (cx of -d..=d) {
                 if (cz.abs() == d || cx.abs() == d) {
-                    const wx : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
-                    const wz : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
-                    const h : i32 = gen.colHeightWorld(wx, wz);
-                    const temp : f64 = temperature(wx as f64, wz as f64);
-                    const hum : f64 = humidity(wx as f64, wz as f64);
-                    const b : BiomeId = biomeAt(temp, hum, h);
-                    const frac : f64 = snowDepth(wx as f64, wz as f64);
+                    let wx : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+                    let wz : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+                    let h : i32 = gen.colHeightWorld(wx, wz);
+                    let temp : f64 = temperature(wx as f64, wz as f64);
+                    let hum : f64 = humidity(wx as f64, wz as f64);
+                    let b : BiomeId = biomeAt(temp, hum, h);
+                    let frac : f64 = snowDepth(wx as f64, wz as f64);
                     if (gen.coldBiome(b)
                         && h > World::SEA_LEVEL
                         && frac > 0.0
@@ -149,13 +149,13 @@ fn snowyChunk(gen : TerrainGen) : (i32, i32) {
  * @return the failure count, 0 when green
  */
 fn runPhysicsCheck() : i32 {
-    let fails : i32 = 0;
+    let mut fails : i32 = 0;
     let man : ChunkManager = new ChunkManager();
     let gen : TerrainGen = new TerrainGen(World::SPAN * World::SPAN);
     let (cx, cz) = snowyChunk(gen);
     man.attachGenerator(gen);
-    const ax : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
-    const az : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+    let ax : i32 = cx * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
+    let az : i32 = cz * World::CHUNK_SIZE + World::CHUNK_SIZE / 2;
     Console::println("ring centred on chunk (${cx}, ${cz}), column (${ax}, ${az})");
     while (man.ensureLoaded(cx, cz) > 0) {
     }
@@ -186,14 +186,14 @@ fn runPhysicsCheck() : i32 {
  * @return 1 if the heights ever differ, else 0
  */
 fn checkSprintJump(man : ChunkManager, ax : i32, az : i32) : i32 {
-    const site = levelRun(man, ax, az);
+    let site = levelRun(man, ax, az);
     if (!site.found) {
         Console::println("  sprint jump: SKIP — no level run of ${JUMP_RUN} cells in the ring");
         return 0;
     }
 
-    let walker : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
-    let sprinter : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
+    let mut walker : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
+    let mut sprinter : Player = new Player((site.x as f64) + 0.5, site.y as f64, (site.z as f64) + 0.5);
     walker.yaw = YAW_PLUS_X;
     sprinter.yaw = YAW_PLUS_X;
     walker.refresh();
@@ -204,16 +204,16 @@ fn checkSprintJump(man : ChunkManager, ax : i32, az : i32) : i32 {
         walker.update(man, 0.0, 0.0, false, false, false);
         sprinter.update(man, 0.0, 0.0, true, false, false);
     }
-    const y0 : f64 = walker.pos.y;
-    let apex : f64 = 0.0;
+    let y0 : f64 = walker.pos.y;
+    let mut apex : f64 = 0.0;
 
     for (t of 0..JUMP_TICKS) {
-        const jump : bool = t == 0;
+        let jump : bool = t == 0;
         walker.update(man, 1.0, 0.0, false, jump, false);
         sprinter.update(man, 1.0, 0.0, true, jump, false);
 
-        const walkRise : f64 = walker.pos.y - y0;
-        const sprintRise : f64 = sprinter.pos.y - y0;
+        let walkRise : f64 = walker.pos.y - y0;
+        let sprintRise : f64 = sprinter.pos.y - y0;
         if (walkRise != sprintRise) {
             Console::println("  sprint jump: FAIL at tick ${t} — walking ${walkRise}"
                 + " blocks up, sprinting ${sprintRise}");
@@ -222,7 +222,7 @@ fn checkSprintJump(man : ChunkManager, ax : i32, az : i32) : i32 {
         apex = apex.max(walkRise);
     }
 
-    const ahead : f64 = sprinter.pos.x - walker.pos.x;
+    let ahead : f64 = sprinter.pos.x - walker.pos.x;
     Console::println("  sprint jump: same height on all ${JUMP_TICKS} ticks"
         + " (apex ${apex}), the sprint ${ahead} blocks further");
     return 0;
@@ -241,14 +241,14 @@ fn checkSprintJump(man : ChunkManager, ax : i32, az : i32) : i32 {
  * @return 1 if the landing hurt, else 0
  */
 fn checkWaterBreaksFall(man : ChunkManager, ax : i32, az : i32) : i32 {
-    const site = levelRun(man, ax, az);
+    let site = levelRun(man, ax, az);
     if (!site.found) {
         Console::println("  water breaks a fall: SKIP — no open ground in the ring");
         return 0;
     }
 
     // The pool's surface is the ground's: cells site.y - POOL_DEPTH .. site.y - 1.
-    const bottom : i32 = site.y - POOL_DEPTH;
+    let bottom : i32 = site.y - POOL_DEPTH;
     for (y of bottom..site.y) {
         man.setVoxel(ivec3(site.x, y, site.z), Block::Water);
     }
@@ -258,14 +258,14 @@ fn checkWaterBreaksFall(man : ChunkManager, ax : i32, az : i32) : i32 {
     // Down into the pool, then tread water near its surface without ever
     // touching the bottom.
     for (t of 0..FALL_TICKS) {
-        const treading : bool = p.pos.y < (site.y as f64) - 1.5;
+        let treading : bool = p.pos.y < (site.y as f64) - 1.5;
         p.update(man, 0.0, 0.0, false, treading, false);
     }
 
     // Fill the pool in under the body, all but its top cell, so the body has a
     // step at most to settle. Only that landing is under test: treading water
     // costs breath, and a drowning tick is not a fall.
-    const hpInPool : i32 = p.hp;
+    let hpInPool : i32 = p.hp;
     for (y of bottom..site.y - 1) {
         man.setVoxel(ivec3(site.x, y, site.z), Block::Stone);
     }
@@ -292,7 +292,7 @@ fn checkWaterBreaksFall(man : ChunkManager, ax : i32, az : i32) : i32 {
  * @return 1 if switching back hurt, else 0
  */
 fn checkModeSwitchFall(man : ChunkManager, ax : i32, az : i32) : i32 {
-    const site = levelRun(man, ax, az);
+    let site = levelRun(man, ax, az);
     if (!site.found) {
         Console::println("  creative descent: SKIP — no open ground in the ring");
         return 0;
@@ -329,14 +329,14 @@ fn checkModeSwitchFall(man : ChunkManager, ax : i32, az : i32) : i32 {
 fn levelRun(man : ChunkManager, ax : i32, az : i32) : (found: bool, x: i32, y: i32, z: i32) {
     for (z of (az - SCAN)..=(az + SCAN)) {
         for (x of (ax - SCAN)..=(ax + SCAN - JUMP_RUN)) {
-            const y : i32 = man.collisionHeight(x, z);
-            let level : bool = y > World::SEA_LEVEL;
+            let y : i32 = man.collisionHeight(x, z);
+            let mut level : bool = y > World::SEA_LEVEL;
             for (k of 0..=JUMP_RUN) {
                 if (!level) {
                     break;
                 }
-                const ground : IVec3 = ivec3(x + k, y - 1, z);
-                const feet : IVec3 = ivec3(x + k, y, z);
+                let ground : IVec3 = ivec3(x + k, y - 1, z);
+                let feet : IVec3 = ivec3(x + k, y, z);
                 level = man.collisionHeight(x + k, z) == y
                     && man.blockBoxHeight(ground) == 1.0
                     && man.worldGet(feet) == Block::Air;
@@ -363,23 +363,23 @@ fn levelRun(man : ChunkManager, ax : i32, az : i32) : (found: bool, x: i32, y: i
  * @return 1 when the body was stopped, 0 when it climbed
  */
 fn checkSnowEdge(man : ChunkManager, ax : i32, az : i32, alongX : bool) : i32 {
-    const axis : string = alongX ? "+X" : "+Z";
+    let axis : string = alongX ? "+X" : "+Z";
     for (z of az - SCAN..=az + SCAN) {
         for (x of ax - SCAN..=ax + SCAN) {
-            const h : i32 = man.columnHeight(x, z);
-            const nx : i32 = alongX ? x + 1 : x;
-            const nz : i32 = alongX ? z : z + 1;
+            let h : i32 = man.columnHeight(x, z);
+            let nx : i32 = alongX ? x + 1 : x;
+            let nz : i32 = alongX ? z : z + 1;
             if (h > 0 && man.worldGet(ivec3(nx, h, nz)) == Block::SnowLayer
                 && !hasCollisionBox(man.worldGet(ivec3(x, h, z)))) {
-                let k : i32 = 0;
+                let mut k : i32 = 0;
                 while (k < 6 && !hasCollisionBox(man.worldGet(ivec3(x, h + k, z)))) {
                     k++;
                 }
 
                 if (k <= 3) {
-                    const deep : f64 = man.blockBoxHeight(ivec3(nx, h, nz));
-                    const yaw : f64 = alongX ? YAW_PLUS_X : YAW_PLUS_Z;
-                    const moved : f64 = walk(
+                    let deep : f64 = man.blockBoxHeight(ivec3(nx, h, nz));
+                    let yaw : f64 = alongX ? YAW_PLUS_X : YAW_PLUS_Z;
+                    let moved : f64 = walk(
                         man,
                         (x as f64) + 0.5,
                         h as f64,
@@ -422,18 +422,18 @@ fn checkSnowEdge(man : ChunkManager, ax : i32, az : i32, alongX : bool) : i32 {
  * @return the failure count
  */
 fn checkStoredBox(man : ChunkManager, ax : i32, az : i32) : i32 {
-    let seen : i32 = 0;
-    let fails : i32 = 0;
-    let z : i32 = az - SCAN;
+    let mut seen : i32 = 0;
+    let mut fails : i32 = 0;
+    let mut z : i32 = az - SCAN;
     while (z <= az + SCAN && seen < 24) {
-        let x : i32 = ax - SCAN;
+        let mut x : i32 = ax - SCAN;
         while (x <= ax + SCAN && seen < 24) {
-            const h : i32 = man.columnHeight(x, z);
-            const cell : IVec3 = ivec3(x, h, z);
+            let h : i32 = man.columnHeight(x, z);
+            let cell : IVec3 = ivec3(x, h, z);
             if (h > 0 && man.worldGet(cell) == Block::SnowLayer) {
                 seen++;
-                const level : i32 = man.blockLevel(cell);
-                const want : f64 = (level as f64) / 8.0;
+                let level : i32 = man.blockLevel(cell);
+                let want : f64 = (level as f64) / 8.0;
                 if (level < 1 || level > 8) {
                     Console::println("FAIL stored level ${level} out of range at (${x}, ${h}, ${z})");
                     fails += 1;
@@ -487,13 +487,13 @@ fn checkStoredBox(man : ChunkManager, ax : i32, az : i32) : i32 {
  * @param man  the meshed world whose faces are surveyed
  */
 fn surveyFaces(man : ChunkManager) : void {
-    const slots : i32 = World::SPAN * World::SPAN;
-    let byDir : i32[] = malloc<i32>(6);
+    let slots : i32 = World::SPAN * World::SPAN;
+    let mut byDir : i32[] = malloc<i32>(6);
     for (d of 0..6) {
         byDir[d as i64] = 0;
     }
 
-    let total : i32 = 0;
+    let mut total : i32 = 0;
     for (slot of 0..slots) {
         if (man.cols.loaded[slot] == 1) {
             total += man.mesher.faces.fcount[slot];
@@ -505,10 +505,10 @@ fn surveyFaces(man : ChunkManager) : void {
         if (man.cols.loaded[slot] != 1) {
             continue;
         }
-        const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
         for (fi of 0..man.mesher.faces.fcount[slot]) {
-            const i : i32 = base + fi;
-            const d : i64 = ((man.mesher.faces.ftile[i] as i32) / 256) as i64;
+            let i : i32 = base + fi;
+            let d : i64 = ((man.mesher.faces.ftile[i] as i32) / 256) as i64;
             byDir[d] = byDir[d] + 1;
             index.put(faceKey(man, i), i);
         }
@@ -516,30 +516,30 @@ fn surveyFaces(man : ChunkManager) : void {
 
     // Along each direction's two in-plane axes, how many faces have an
     // identical neighbour to merge onto.
-    let geom : i32 = 0;
-    let strict : i32 = 0;
+    let mut geom : i32 = 0;
+    let mut strict : i32 = 0;
     // The same, over the slots whose eight neighbours are all loaded. A slot
     // on the ring's edge meshes against chunks that are not there, and what it
     // does there is a policy, not a property of the world — so the number a
     // change must leave alone is the interior one.
-    let inner : i32 = 0;
-    let innerGeom : i32 = 0;
+    let mut inner : i32 = 0;
+    let mut innerGeom : i32 = 0;
     for (slot of 0..slots) {
         if (man.cols.loaded[slot] != 1) {
             continue;
         }
-        const interior : bool = ringInterior(man, slot);
+        let interior : bool = ringInterior(man, slot);
         if (interior) {
             inner += man.mesher.faces.fcount[slot];
         }
-        const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+        let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
         for (fi of 0..man.mesher.faces.fcount[slot]) {
-            const i : i32 = base + fi;
-            const d : i32 = (man.mesher.faces.ftile[i] as i32) / 256;
+            let i : i32 = base + fi;
+            let d : i32 = (man.mesher.faces.ftile[i] as i32) / 256;
             // The two axes that lie IN the face's plane.
-            let ax : i32 = 0;
+            let mut ax : i32 = 0;
             let az : i32 = 0;
-            let ay : i32 = 0;
+            let mut ay : i32 = 0;
             if (d == 0 || d == 1) {
                 ay = 1;
             } else if (d == 2 || d == 3) {
@@ -548,7 +548,7 @@ fn surveyFaces(man : ChunkManager) : void {
                 ax = 1;
             }
 
-            const j : i32 = index.get(neighbourKey(man, i, ax, ay, az));
+            let j : i32 = index.get(neighbourKey(man, i, ax, ay, az));
             if (j >= 0 && man.mesher.faces.ftile[j] == man.mesher.faces.ftile[i]) {
                 geom++;
                 if (interior) {
@@ -577,7 +577,7 @@ fn surveyFaces(man : ChunkManager) : void {
  * @return its ring index, in 0..World::SPAN
  */
 fn ringSlot(v : i32) : i32 {
-    let m : i32 = v % World::SPAN;
+    let mut m : i32 = v % World::SPAN;
     if (m < 0) {
         m += World::SPAN;
     }
@@ -591,11 +591,11 @@ fn ringSlot(v : i32) : i32 {
  * @return true when all eight neighbours hold the chunks beside this one
  */
 fn ringInterior(man : ChunkManager, slot : i32) : bool {
-    const cx : i32 = man.cols.cxs[slot];
-    const cz : i32 = man.cols.czs[slot];
+    let cx : i32 = man.cols.cxs[slot];
+    let cz : i32 = man.cols.czs[slot];
     for (dz of -1..=1) {
         for (dx of -1..=1) {
-            const n : i32 = ringSlot(cz + dz) * World::SPAN + ringSlot(cx + dx);
+            let n : i32 = ringSlot(cz + dz) * World::SPAN + ringSlot(cx + dx);
             if (man.cols.loaded[n] != 1
                 || man.cols.cxs[n] != cx + dx
                 || man.cols.czs[n] != cz + dz) {
@@ -613,7 +613,7 @@ fn ringInterior(man : ChunkManager, slot : i32) : bool {
  * @return the world cell the face belongs to
  */
 fn faceCell(man : ChunkManager, i : i32) : IVec3 {
-    const slot : i32 = i / World::MAX_FACES_PER_CHUNK;
+    let slot : i32 = i / World::MAX_FACES_PER_CHUNK;
     return ivec3(
         man.cols.cxs[slot] * World::CHUNK_SIZE + faceX(man.mesher.faces, i),
         man.mesher.faces.fy[i] as i32,
@@ -628,7 +628,7 @@ fn faceCell(man : ChunkManager, i : i32) : IVec3 {
  * @return the face's key in the survey index
  */
 fn faceKey(man : ChunkManager, i : i32) : i64 {
-    const c : IVec3 = faceCell(man, i);
+    let c : IVec3 = faceCell(man, i);
     return keyOf((man.mesher.faces.ftile[i] as i32) / 256, c.x, c.y, c.z);
 }
 
@@ -642,7 +642,7 @@ fn faceKey(man : ChunkManager, i : i32) : i64 {
  * @return the key a same-direction face in that neighbouring cell would carry
  */
 fn neighbourKey(man : ChunkManager, i : i32, ax : i32, ay : i32, az : i32) : i64 {
-    const c : IVec3 = faceCell(man, i);
+    let c : IVec3 = faceCell(man, i);
     return keyOf(
         (man.mesher.faces.ftile[i] as i32) / 256,
         c.x + ax,

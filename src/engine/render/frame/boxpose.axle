@@ -35,8 +35,8 @@ struct BoxPose {
  * @return its pose
  */
 fn poseOf(b : MobBox) : BoxPose {
-    const theta : f64 = b.topple * 1.5707963;
-    const st : f64 = theta.sin();
+    let theta : f64 = b.topple * 1.5707963;
+    let st : f64 = theta.sin();
     return BoxPose {
         fwdx: b.heading.cos(),
         fwdz: b.heading.sin(),
@@ -57,14 +57,14 @@ fn poseOf(b : MobBox) : BoxPose {
  * @return the corner in world space
  */
 fn boxCorner(b : MobBox, p : BoxPose, ci : i32) : Vec3 {
-    const sr : f64 = (ci & 1) != 0 ? 1.0 : 0.0 - 1.0;
-    const su : f64 = (ci & 2) != 0 ? 1.0 : 0.0 - 1.0;
-    const sf : f64 = (ci & 4) != 0 ? 1.0 : 0.0 - 1.0;
-    const lr0 : f64 = b.part.ctr.x + sr * b.part.half.x;
-    const hun : f64 = b.part.ctr.y + su * b.part.half.y;
-    const lf : f64 = b.part.ctr.z + sf * b.part.half.z;
-    const lr : f64 = lr0 * p.ct + hun * p.st;
-    const lu : f64 = hun * p.ct - lr0 * p.st + p.lift;
+    let sr : f64 = (ci & 1) != 0 ? 1.0 : 0.0 - 1.0;
+    let su : f64 = (ci & 2) != 0 ? 1.0 : 0.0 - 1.0;
+    let sf : f64 = (ci & 4) != 0 ? 1.0 : 0.0 - 1.0;
+    let lr0 : f64 = b.part.ctr.x + sr * b.part.half.x;
+    let hun : f64 = b.part.ctr.y + su * b.part.half.y;
+    let lf : f64 = b.part.ctr.z + sf * b.part.half.z;
+    let lr : f64 = lr0 * p.ct + hun * p.st;
+    let lu : f64 = hun * p.ct - lr0 * p.st + p.lift;
     return vec3(
         b.pos.x + lr * p.rgtx + lf * p.fwdx,
         b.pos.y + lu,
@@ -130,9 +130,9 @@ fn boxFaceCount(b : MobBox) : i32 {
  * @return the face
  */
 fn boxFaceOf(p : BoxPose, i : i32) : BoxFace {
-    const rn : Vec3 = rightNormal(p);
-    const un : Vec3 = upNormal(p);
-    const fwd : Vec3 = forwardNormal(p);
+    let rn : Vec3 = rightNormal(p);
+    let un : Vec3 = upNormal(p);
+    let fwd : Vec3 = forwardNormal(p);
     return match i {
         0 => quadOf(1, 5, 7, 3, rn, false),
         1 => quadOf(4, 0, 2, 6, vec3(0.0 - rn.x, 0.0 - rn.y, 0.0 - rn.z), false),
@@ -182,8 +182,8 @@ struct BoxFaceLight {
  * @return the face's tint and brightness
  */
 fn boxFaceLight(n : Vec3, light : LinRgb, hurt : bool, ds : DayState) : BoxFaceLight {
-    const shade : f64 = 0.80 + 0.20 * sunExposure(n, vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
-    const bright : f64 = shade * light.g;
+    let shade : f64 = 0.80 + 0.20 * sunExposure(n, vec3(ds.sunX, ds.sunY, ds.sunZ), 1.0);
+    let bright : f64 = shade * light.g;
     if (hurt) {
         return BoxFaceLight {
             tint: LinRgb {
@@ -212,8 +212,8 @@ fn boxFaceLight(n : Vec3, light : LinRgb, hurt : bool, ds : DayState) : BoxFaceL
  * @return its box
  */
 fn torchBox(cell : IVec3) : MobBox {
-    const halfWidth : f64 = 0.09;
-    const height : f64 = 0.55;
+    let halfWidth : f64 = 0.09;
+    let height : f64 = 0.55;
     return MobBox {
         part: BoxPart {
             ctr: vec3(0.0, height * 0.5, 0.0),

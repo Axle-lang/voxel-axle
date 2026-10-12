@@ -25,10 +25,10 @@ const MOON_RADIUS : f64 = 0.072;
  * @param frame  what it shows
  */
 fn setFrameVectors(scene : Scene, frame : FrameDesc) : void {
-    const ds : DayState = frame.day;
-    const cam : Camera = frame.cam;
-    const dome : SkyDome = skyDomeFor(ds);
-    const deck : DeckLight = frame.clouds.light;
+    let ds : DayState = frame.day;
+    let cam : Camera = frame.cam;
+    let dome : SkyDome = skyDomeFor(ds);
+    let deck : DeckLight = frame.clouds.light;
 
     // The light a face is lit by, and the constants of its arithmetic.
     scene.setUser(0, Vec4::make(ds.dirX, ds.dirY, ds.dirZ, ds.dirStrength));
@@ -114,8 +114,8 @@ fn bloomRadius() : i32 {
  * @return the disc
  */
 fn discOf(cam : Camera, x : f64, y : f64, z : f64, radius : f64) : Vec4 {
-    const pr : Projected = cam.projectDir(vec3(x, y, z));
-    const shown : bool = y > 0.0 - 0.04 && pr.cz >= 0.05;
+    let pr : Projected = cam.projectDir(vec3(x, y, z));
+    let shown : bool = y > 0.0 - 0.04 && pr.cz >= 0.05;
     return Vec4::make(
         pr.sx / (2.0 * cam.lens.hw),
         pr.sy / (2.0 * cam.lens.hh),

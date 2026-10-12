@@ -25,8 +25,8 @@ class Cow : Mob {
      * @param out  the model to append the boxes to
      */
     fn buildModel(self, out : BoxModel) : void {
-        const sw : f64 = self.walkPhase.sin() * 0.12;
-        const leg : i32 = Color::packBytes(70, 54, 44);
+        let sw : f64 = self.walkPhase.sin() * 0.12;
+        let leg : i32 = Color::packBytes(70, 54, 44);
         out.add(BoxPart {
             ctr: vec3(0.0 - 0.26, 0.20, 0.24 + sw),
             half: vec3(0.09, 0.20, 0.09),

@@ -78,8 +78,8 @@ fn toneMap(x : f64) : f64 {
     if (x <= Light::TONE_KNEE) {
         return x;
     }
-    const head : f64 = 1.0 - Light::TONE_KNEE;
-    const over : f64 = x - Light::TONE_KNEE;
+    let head : f64 = 1.0 - Light::TONE_KNEE;
+    let over : f64 = x - Light::TONE_KNEE;
     return Light::TONE_KNEE + head * over / (over + head);
 }
 
@@ -130,11 +130,11 @@ struct Gamma {
      * @return the display byte, 0..255
      */
     pub(crate) fn encode(self, x : f64) : i32 {
-        let i : i32 = (x * self.scale).floorToInt() as i32;
+        let mut i : i32 = (x * self.scale).floorToInt() as i32;
         if (i < 0) {
             i = 0;
         }
-        const top : i32 = Light::TONE_STEPS - 1;
+        let top : i32 = Light::TONE_STEPS - 1;
         if (i > top) {
             i = top;
         }
@@ -183,10 +183,10 @@ class GammaTables {
         }
 
         self.toByte = Mem::take(Light::TONE_STEPS as i64);
-        const step : f64 = Light::TONE_MAX / (Light::TONE_STEPS as f64);
+        let step : f64 = Light::TONE_MAX / (Light::TONE_STEPS as f64);
         for (j of 0..Light::TONE_STEPS) {
-            const lin : f64 = ((j as f64) + 0.5) * step;
-            const out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
+            let lin : f64 = ((j as f64) + 0.5) * step;
+            let out : f64 = linearToSrgb(toneMap(lin)) * 255.0 + 0.5;
             Mem::putByte(self.toByte, j as i64, out.floorToInt() as i32);
         }
     }

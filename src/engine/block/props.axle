@@ -360,7 +360,7 @@ struct Emission : Emissive {
      * @return emitted light (0 none, 1..15)
      */
     pub(crate) fn lightEmission(self) : i32 {
-        let m : i32 = self.r;
+        let mut m : i32 = self.r;
         if (self.g > m) {
             m = self.g;
         }

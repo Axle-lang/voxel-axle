@@ -16,7 +16,7 @@ use crate::configs::world::{ World };
  * It only ever runs on a ring that has just filled — the start of a run, or a
  * walk into new chunks — so it is a burst, not a load: the render is between
  * frames or waiting on the very chunks this is lighting. Sized for the burst,
- * not for a steady share of the machine. One share runs on the light thread
+ * not for a steady share of the machine. One share runs on the light task
  * itself; the rest are spawned.
  */
 const BAKE_WORKERS : i32 = 8;
@@ -55,13 +55,13 @@ fn nearSolid(
     // Inside the chunk the neighbours are this slot's own cells; on its
     // border one step crosses into another chunk, and only then is the
     // slot lookup paid.
-    const s : i32 = World::CHUNK_SIZE;
-    const inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
+    let s : i32 = World::CHUNK_SIZE;
+    let inner : bool = lx > 0 && lx < s - 1 && lz > 0 && lz < s - 1;
 
     for (dz of -1..=1) {
         for (dx of -1..=1) {
             for (dy of -1..=1) {
-                let b : Block = Block::Air;
+                let mut b : Block = Block::Air;
                 if (inner) {
                     b = ring.store.getVox(slot, ivec3(lx + dx, y + dy, lz + dz));
                 } else {
@@ -90,21 +90,21 @@ fn nearSolid(
  * @return the scan
  */
 fn scanShell(ring : RingView, sky : Nibble, slot : i32, cx : i32, cz : i32, top : i32) : ShellScan {
-    const s : i32 = World::CHUNK_SIZE;
-    const bits : i64 = Mem::takeZeroed(((s * s * World::HEIGHT) / 8) as i64);
-    const columns : i64 = Mem::take(((s * s) as i64) * 4);
-    let cells : i32 = 0;
+    let s : i32 = World::CHUNK_SIZE;
+    let bits : i64 = Mem::takeZeroed(((s * s * World::HEIGHT) / 8) as i64);
+    let columns : i64 = Mem::take(((s * s) as i64) * 4);
+    let mut cells : i32 = 0;
     for (lz of 0..s) {
         for (lx of 0..s) {
-            const column : i32 = lz * s + lx;
-            let first : i32 = 0 - 1;
-            let last : i32 = 0 - 1;
+            let column : i32 = lz * s + lx;
+            let mut first : i32 = 0 - 1;
+            let mut last : i32 = 0 - 1;
             for (y of 0..=top) {
-                const off : i64 = ring.store.voxIdx(slot, lx, y, lz) as i64;
+                let off : i64 = ring.store.voxIdx(slot, lx, y, lz) as i64;
                 if (ring.store.getVox(slot, ivec3(lx, y, lz)) == Block::Air
                     && nibGet(sky, off) > 0
                     && nearSolid(ring, slot, lx, y, lz, cx * s + lx, cz * s + lz)) {
-                    const bit : i32 = column * World::HEIGHT + y;
+                    let bit : i32 = column * World::HEIGHT + y;
                     Mem::putByte(bits, (bit >> 3) as i64, Mem::byteAt(bits, (bit >> 3) as i64) | (1 << (bit & 7)));
                     if (first < 0) {
                         first = y;
@@ -112,7 +112,7 @@ fn scanShell(ring : RingView, sky : Nibble, slot : i32, cx : i32, cz : i32, top 
                     last = y;
                 }
             }
-            const length : i32 = first < 0 ? 0 : last - first + 1;
+            let length : i32 = first < 0 ? 0 : last - first + 1;
             Mem::putWordOf(columns, column as i64, packRun(first.max(0), length, cells));
             cells += length;
         }
@@ -133,7 +133,7 @@ fn scanShell(ring : RingView, sky : Nibble, slot : i32, cx : i32, cz : i32, top 
  * @return true for a shell cell
  */
 fn inShell(scan : ShellScan, lx : i32, y : i32, lz : i32) : bool {
-    const bit : i32 = (lz * World::CHUNK_SIZE + lx) * World::HEIGHT + y;
+    let bit : i32 = (lz * World::CHUNK_SIZE + lx) * World::HEIGHT + y;
     return ((Mem::byteAt(scan.bits, (bit >> 3) as i64) >> (bit & 7)) & 1) != 0;
 }
 
@@ -153,7 +153,7 @@ fn freeScan(scan : ShellScan) : void {
  * @return the highest recorded face Y of any loaded slot
  */
 fn terrainCeil(ring : RingView) : i32 {
-    let ceil : i32 = 0;
+    let mut ceil : i32 = 0;
     for (j of 0..World::SPAN * World::SPAN) {
         if (ring.cols.loaded[j] == 1 && ring.store.faceTop(j) > ceil) {
             ceil = ring.store.faceTop(j);
@@ -165,18 +165,18 @@ fn terrainCeil(ring : RingView) : i32 {
 /**
  * Which slots a ray bake still owes, shared by two threads without a lock.
  *
- * A flag that the main thread raises and the light thread clears loses
+ * A flag that the main thread raises and the light task clears loses
  * requests: a slot re-flagged while its bake is running — a chunk streamed
  * into it, a block placed — is cleared when that bake finishes, and the new
  * request is never served. So each slot carries two counters instead, each
  * written by ONE thread: the main thread bumps `want` when the slot needs a
- * bake, the light thread records in `done` the `want` it read before it
+ * bake, the light task records in `done` the `want` it read before it
  * started. A slot is owed work while they differ, and a request that lands
  * mid-bake leaves them different.
  */
 class BakeQueue {
     want : i32[],  // bumped by the main thread per request
-    done : i32[],  // the request the light thread last finished, per slot
+    done : i32[],  // the request the light task last finished, per slot
 
     /**
      * Nothing owed, over a ring of `slots`.
@@ -209,7 +209,7 @@ class BakeQueue {
     }
 
     /**
-     * The request a bake about to start is serving (light thread). Read it
+     * The request a bake about to start is serving (light task). Read it
      * BEFORE baking, and hand it to `finish` after.
      * @param slot  the slot index
      * @return the request being served
@@ -219,7 +219,7 @@ class BakeQueue {
     }
 
     /**
-     * Record that the request `claimed` was served (light thread). A request
+     * Record that the request `claimed` was served (light task). A request
      * made since stays owed.
      * @param slot     the slot index
      * @param claimed  what `claim` answered before the bake
@@ -236,7 +236,7 @@ class BakeQueue {
      * @return the number of loaded slots owed
      */
     pub(crate) fn owedCount(self, ring : RingView) : i32 {
-        let n : i32 = 0;
+        let mut n : i32 = 0;
         for (j of 0..World::SPAN * World::SPAN) {
             if (ring.cols.loaded[j] == 1 && self.owed(j)) {
                 n++;

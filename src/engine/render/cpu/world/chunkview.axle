@@ -219,7 +219,7 @@ class ChunkRenderer {
      * @param k    scratch slot index to store the result in
      */
     fn toCam(self, cam : Camera, w : Vec3, k : i32) : void {
-        const c : Vec3 = cam.toCamera(w);
+        let c : Vec3 = cam.toCamera(w);
         Mem::putRealOf(self.ca.x, k, c.x);
         Mem::putRealOf(self.ca.y, k, c.y);
         Mem::putRealOf(self.ca.z, k, c.z);
@@ -314,8 +314,8 @@ class ChunkRenderer {
         if (n != 4) {
             return 0;
         }
-        const d02 : f64 = self.cornerLum(0) + self.cornerLum(2);
-        const d13 : f64 = self.cornerLum(1) + self.cornerLum(3);
+        let d02 : f64 = self.cornerLum(0) + self.cornerLum(2);
+        let d13 : f64 = self.cornerLum(1) + self.cornerLum(3);
         return d02 > d13 ? 1 : 0;
     }
 
@@ -366,15 +366,15 @@ class ChunkRenderer {
      * @return number of output vertices written to the `cb*` buffers
      */
     fn clipNear(self, nIn : i32) : i32 {
-        let outN : i32 = 0;
-        let j : i32 = nIn - 1;
+        let mut outN : i32 = 0;
+        let mut j : i32 = nIn - 1;
         for (i of 0..nIn) {
-            const zi : f64 = Mem::realOf(self.ca.z, i);
-            const zj : f64 = Mem::realOf(self.ca.z, j);
-            const inI : bool = zi >= Screen::NEAR_PLANE;
-            const inJ : bool = zj >= Screen::NEAR_PLANE;
+            let zi : f64 = Mem::realOf(self.ca.z, i);
+            let zj : f64 = Mem::realOf(self.ca.z, j);
+            let inI : bool = zi >= Screen::NEAR_PLANE;
+            let inJ : bool = zj >= Screen::NEAR_PLANE;
             if (inI != inJ) {
-                const t : f64 = (Screen::NEAR_PLANE - zj) / (zi - zj);
+                let t : f64 = (Screen::NEAR_PLANE - zj) / (zi - zj);
                 self.emitLerp(j, i, t, outN);
                 outN++;
             }
@@ -397,7 +397,7 @@ class ChunkRenderer {
      * @return the sky-AO factor in [`Light::AO_SKY_MIN`, 1]
      */
     fn skyAOFactor(self, s : CornerSample) : f64 {
-        const skyAcc : f64 = (s.sky as f64) * 0.00392157;
+        let skyAcc : f64 = (s.sky as f64) * 0.00392157;
         return Light::AO_SKY_MIN + (1.0 - Light::AO_SKY_MIN) * skyAcc;
     }
 
@@ -434,17 +434,17 @@ class ChunkRenderer {
         cam : Camera,
         phase : f64
     ) : void {
-        const x : i32 = sv.ox + faceX(sv.faces, idx);
-        const y : i32 = sv.faces.fy[idx] as i32;
-        const z : i32 = sv.oz + faceZ(sv.faces, idx);
+        let x : i32 = sv.ox + faceX(sv.faces, idx);
+        let y : i32 = sv.faces.fy[idx] as i32;
+        let z : i32 = sv.oz + faceZ(sv.faces, idx);
 
         // Unpack the direction and atlas tile from the packed ftile slot, and
         // what the face's corners stand on.
-        const packed : i32 = sv.faces.ftile[idx] as i32;
-        const dir : FaceDir = faceDirFrom(packed / 256);
-        const kind : i32 = faceKind(sv.faces, idx);
-        const isWaterFace : bool = kind == (FaceKind::Water as i32);
-        const isPartialFace : bool = kind == (FaceKind::Partial as i32);
+        let packed : i32 = sv.faces.ftile[idx] as i32;
+        let dir : FaceDir = faceDirFrom(packed / 256);
+        let kind : i32 = faceKind(sv.faces, idx);
+        let isWaterFace : bool = kind == (FaceKind::Water as i32);
+        let isPartialFace : bool = kind == (FaceKind::Partial as i32);
 
         // Cells this face spans, from the mesher's greedy merge, stretched along
         // one axis. Which axis needs no table: for every direction the corner's
@@ -455,19 +455,19 @@ class ChunkRenderer {
         // The extent is wanted whole HERE, for the culling centre and the
         // distance cut, which measure the surface that is actually there; the
         // span loop below is what decides how many quads it is drawn as.
-        const run : i32 = faceRun(sv.faces, idx);
-        const runF : f64 = run as f64;
-        let runX : f64 = 1.0;
-        let runZ : f64 = 1.0;
+        let run : i32 = faceRun(sv.faces, idx);
+        let runF : f64 = run as f64;
+        let mut runX : f64 = 1.0;
+        let mut runZ : f64 = 1.0;
         if (dir == FaceDir::PosX || dir == FaceDir::NegX) {
             runZ = runF;
         } else {
             runX = runF;
         }
 
-        let nx : f64 = 0.0;
-        let ny : f64 = 0.0;
-        let nz : f64 = 0.0;
+        let mut nx : f64 = 0.0;
+        let mut ny : f64 = 0.0;
+        let mut nz : f64 = 0.0;
         match dir {
             FaceDir::PosX => {
                 nx = 1.0;
@@ -491,12 +491,12 @@ class ChunkRenderer {
 
         // The centre of the MERGED quad, so back-face culling and the distance
         // cut both measure the thing that is actually drawn.
-        const fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
-        const fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
-        const fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
-        const vx : f64 = cam.eye.x - fcx;
-        const vy : f64 = cam.eye.y - fcy;
-        const vz : f64 = cam.eye.z - fcz;
+        let fcx : f64 = (x as f64) + 0.5 * runX + nx * 0.5;
+        let fcy : f64 = (y as f64) + 0.5 + ny * 0.5;
+        let fcz : f64 = (z as f64) + 0.5 * runZ + nz * 0.5;
+        let vx : f64 = cam.eye.x - fcx;
+        let vy : f64 = cam.eye.y - fcy;
+        let vz : f64 = cam.eye.z - fcz;
         if (vx * vx + vz * vz > Render::DRAW_DIST * Render::DRAW_DIST) {
             return;
         }
@@ -506,20 +506,20 @@ class ChunkRenderer {
         // back-face culls. Without this the raised partial top back-face culls
         // the instant the eye drops below its plane and the top "disappears as
         // you descend" — worse the deeper the block (higher plane).
-        const facing : f64 = vx * nx + vy * ny + vz * nz;
+        let facing : f64 = vx * nx + vy * ny + vz * nz;
         if (!isWaterFace && facing <= 0.0 && (ny <= 0.0 || !isPartialFace)) {
             return;
         }
 
         // Flow animation: flowing water scrolls its texture along the flow the
         // mesher recorded (toward the lower level). Still lakes have none.
-        const tscroll : f64 = phase * Water::FLOW_SPEED;
-        const flowU : f64 = (sv.faces.fflow[idx * 2] as f64) * tscroll;
-        const flowV : f64 = (sv.faces.fflow[idx * 2 + 1] as f64) * tscroll;
+        let tscroll : f64 = phase * Water::FLOW_SPEED;
+        let flowU : f64 = (sv.faces.fflow[idx * 2] as f64) * tscroll;
+        let flowV : f64 = (sv.faces.fflow[idx * 2 + 1] as f64) * tscroll;
 
         // Face-direction (Lambert) shading + the directional sun shadow, shared
         // by all 4 corners (computed once before the per-corner light below).
-        let bright : FaceLight = self.day.shade(vec3(nx, ny, nz));
+        let mut bright : FaceLight = self.day.shade(vec3(nx, ny, nz));
         if (isWaterFace && facing <= 0.0) {
             // underside / far face of water, dimmer on both counts
             bright = FaceLight {
@@ -535,9 +535,9 @@ class ChunkRenderer {
         // The shadow-probe cell is just the neighbour in the face-normal
         // direction; dir already carries that, so match on it instead of
         // re-deriving the offset from the float normal three times.
-        let sbx : i32 = x;
-        let sby : i32 = y;
-        let sbz : i32 = z;
+        let mut sbx : i32 = x;
+        let mut sby : i32 = y;
+        let mut sbz : i32 = z;
         match dir {
             FaceDir::PosX => { sbx = x + 1; }
             FaceDir::NegX => { sbx = x - 1; }
@@ -546,12 +546,12 @@ class ChunkRenderer {
             FaceDir::PosZ => { sbz = z + 1; }
             _ => { sbz = z - 1; }
         }
-        const shadowCell : IVec3 = ivec3(sbx, sby, sbz);
+        let shadowCell : IVec3 = ivec3(sbx, sby, sbz);
 
         // `bright` is now the pure Lambert (sun-direction) term; the cast shadow
         // is applied PER CORNER below (smooth, face-independent), not flattened
         // over the whole face here — that's what removes the block staircase.
-        const shade : FaceShade = FaceShade {
+        let shade : FaceShade = FaceShade {
             mesh: sv.faces,
             idx,
             tile: packed % 256,
@@ -574,16 +574,16 @@ class ChunkRenderer {
         // So the run is cut where the shadow is NOT flat along it, and only
         // there: most of the world is evenly lit or evenly shaded, and those runs
         // still go out whole, which is what the merge was for.
-        const step : i32 = self.shadowStep(world, shade, shadowCell, run);
-        let start : i32 = 0;
+        let step : i32 = self.shadowStep(world, shade, shadowCell, run);
+        let mut start : i32 = 0;
         while (start < run) {
-            let len : i32 = step;
+            let mut len : i32 = step;
             if (start + len > run) {
                 len = run - start;
             }
 
-            let advX : i32 = 0;
-            let advZ : i32 = 0;
+            let mut advX : i32 = 0;
+            let mut advZ : i32 = 0;
             if (shade.naxis == 0) {
                 advZ = start;
             } else {
@@ -630,17 +630,17 @@ class ChunkRenderer {
             return run;
         }
 
-        let dx : i32 = 1;
-        let dz : i32 = 0;
+        let mut dx : i32 = 1;
+        let mut dz : i32 = 0;
         if (fs.naxis == 0) {
             dx = 0;
             dz = 1;
         }
 
-        let lo : i32 = 255;
-        let hi : i32 = 0;
+        let mut lo : i32 = 255;
+        let mut hi : i32 = 0;
         for (i of 0..run) {
-            const v : i32 = world.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
+            let v : i32 = world.sunlitGet(ivec3(cell.x + dx * i, cell.y, cell.z + dz * i));
             if (v < lo) {
                 lo = v;
             }
@@ -668,45 +668,45 @@ class ChunkRenderer {
      * @param sp     this span's origin, length and texture offset
      */
     fn emitSpan(mut self, world : dyn TerrainView, cam : Camera, fs : FaceShade, sp : FaceSpan) : void {
-        const x : i32 = sp.cell.x;
-        const y : i32 = sp.cell.y;
-        const z : i32 = sp.cell.z;
-        const nx : f64 = fs.normal.x;
-        const ny : f64 = fs.normal.y;
-        const nz : f64 = fs.normal.z;
+        let x : i32 = sp.cell.x;
+        let y : i32 = sp.cell.y;
+        let z : i32 = sp.cell.z;
+        let nx : f64 = fs.normal.x;
+        let ny : f64 = fs.normal.y;
+        let nz : f64 = fs.normal.z;
 
         // Cells the span spans, per axis: the run on the one it runs along, one
         // on the other. As integers, because the corner's world column is one of
         // them and the far end of the run is the other minus one.
-        let runXi : i32 = 1;
-        let runZi : i32 = 1;
+        let mut runXi : i32 = 1;
+        let mut runZi : i32 = 1;
         if (fs.naxis == 0) {
             runZi = sp.run;
         } else {
             runXi = sp.run;
         }
-        const runF : f64 = sp.run as f64;
+        let runF : f64 = sp.run as f64;
 
         // Load the 4 corners into camera space + their tile UVs, and bake each
         // corner's light colour (smooth light + AO + per-corner soft shadow) into
         // the car/cag/cab inputs so clipNear interpolates colour like it does UV.
         // Each corner stands at the height the mesher recorded for it: the top
         // of the cell, a partial block's box, or the sloped water surface.
-        const di : i32 = fs.dir as i32;
-        const q : i32 = di * 4;
+        let di : i32 = fs.dir as i32;
+        let q : i32 = di * 4;
         for (k of 0..4) {
-            const b : i32 = (di * 4 + k) * 3;
-            const oxv : i32 = self.geom.coff[b];
-            const oyv : i32 = self.geom.coff[b + 1];
-            const ozv : i32 = self.geom.coff[b + 2];
+            let b : i32 = (di * 4 + k) * 3;
+            let oxv : i32 = self.geom.coff[b];
+            let oyv : i32 = self.geom.coff[b + 1];
+            let ozv : i32 = self.geom.coff[b + 2];
 
             // The corner's own world column — its block offset stretched along
             // the run, so the eye vector reads the column the corner actually
             // sits over, not the span's origin.
-            const cwx : i32 = x + oxv * runXi;
-            const cwz : i32 = z + ozv * runZi;
-            const top : i32 = fs.mesh.ftop[fs.idx * 4 + k] as i32;
-            const cornerY : f64 = (y as f64) + topHeight(top);
+            let cwx : i32 = x + oxv * runXi;
+            let cwz : i32 = z + ozv * runZi;
+            let top : i32 = fs.mesh.ftop[fs.idx * 4 + k] as i32;
+            let cornerY : f64 = (y as f64) + topHeight(top);
             self.toCam(cam, vec3(cwx as f64, cornerY, cwz as f64), k);
             Mem::putRealOf(self.ca.u, k, (self.geom.uvu[q + k] as f64) * runF + sp.uOff + fs.flowU);
             Mem::putRealOf(self.ca.v, k, (self.geom.uvv[q + k] as f64) + fs.flowV);
@@ -716,29 +716,29 @@ class ChunkRenderer {
             // three cells meeting there. On a merged quad that cell is the far
             // end of the run, not the face's origin — a term sampled at the
             // origin would be spread over eight blocks of surface.
-            const probe : CornerProbe = cornerProbe(
+            let probe : CornerProbe = cornerProbe(
                 sp.probe,
                 ivec3(oxv, oyv, ozv),
                 fs.naxis,
                 runXi - 1,
                 runZi - 1
             );
-            const smp : CornerSample = world.cornerSample(probe);
+            let smp : CornerSample = world.cornerSample(probe);
 
-            const visK : f64 = (smp.sun as f64) * 0.00392157;
-            const keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
-            const brightK : f64 = fs.light.exposure(keepK);
+            let visK : f64 = (smp.sun as f64) * 0.00392157;
+            let keepK : f64 = Light::SHADOW_KEEP + (1.0 - Light::SHADOW_KEEP) * visK;
+            let brightK : f64 = fs.light.exposure(keepK);
 
             // Per-corner smooth light: the four nibbles the mesher averaged —
             // sky, then block red / green / blue — each through the exponential
             // curve (sky dimmed by daylight), with the corner's shaded
             // brightness and its ambient occlusion.
-            const lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
-            const lb0 : i32 = Mem::byteAt(fs.mesh.flight, lo);
-            const lb1 : i32 = Mem::byteAt(fs.mesh.flight, lo + 1);
-            const aok : i32 = (Mem::byteAt(fs.mesh.fao, fs.idx as i64) >> (2 * k)) & 3;
-            const aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
-            const lit : CornerLight = CornerLight {
+            let lo : i64 = ((fs.idx * 4 + k) * 2) as i64;
+            let lb0 : i32 = Mem::byteAt(fs.mesh.flight, lo);
+            let lb1 : i32 = Mem::byteAt(fs.mesh.flight, lo + 1);
+            let aok : i32 = (Mem::byteAt(fs.mesh.fao, fs.idx as i64) >> (2 * k)) & 3;
+            let aoFac : f64 = 1.0 - Light::AO_STRENGTH * ((3 - aok) as f64) * 0.3333333;
+            let lit : CornerLight = CornerLight {
                 sky: Mem::realOf(self.lcurve, (lb0 >> 4) & 0xF) * self.skyAOFactor(smp),
                 block: LinRgb {
                     r: Mem::realOf(self.lcurve, lb0 & 0xF),
@@ -757,7 +757,7 @@ class ChunkRenderer {
             // a good third BEYOND the warmest tint the config names. That is
             // where the neon came from — sunlit grass was being multiplied by a
             // blue of 0.56 where the table says 0.86.
-            let cc : LinRgb = lit.colour(skyTint(
+            let mut cc : LinRgb = lit.colour(skyTint(
                 fs.light.directShare(keepK),
                 LinRgb {
                     r: self.day.dirTintR,
@@ -769,10 +769,10 @@ class ChunkRenderer {
 
             // View vector from this corner to the eye. Both reflections want it:
             // water's sharp glint, and the broad sheen every other surface has.
-            let vx : f64 = cam.eye.x - (cwx as f64);
-            let vy : f64 = cam.eye.y - cornerY;
-            let vz : f64 = cam.eye.z - (cwz as f64);
-            let vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
+            let mut vx : f64 = cam.eye.x - (cwx as f64);
+            let mut vy : f64 = cam.eye.y - cornerY;
+            let mut vz : f64 = cam.eye.z - (cwz as f64);
+            let mut vl : f64 = (vx * vx + vy * vy + vz * vz).sqrt();
             if (vl < 0.0001) {
                 vl = 0.0001;
             }
@@ -783,32 +783,32 @@ class ChunkRenderer {
             if (fs.isWater) {
                 // Sun glint: half-vector specular, cos^32, gated by sun visibility
                 // and daylight. A strong warm multiplier that bloom turns to gold.
-                const hx : f64 = vx + self.day.sunX;
-                const hy : f64 = vy + self.day.sunY;
-                const hz : f64 = vz + self.day.sunZ;
-                let hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
+                let hx : f64 = vx + self.day.sunX;
+                let hy : f64 = vy + self.day.sunY;
+                let hz : f64 = vz + self.day.sunZ;
+                let mut hl : f64 = (hx * hx + hy * hy + hz * hz).sqrt();
                 if (hl < 0.0001) {
                     hl = 0.0001;
                 }
-                let ndh : f64 = (nx * hx + ny * hy + nz * hz) / hl;
+                let mut ndh : f64 = (nx * hx + ny * hy + nz * hz) / hl;
                 if (ndh < 0.0) {
                     ndh = 0.0;
                 }
-                const s2 : f64 = ndh * ndh;
-                const s4 : f64 = s2 * s2;
-                const s8 : f64 = s4 * s4;
-                const s16 : f64 = s8 * s8;
-                const spec : f64 = s16 * s16 * visK * self.day.dirStrength * Water::SPEC_STRENGTH;
+                let s2 : f64 = ndh * ndh;
+                let s4 : f64 = s2 * s2;
+                let s8 : f64 = s4 * s4;
+                let s16 : f64 = s8 * s8;
+                let spec : f64 = s16 * s16 * visK * self.day.dirStrength * Water::SPEC_STRENGTH;
 
                 // Fresnel: brighter at grazing view angles (sky-reflection sheen).
-                let ndv : f64 = nx * vx + ny * vy + nz * vz;
+                let mut ndv : f64 = nx * vx + ny * vy + nz * vz;
                 if (ndv < 0.0) {
                     ndv = 0.0;
                 }
-                const om : f64 = 1.0 - ndv;
-                const om2 : f64 = om * om;
-                const fres : f64 = Water::F0 + (1.0 - Water::F0) * om2 * om2 * om;
-                const fboost : f64 = 1.0 + fres * Water::FRESNEL_STRENGTH;
+                let om : f64 = 1.0 - ndv;
+                let om2 : f64 = om * om;
+                let fres : f64 = Water::F0 + (1.0 - Water::F0) * om2 * om2 * om;
+                let fboost : f64 = 1.0 + fres * Water::FRESNEL_STRENGTH;
                 cc.r = cc.r * fboost * (1.0 + spec * 1.10);
                 cc.g = cc.g * fboost * (1.0 + spec * 1.00);
                 cc.b = cc.b * fboost * (1.0 + spec * 0.72);
@@ -817,13 +817,13 @@ class ChunkRenderer {
                 // colour rather than multiplied into the texel's, so a surface in
                 // full sun moves toward the light instead of simply becoming more
                 // of itself — which is what stops grass at noon reading as paint.
-                const sheen : f64 = sunSheen(
+                let sheen : f64 = sunSheen(
                     fs.normal,
                     vec3(vx, vy, vz),
                     vec3(self.day.dirX, self.day.dirY, self.day.dirZ),
                     visK
                 );
-                const sh : f64 = sheen * self.day.dirStrength;
+                let sh : f64 = sheen * self.day.dirStrength;
                 cc.r += sh * self.day.dirTintR;
                 cc.g += sh * self.day.dirTintG;
                 cc.b += sh * self.day.dirTintB;
@@ -834,7 +834,7 @@ class ChunkRenderer {
         }
 
         // Clip against the near plane, then project the surviving polygon.
-        const n : i32 = self.clipNear(4);
+        let n : i32 = self.clipNear(4);
         if (n < 3) {
             return;
         }
@@ -844,7 +844,7 @@ class ChunkRenderer {
         // Per-corner light colour was baked into car/cag/cab and carried through
         // clipNear into cbr/cbg/cbb — the rasteriser interpolates it per pixel.
         for (v of 0..n) {
-            const proj : Projected = cam.screenOf(vec3(
+            let proj : Projected = cam.screenOf(vec3(
                 Mem::realOf(self.cb.x, v),
                 Mem::realOf(self.cb.y, v),
                 Mem::realOf(self.cb.z, v)
@@ -861,12 +861,12 @@ class ChunkRenderer {
         // A merged quad tiles its texture, which is the same wrap the scrolled
         // water surface asks for — and a span cut out of one carries a texture
         // offset, so it wraps for the same reason even when it is one cell wide.
-        const wf : i32 = fs.wrap ? 1 : 0;
-        const o : i32 = self.fanOrigin(n);
+        let wf : i32 = fs.wrap ? 1 : 0;
+        let o : i32 = self.fanOrigin(n);
         for (t of 1..n - 1) {
             if (self.triN < Render::TRI_QUEUE_CAP) {
-                const i1 : i32 = (o + t) % n;
-                const i2 : i32 = (o + t + 1) % n;
+                let i1 : i32 = (o + t) % n;
+                let i2 : i32 = (o + t + 1) % n;
                 // The column span, taken here where the projection just ran,
                 // so the fill's band test costs a comparison instead of a
                 // whole triangle setup it then throws away.
@@ -950,19 +950,19 @@ class ChunkRenderer {
         first : i32,
         stride : i32
     ) : void {
-        const slots : i32 = World::SPAN * World::SPAN;
-        const cone : ViewCone = viewConeFor(cam);
-        const faces : FaceMesh = world.faces();
-        let slot : i32 = first;
+        let slots : i32 = World::SPAN * World::SPAN;
+        let cone : ViewCone = viewConeFor(cam);
+        let faces : FaceMesh = world.faces();
+        let mut slot : i32 = first;
         while (slot < slots) {
-            const sc : SlotChunk = world.slotChunk(slot);
+            let sc : SlotChunk = world.slotChunk(slot);
             if (sc.loaded && chunkVisible(cone, sc.cx, sc.cz)) {
-                const sv : SlotView = SlotView {
+                let sv : SlotView = SlotView {
                     faces,
                     ox: sc.cx * World::CHUNK_SIZE,
                     oz: sc.cz * World::CHUNK_SIZE,
                 };
-                const base : i32 = slot * World::MAX_FACES_PER_CHUNK;
+                let base : i32 = slot * World::MAX_FACES_PER_CHUNK;
                 for (fi of 0..faces.fcount[slot]) {
                     self.renderFace(world, sv, base + fi, cam, phase);
                 }
@@ -982,9 +982,9 @@ class ChunkRenderer {
      * @param bx1  exclusive right screen column of this band
      */
     pub(crate) fn rasterizeBand(self, fb : FrameBuf, bx0 : i32, bx1 : i32) : void {
-        const band : Band = Band { x0: bx0, x1: bx1 };
+        let band : Band = Band { x0: bx0, x1: bx1 };
         for (i of 0..self.triN) {
-            const tri : RasterTri = self.triBuf[i];
+            let tri : RasterTri = self.triBuf[i];
             // The band owns columns [bx0, bx1); a triangle that touches none
             // of them is done with here, before the setup it would not use.
             if ((tri.maxx as i32) >= bx0 && (tri.minx as i32) < bx1) {
@@ -994,24 +994,3 @@ class ChunkRenderer {
     }
 }
 
-/**
- * Worker job: project / clip / light one worker's share of the chunks.
- * @param r       the worker whose triangle queue the share is built into
- * @param world   the loaded chunks, their baked faces and their light
- * @param cam     the camera (eye + orientation + projection width)
- * @param phase   animation time phase (scrolls flowing-water textures)
- * @param first   the first slot this worker takes
- * @param stride  how many workers there are
- * @return always 0 — the job's result is the filled queue on `r`
- */
-fn buildSlotsJob(
-    r : ChunkRenderer,
-    world : dyn TerrainView,
-    cam : Camera,
-    phase : f64,
-    first : i32,
-    stride : i32
-) : i32 {
-    r.buildSlots(world, cam, phase, first, stride);
-    return 0;
-}

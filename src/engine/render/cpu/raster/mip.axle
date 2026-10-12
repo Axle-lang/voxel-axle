@@ -22,7 +22,7 @@ use crate::configs::atlas::{ Atlas };
  * @return the averaged channel value in 0..255.
  */
 fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
-    const sum : f64 = gam.decode(a, shift)
+    let sum : f64 = gam.decode(a, shift)
         + gam.decode(b, shift)
         + gam.decode(c, shift)
         + gam.decode(d, shift);
@@ -36,8 +36,8 @@ fn avg4(gam : Gamma, a : i32, b : i32, c : i32, d : i32, shift : i32) : i32 {
  * @return the starting texel offset.
  */
 fn mipLevelOffset(level : i32) : i32 {
-    let off : i32 = 0;
-    let sz : i32 = Atlas::TILE_PX;
+    let mut off : i32 = 0;
+    let mut sz : i32 = Atlas::TILE_PX;
     for (l of 0..level) {
         off += Atlas::TILE_COUNT * sz * sz;
         sz /= 2;
@@ -51,7 +51,7 @@ fn mipLevelOffset(level : i32) : i32 {
  * @return the tile side length in texels.
  */
 fn mipLevelSize(level : i32) : i32 {
-    let sz : i32 = Atlas::TILE_PX;
+    let mut sz : i32 = Atlas::TILE_PX;
     for (l of 0..level) {
         sz /= 2;
     }
@@ -78,30 +78,30 @@ fn mipChainTexels() : i32 {
  * @param gam    the colour space the box filter averages through.
  */
 fn buildMipChain(atlas : i64, mips : i64, gam : Gamma) : void {
-    const n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
+    let n0 : i32 = Atlas::TILE_COUNT * Atlas::TILE_PX * Atlas::TILE_PX;
     for (i of 0..n0) {
         Mem::putWordOf(mips, i, Mem::dwordAt(atlas, (i as i64) * 4));
     }
 
-    let sz : i32 = Atlas::TILE_PX / 2;
-    let psz : i32 = Atlas::TILE_PX;
+    let mut sz : i32 = Atlas::TILE_PX / 2;
+    let mut psz : i32 = Atlas::TILE_PX;
     for (level of 1..Atlas::MIP_LEVELS) {
-        const base : i32 = mipLevelOffset(level);
-        const pbase : i32 = mipLevelOffset(level - 1);
+        let base : i32 = mipLevelOffset(level);
+        let pbase : i32 = mipLevelOffset(level - 1);
         for (t of 0..Atlas::TILE_COUNT) {
             for (ty of 0..sz) {
                 for (tx of 0..sz) {
-                    const i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
-                    const i01 : i32 = i00 + 1;
-                    const i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
-                    const i11 : i32 = i10 + 1;
-                    const c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
-                    const c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
-                    const c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
-                    const c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
-                    const rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
-                    const gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
-                    const bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
+                    let i00 : i32 = pbase + (t * psz + ty * 2) * psz + tx * 2;
+                    let i01 : i32 = i00 + 1;
+                    let i10 : i32 = pbase + (t * psz + ty * 2 + 1) * psz + tx * 2;
+                    let i11 : i32 = i10 + 1;
+                    let c00 : i32 = Mem::dwordAt(mips, (i00 as i64) * 4);
+                    let c01 : i32 = Mem::dwordAt(mips, (i01 as i64) * 4);
+                    let c10 : i32 = Mem::dwordAt(mips, (i10 as i64) * 4);
+                    let c11 : i32 = Mem::dwordAt(mips, (i11 as i64) * 4);
+                    let rr : i32 = avg4(gam, c00, c01, c10, c11, 16);
+                    let gg : i32 = avg4(gam, c00, c01, c10, c11, 8);
+                    let bb : i32 = avg4(gam, c00, c01, c10, c11, 0);
                     Mem::putWordOf(
                         mips,
                         base + (t * sz + ty) * sz + tx,
@@ -162,13 +162,13 @@ struct TileLevel {
  * @return the weighted sample, as linear light
  */
 fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : LinRgb {
-    const tmax : i32 = lvl.size - 1;
-    let tx0 : i32 = fu.floorToInt() as i32;
-    let ty0 : i32 = fv.floorToInt() as i32;
-    const fx : f64 = fu - (tx0 as f64);
-    const fy : f64 = fv - (ty0 as f64);
-    let tx1 : i32 = tx0 + 1;
-    let ty1 : i32 = ty0 + 1;
+    let tmax : i32 = lvl.size - 1;
+    let mut tx0 : i32 = fu.floorToInt() as i32;
+    let mut ty0 : i32 = fv.floorToInt() as i32;
+    let fx : f64 = fu - (tx0 as f64);
+    let fy : f64 = fv - (ty0 as f64);
+    let mut tx1 : i32 = tx0 + 1;
+    let mut ty1 : i32 = ty0 + 1;
     if (wrap) {
         tx0 &= tmax;
         tx1 &= tmax;
@@ -181,19 +181,19 @@ fn bilinearLin(lvl : TileLevel, fu : f64, fv : f64, wrap : bool, gam : Gamma) : 
         ty1 = clampI32(ty1, 0, tmax);
     }
 
-    const rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
-    const rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
-    const c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
-    const c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
-    const c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
-    const c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
+    let rw0 : i32 = lvl.base + (lvl.row + ty0) * lvl.size;
+    let rw1 : i32 = lvl.base + (lvl.row + ty1) * lvl.size;
+    let c00 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx0) as i64) * 4);
+    let c10 : i32 = Mem::dwordAt(lvl.mips, ((rw0 + tx1) as i64) * 4);
+    let c01 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx0) as i64) * 4);
+    let c11 : i32 = Mem::dwordAt(lvl.mips, ((rw1 + tx1) as i64) * 4);
 
-    const mfx : f64 = 1.0 - fx;
-    const mfy : f64 = 1.0 - fy;
-    const w00 : f64 = mfx * mfy;
-    const w10 : f64 = fx * mfy;
-    const w01 : f64 = mfx * fy;
-    const w11 : f64 = fx * fy;
+    let mfx : f64 = 1.0 - fx;
+    let mfy : f64 = 1.0 - fy;
+    let w00 : f64 = mfx * mfy;
+    let w10 : f64 = fx * mfy;
+    let w01 : f64 = mfx * fy;
+    let w11 : f64 = fx * fy;
     return LinRgb {
         r: gam.decode(c00, 16) * w00
             + gam.decode(c10, 16) * w10

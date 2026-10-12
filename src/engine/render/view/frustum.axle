@@ -65,15 +65,15 @@ struct ViewCone {
 fn viewConeFor(cam : Camera) : ViewCone {
     // The camera basis. Forward carries the pitch; right lies in the ground
     // plane, there being no roll; up is the third of the frame.
-    const fx : f64 = (0.0 - cam.siny) * cam.cosp;
-    const fy : f64 = cam.sinp;
-    const fz : f64 = cam.cosy * cam.cosp;
-    const rx : f64 = cam.cosy;
-    const rz : f64 = cam.siny;
-    const ux : f64 = cam.siny * cam.sinp;
-    const uy : f64 = cam.cosp;
-    const uz : f64 = (0.0 - cam.cosy) * cam.sinp;
-    const lens : Lens = cam.lens;
+    let fx : f64 = (0.0 - cam.siny) * cam.cosp;
+    let fy : f64 = cam.sinp;
+    let fz : f64 = cam.cosy * cam.cosp;
+    let rx : f64 = cam.cosy;
+    let rz : f64 = cam.siny;
+    let ux : f64 = cam.siny * cam.sinp;
+    let uy : f64 = cam.cosp;
+    let uz : f64 = (0.0 - cam.cosy) * cam.sinp;
+    let lens : Lens = cam.lens;
 
     return ViewCone {
         eyeX: cam.eye.x,
@@ -132,9 +132,9 @@ fn boxOutside(
     hiy : f64,
     hiz : f64
 ) : bool {
-    const x : f64 = pl.nx > 0.0 ? hix : lox;
-    const y : f64 = pl.ny > 0.0 ? hiy : loy;
-    const z : f64 = pl.nz > 0.0 ? hiz : loz;
+    let x : f64 = pl.nx > 0.0 ? hix : lox;
+    let y : f64 = pl.ny > 0.0 ? hiy : loy;
+    let z : f64 = pl.nz > 0.0 ? hiz : loz;
     return pl.nx * x + pl.ny * y + pl.nz * z < 0.0;
 }
 
@@ -152,19 +152,19 @@ fn boxOutside(
  * @return true if the chunk should be drawn
  */
 fn chunkVisible(cone : ViewCone, cx : i32, cz : i32) : bool {
-    const s : f64 = World::CHUNK_SIZE as f64;
-    const lox : f64 = (cx as f64) * s - cone.eyeX;
-    const loz : f64 = (cz as f64) * s - cone.eyeZ;
-    const hix : f64 = lox + s;
-    const hiz : f64 = loz + s;
-    const mx : f64 = lox + s * 0.5;
-    const mz : f64 = loz + s * 0.5;
+    let s : f64 = World::CHUNK_SIZE as f64;
+    let lox : f64 = (cx as f64) * s - cone.eyeX;
+    let loz : f64 = (cz as f64) * s - cone.eyeZ;
+    let hix : f64 = lox + s;
+    let hiz : f64 = loz + s;
+    let mx : f64 = lox + s * 0.5;
+    let mz : f64 = loz + s * 0.5;
     if (mx * mx + mz * mz > cone.far * cone.far) {
         return false;
     }
 
-    const loy : f64 = 0.0 - cone.eyeY;
-    const hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
+    let loy : f64 = 0.0 - cone.eyeY;
+    let hiy : f64 = (World::HEIGHT as f64) - cone.eyeY;
     if (boxOutside(cone.near, lox, loy, loz, hix, hiy, hiz)) {
         return false;
     }
